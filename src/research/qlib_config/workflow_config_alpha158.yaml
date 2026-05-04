@@ -1,0 +1,66 @@
+# Qlib Alpha158 + LightGBM 基线工作流配置
+# 参考: Qlib 官方 examples/benchmarks/LightGBM/workflow_config_lightgbm_Alpha158.yaml
+
+qlib_init:
+    provider_uri: "qlib_data/cn_data"
+    region: cn
+
+market: &market csi300
+
+data_handler_config: &data_handler_config
+    start_time: 2019-01-01
+    end_time: 2025-12-31
+    fit_start_time: 2019-01-01
+    fit_end_time: 2022-12-31
+    instruments: *market
+
+task:
+    model:
+        class: LGBModel
+        module_path: qlib.contrib.model.gbdt
+        kwargs:
+            loss: mse
+            learning_rate: 0.05
+            num_leaves: 256
+            feature_fraction: 0.8
+            bagging_fraction: 0.8
+            bagging_freq: 1
+            num_boost_round: 500
+            early_stopping_rounds: 50
+            verbosity: -1
+
+    dataset:
+        class: DatasetH
+        module_path: qlib.data.dataset
+        kwargs:
+            handler:
+                class: Alpha158
+                module_path: qlib.contrib.data.handler
+                kwargs: *data_handler_config
+            segments:
+                train: [2019-01-01, 2022-12-31]
+                valid: [2023-01-01, 2023-12-31]
+                test: [2024-01-01, 2025-12-31]
+
+    record:
+        - class: SignalRecord
+          module_path: qlib.workflow.record_temp
+          kwargs: {}
+        - class: SigAnaRecord
+          module_path: qlib.workflow.record_temp
+          kwargs:
+            ana_long_short: False
+            ann_scaler: 252
+
+# 回测配置
+backtest:
+    start_time: 2024-01-01
+    end_time: 2025-04-29
+    account: 100000
+    benchmark: "000300.SH"
+    exchange_kwargs:
+        limit_threshold: 0.095
+        deal_price: close
+        open_cost: 0.00025
+        close_cost: 0.00125
+        min_cost: 5
