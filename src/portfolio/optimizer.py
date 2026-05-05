@@ -80,49 +80,36 @@ def mean_variance_optimize(returns: pd.DataFrame, signals_buy: pd.DataFrame,
 
 
 def compute_target_positions(
-    current_holdings: pd.DataFrame,
+    current_weights: dict[str, float],
     target_weights: dict[str, float],
-    total_capital: float,
-    prices: dict[str, float],
 ) -> pd.DataFrame:
     """
-    根据目标权重计算需要调整的仓位。
+    计算从当前持仓权重调整到目标权重所需的操作建议。
+
+    研究平台定位：输出权重百分比，由使用者根据实际资金换算手数。
 
     Args:
-        current_holdings: 当前持仓, columns=[symbol, quantity, avg_cost]
-        target_weights: {symbol: weight}
-        total_capital: 总资金
-        prices: {symbol: 当前价格}
+        current_weights: 当前各标的权重 {symbol: weight}，不持有则不传或传 0
+        target_weights:  目标各标的权重 {symbol: weight}，总和应 ≤ 1
 
     Returns:
-        调仓方案 DataFrame: symbol, current_qty, target_qty, delta, side
+        调仓建议 DataFrame: symbol, current_weight, target_weight, delta_weight, action
     """
+    all_symbols = set(current_weights) | set(target_weights)
     rows = []
-    for symbol, weight in target_weights.items():
-        target_value = total_capital * weight
-        price = prices.get(symbol, 0)
-        if price <= 0:
+    for symbol in sorted(all_symbols):
+        cur = current_weights.get(symbol, 0.0)
+        tgt = target_weights.get(symbol, 0.0)
+        delta = tgt - cur
+        if abs(delta) < 1e-4:
             continue
-
-        target_qty = int(target_value / price / 100) * 100  # A股手数取整
-
-        current = current_holdings[current_holdings["symbol"] == symbol]
-        current_qty = int(current["quantity"].sum()) if not current.empty else 0
-
-        delta = target_qty - current_qty
-        if delta == 0:
-            continue
-
         rows.append({
-            "symbol": symbol,
-            "current_qty": current_qty,
-            "target_qty": target_qty,
-            "delta": delta,
-            "price": price,
-            "side": "BUY" if delta > 0 else "SELL",
-            "order_value": abs(delta) * price,
+            "symbol":         symbol,
+            "current_weight": round(cur, 4),
+            "target_weight":  round(tgt, 4),
+            "delta_weight":   round(delta, 4),
+            "action":         "买入" if delta > 0 else "减仓" if tgt > 0 else "清仓",
         })
-
     return pd.DataFrame(rows)
 
 

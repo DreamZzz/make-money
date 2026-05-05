@@ -57,7 +57,9 @@ def save_to_db(df: pd.DataFrame) -> int:
     insert_df = df.copy()
     insert_df["signal_id"] = [generate_signal_id() for _ in range(len(insert_df))]
     insert_df["model_version"] = insert_df.get("model_version", None).fillna("1.0") if "model_version" in insert_df.columns else "1.0"
-    insert_df["signal_ts"] = insert_df.get("signal_ts", datetime.now()) if "signal_ts" in insert_df.columns else datetime.now()
+    if "signal_ts" not in insert_df.columns:
+        # 用信号对应的交易日而非当前时间，确保 T+1 成交逻辑能找到正确的交易日
+        insert_df["signal_ts"] = insert_df["trade_date"] if "trade_date" in insert_df.columns else datetime.now()
 
     cols = ["signal_id", "model_name", "model_version", "symbol", "signal_ts",
             "horizon", "score", "side", "confidence", "expected_holding_days",
@@ -67,8 +69,9 @@ def save_to_db(df: pd.DataFrame) -> int:
             insert_df[col] = None
     insert_df = insert_df[cols]
 
+    cols_str = ", ".join(cols)
     conn = get_connection()
-    conn.execute("INSERT INTO signals SELECT * FROM insert_df")
+    conn.execute(f"INSERT INTO signals ({cols_str}) SELECT {cols_str} FROM insert_df")
     conn.close()
     return len(insert_df)
 

@@ -13,10 +13,19 @@ cd "$PROJECT_DIR"
 
 echo "=== $(date '+%Y-%m-%d %H:%M:%S') 开始回测: strategy=$STRATEGY ==="
 
-# Qlib 回测（后续阶段实现具体 runner）
-python -c "
+# Step 1: DuckDB → Qlib 二进制格式（保证数据与主库同步）
+echo "1/2 导出 Qlib 数据..."
+python3 scripts/convert_to_qlib.py --market cn
+
+# Step 2: 训练 + 预测 + 信号写入
+echo "2/2 训练 Alpha158 + 写入信号..."
+python3 -c "
 from src.backtest.qlib_runner import run_qlib_backtest
-run_qlib_backtest('$STRATEGY')
+result = run_qlib_backtest('$STRATEGY')
+if result:
+    print('IC Mean:', result.get('ic_mean', 'N/A'))
+    print('ICIR   :', result.get('icir', 'N/A'))
+    print('信号数  :', result.get('signals_written', 0))
 "
 
 echo "=== $(date '+%Y-%m-%d %H:%M:%S') 回测完成 ==="

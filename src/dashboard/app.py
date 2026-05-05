@@ -26,6 +26,7 @@ pages = {
         st.Page("pages/qlib_analysis.py", title="Qlib分析", icon="🧠"),
     ],
     "信号 & 调仓": [
+        st.Page("pages/weekly_report.py", title="本周建议", icon="📋"),
         st.Page("pages/signals.py", title="调仓信号", icon="🎯"),
         st.Page("pages/portfolio.py", title="组合监控", icon="💼"),
     ],

@@ -7,7 +7,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from src.dashboard.db import get_conn
+from src.dashboard.db import get_conn, db_error_widget, DuckDBError
 
 
 
@@ -190,10 +190,19 @@ st.title("🧠 Qlib 分析")
 tab_a, tab_b, tab_c, tab_d = st.tabs(["净值曲线", "因子分析", "选股详情", "模型概览"])
 
 with tab_a:
-    show_nav_curve()
+    try:
+        show_nav_curve()
+    except DuckDBError as e:
+        db_error_widget(e)
 with tab_b:
-    show_factor_importance()
+    try:
+        show_factor_importance()
+    except DuckDBError as e:
+        db_error_widget(e)
 with tab_c:
-    show_stock_selection()
+    try:
+        show_stock_selection()
+    except DuckDBError as e:
+        db_error_widget(e)
 with tab_d:
     show_model_overview()

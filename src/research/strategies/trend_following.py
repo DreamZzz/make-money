@@ -2,9 +2,13 @@
 趋势跟踪策略 — 基于双均线 + 通道突破信号。
 A股/港股通用，日频/周频可配置。
 """
+import math
+
 import numpy as np
 import pandas as pd
 from loguru import logger
+
+_SCORE_NORM = math.log1p(20)  # 20% MA 偏离度 = 满分 1.0
 
 
 def _compute_atr(close: pd.DataFrame, high: pd.DataFrame, low: pd.DataFrame, period: int) -> pd.DataFrame:
@@ -83,7 +87,7 @@ def compute_signals(
         df_part.columns = ["trade_date", "symbol"]
         df_part["side"] = side
         df_part["score"] = np.clip(
-            score_raw.stack().reindex(idx).values * 10, 0.0, 1.0
+            np.log1p(score_raw.stack().reindex(idx).values) / _SCORE_NORM, 0.0, 1.0
         )
         if side == "BUY":
             sl_vals = stop_loss.stack().reindex(idx).values
@@ -99,9 +103,9 @@ def compute_signals(
     df = pd.concat(records, ignore_index=True)
     df["model_name"]           = "trend_following"
     df["horizon"]              = "20d"
-    df["confidence"]           = np.clip(df["score"].abs() * 2, 0.3, 0.9)
+    df["confidence"]           = np.clip(df["score"], 0.3, 0.95)
     df["expected_holding_days"] = 20
-    df["max_position_pct"]     = 0.10
+    df["max_position_pct"]     = (0.04 + 0.08 * df["score"]).clip(0.04, 0.12).round(2)
     df["thesis"] = (
         f"趋势跟踪: 快线({fast_ma}d) vs 慢线({slow_ma}d), 突破{channel_period}d通道"
     )

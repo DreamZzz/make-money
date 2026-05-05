@@ -9,7 +9,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from src.dashboard.db import get_conn
+from src.dashboard.db import get_conn, db_error_widget, DuckDBError
 
 
 def show_backtest_results():
@@ -129,154 +129,98 @@ def show_factor_importance():
 
 # ---- 命令执行 ----
 
-import threading
-from io import StringIO
+import subprocess
+from pathlib import Path as _Path
+
+_PROJECT_ROOT = _Path(__file__).resolve().parent.parent.parent.parent
+_JOBS_DIR = _PROJECT_ROOT / "data" / "jobs"
 
 COMMANDS = {
-    "update": {"label": "📡 更新行情数据", "desc": "增量拉取最新交易日数据"},
-    "generate_signals": {"label": "🎯 生成调仓信号", "desc": "汇总所有策略信号输出到数据库"},
+    "update": {
+        "label": "📡 更新行情数据",
+        "desc": "增量拉取最新交易日数据（独立进程，不阻塞 Dashboard）",
+        "cmd": ["python3", "-m", "src.data_pipeline.main", "update"],
+    },
+    "generate_signals": {
+        "label": "🎯 生成调仓信号",
+        "desc": "汇总所有策略信号写入数据库（独立进程）",
+        "cmd": ["python3", "-m", "src.signals.generator"],
+    },
 }
 
 
-def _do_update(output: list):
-    """同进程线程执行更新（共享 DuckDB 配置，零锁冲突）"""
-    from loguru import logger as _loguru
-    buf = StringIO()
-    sid = _loguru.add(buf, format="{time} | {level} | {message}", level="INFO")
-    try:
-        from src.data_pipeline.main import update_all, _load_config, _default_dates, _default_dates_yf
-        from src.data_pipeline.loader import get_connection, get_last_trade_date, upsert_daily_price, upsert_index_daily
-        from src.data_pipeline.fetchers import yfinance_fetcher as yf
-        from src.data_pipeline.fetchers import akshare_fetcher as ak
-        from datetime import date, timedelta
-
-        config = _load_config()
-        conn = get_connection()
-        try:
-            _loguru.info("=== 增量更新 ===")
-            start_yf, end_yf = _default_dates_yf(config)
-            cn = conn.execute("SELECT DISTINCT symbol FROM daily_price WHERE symbol IN (SELECT symbol FROM stock_info WHERE country='CN')").fetchall()
-            hk = conn.execute("SELECT DISTINCT symbol FROM daily_price WHERE symbol IN (SELECT symbol FROM stock_info WHERE country='HK')").fetchall()
-            cn_syms, hk_syms = [r[0] for r in cn], [r[0] for r in hk]
-            today = date.today()
-            _loguru.info(f"Updating CN={len(cn_syms)} HK={len(hk_syms)}")
-
-            for sym in cn_syms:
-                last = get_last_trade_date(conn, sym)
-                if last and (today - last).days < 1:
-                    continue
-                fs = (last + timedelta(days=1)).strftime("%Y-%m-%d") if last else (today - timedelta(days=365*5)).strftime("%Y-%m-%d")
-                try:
-                    df = yf.fetch_cn_daily(sym, fs, end_yf)
-                    if not df.empty:
-                        upsert_daily_price(conn, df)
-                except Exception:
-                    pass
-
-            for sym in hk_syms:
-                last = get_last_trade_date(conn, sym)
-                if last and (today - last).days < 1:
-                    continue
-                fs = (last + timedelta(days=1)).strftime("%Y-%m-%d") if last else (today - timedelta(days=365*5)).strftime("%Y-%m-%d")
-                try:
-                    df = yf.fetch_hk_daily(sym, fs, end_yf)
-                    if not df.empty:
-                        upsert_daily_price(conn, df)
-                except Exception:
-                    pass
-
-            for ycode in ["^HSI", "3032.HK"]:
-                try:
-                    df = yf.fetch_hk_index_daily(ycode, (today - timedelta(days=30)).strftime("%Y-%m-%d"), end_yf)
-                    if not df.empty:
-                        upsert_index_daily(conn, df)
-                except Exception:
-                    pass
-            _loguru.info("=== 增量更新完成 ===")
-        finally:
-            conn.close()
-    except Exception:
-        import traceback
-        buf.write(traceback.format_exc())
-    finally:
-        _loguru.remove(sid)
-        output.append(buf.getvalue())
-
-
-def _do_generate_signals(output: list):
-    """同进程线程生成信号"""
-    from loguru import logger as _loguru
-    buf = StringIO()
-    sid = _loguru.add(buf, format="{time} | {level} | {message}", level="INFO")
-    try:
-        from src.signals.generator import generate_all
-        df = generate_all()
-        if df is not None and not df.empty:
-            _loguru.info(f"Generated {len(df)} signals")
-        else:
-            _loguru.info("No signals (need price data and strategy run first)")
-    except Exception:
-        import traceback
-        buf.write(traceback.format_exc())
-    finally:
-        _loguru.remove(sid)
-        output.append(buf.getvalue())
-
-
-def _start_command(key: str):
-    """启动同进程线程执行命令"""
-
-    def _runner():
-        output = []
-        if key == "update":
-            _do_update(output)
-        elif key == "generate_signals":
-            _do_generate_signals(output)
-        st.session_state[f"{key}_output"] = output[0] if output else "(no output)"
-        st.session_state[f"{key}_exit_code"] = 0 if output else 1
-        st.session_state[f"{key}_running"] = False
-        st.session_state["_cmd_running"] = False
-
+def _start_job(key: str):
+    """以独立子进程启动命令，stdout/stderr 写入日志文件。"""
+    _JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = _JOBS_DIR / f"{key}.log"
+    with open(log_path, "w") as lf:
+        proc = subprocess.Popen(
+            COMMANDS[key]["cmd"],
+            stdout=lf,
+            stderr=subprocess.STDOUT,
+            cwd=str(_PROJECT_ROOT),
+        )
+    st.session_state[f"proc_{key}"] = proc
+    st.session_state[f"log_{key}"] = str(log_path)
+    st.session_state[f"running_{key}"] = True
+    st.session_state[f"exit_{key}"] = None
     st.session_state["_cmd_running"] = True
-    st.session_state[f"{key}_running"] = True
-    st.session_state[f"{key}_output"] = "⏳ 线程启动中..."
-    st.session_state[f"{key}_exit_code"] = None
-    threading.Thread(target=_runner, daemon=True).start()
+
+
+def _poll_job(key: str) -> tuple:
+    """检查作业状态，返回 (running: bool, retcode: int|None, log: str)。"""
+    proc = st.session_state.get(f"proc_{key}")
+    if proc is None:
+        return False, st.session_state.get(f"exit_{key}"), _read_log(key)
+
+    retcode = proc.poll()
+    running = retcode is None
+    if not running:
+        st.session_state[f"running_{key}"] = False
+        st.session_state[f"exit_{key}"] = retcode
+        if not any(st.session_state.get(f"running_{k}", False) for k in COMMANDS):
+            st.session_state["_cmd_running"] = False
+
+    return running, retcode, _read_log(key)
+
+
+def _read_log(key: str) -> str:
+    log_path = st.session_state.get(f"log_{key}", "")
+    if log_path and _Path(log_path).exists():
+        return _Path(log_path).read_text(errors="replace")
+    return ""
 
 
 def show_command_panel():
-    """命令执行面板"""
+    """命令执行面板 — 子进程模式，写操作与 Dashboard 读取完全隔离。"""
     st.subheader("🔧 命令执行")
 
     for key in COMMANDS:
-        if f"{key}_running" not in st.session_state:
-            st.session_state[f"{key}_running"] = False
-        if f"{key}_output" not in st.session_state:
-            st.session_state[f"{key}_output"] = ""
-        if f"{key}_exit_code" not in st.session_state:
-            st.session_state[f"{key}_exit_code"] = None
-    if "_cmd_running" not in st.session_state:
-        st.session_state["_cmd_running"] = False
+        for attr, default in [("running", False), ("exit", None), ("proc", None), ("log", "")]:
+            st.session_state.setdefault(f"{attr}_{key}", default)
+    st.session_state.setdefault("_cmd_running", False)
+
+    # 每次渲染前统一 poll 一次，避免重复 IO
+    job_states = {key: _poll_job(key) for key in COMMANDS}
 
     with st.expander("展开命令面板", expanded=st.session_state.get("_cmd_running", False)):
-        st.caption("点击按钮执行（同进程线程，无锁冲突）。点击「刷新状态」查看输出。")
+        st.caption("命令以独立子进程运行，Streamlit 持只读锁，写操作无冲突。点击「刷新状态」获取最新输出。")
 
         cols = st.columns(len(COMMANDS))
         for i, (key, info) in enumerate(COMMANDS.items()):
+            running, retcode, _ = job_states[key]
             with cols[i]:
-                disabled = st.session_state.get(f"{key}_running", False)
-                exit_code = st.session_state.get(f"{key}_exit_code")
-
-                if st.button(info["label"], key=f"btn_{key}", disabled=disabled,
+                if st.button(info["label"], key=f"btn_{key}", disabled=running,
                              help=info["desc"], width="stretch"):
-                    _start_command(key)
+                    _start_job(key)
+                    st.rerun()
 
-                if disabled:
+                if running:
                     st.info("⏳ 执行中...")
-                elif exit_code == 0:
+                elif retcode == 0:
                     st.success("✅ 成功")
-                elif exit_code is not None:
-                    st.error("❌ 失败 (退出码: {})".format(exit_code))
+                elif retcode is not None:
+                    st.error(f"❌ 失败 (退出码: {retcode})")
                 else:
                     st.caption("⚪ 就绪")
 
@@ -286,19 +230,17 @@ def show_command_panel():
         refresh_col, status_col = st.columns([1, 3])
         with refresh_col:
             if st.button("🔄 刷新状态", key="btn_refresh_status", width="stretch"):
-                pass  # button click causes natural rerun
+                st.rerun()
 
-        # 每条命令的执行状态摘要
         parts = []
-        for key in COMMANDS:
-            running = st.session_state.get(f"{key}_running", False)
-            exit_code = st.session_state.get(f"{key}_exit_code")
+        for key, (running, retcode, _) in job_states.items():
+            label = COMMANDS[key]["label"]
             if running:
-                parts.append(f"{COMMANDS[key]['label']}: 执行中")
-            elif exit_code == 0:
-                parts.append(f"{COMMANDS[key]['label']}: 成功")
-            elif exit_code is not None:
-                parts.append(f"{COMMANDS[key]['label']}: 失败")
+                parts.append(f"{label}: 执行中")
+            elif retcode == 0:
+                parts.append(f"{label}: 成功")
+            elif retcode is not None:
+                parts.append(f"{label}: 失败")
         with status_col:
             st.caption(f"上次刷新: {datetime.now().strftime('%H:%M:%S')} | {' | '.join(parts) if parts else '空闲'}")
 
@@ -306,17 +248,15 @@ def show_command_panel():
         output_tabs = st.tabs([info["label"] for info in COMMANDS.values()])
         for tab, (key, info) in zip(output_tabs, COMMANDS.items()):
             with tab:
-                out = st.session_state.get(f"{key}_output", "")
-                exit_code = st.session_state.get(f"{key}_exit_code")
-                running = st.session_state.get(f"{key}_running", False)
+                running, retcode, log_content = job_states[key]
                 if running:
-                    st.warning(f"⏳ 执行中... | 刷新时间: {datetime.now().strftime('%H:%M:%S')}")
-                elif exit_code == 0:
+                    st.warning("⏳ 执行中... 点击「刷新状态」获取最新输出")
+                elif retcode == 0:
                     st.success("✅ 执行成功")
-                elif exit_code is not None:
-                    st.error(f"❌ 退出码: {exit_code}")
-                if out:
-                    st.code(out, language="text", line_numbers=False)
+                elif retcode is not None:
+                    st.error(f"❌ 退出码: {retcode}")
+                if log_content:
+                    st.code(log_content, language="text", line_numbers=False)
 
 
 # ---- 绩效跟踪 ----
@@ -447,11 +387,17 @@ st.divider()
 tab_backtest, tab_performance = st.tabs(["回测对比", "绩效跟踪"])
 
 with tab_backtest:
-    show_backtest_results()
-    st.divider()
-    show_signal_preview()
-    st.divider()
-    show_factor_importance()
+    try:
+        show_backtest_results()
+        st.divider()
+        show_signal_preview()
+        st.divider()
+        show_factor_importance()
+    except DuckDBError as e:
+        db_error_widget(e)
 
 with tab_performance:
-    show_performance_tracking()
+    try:
+        show_performance_tracking()
+    except DuckDBError as e:
+        db_error_widget(e)

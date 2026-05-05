@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
-from src.dashboard.db import get_conn
+from src.dashboard.db import get_conn, db_error_widget, DuckDBError
 
 PERIODS = {"1个月": 22, "3个月": 66, "6个月": 132, "1年": 252, "全部": 9999}
 
@@ -511,10 +511,13 @@ def show_data_status():
 
 # ---- 页面渲染 ----
 st.title("📈 市场行情概览")
-show_data_status()
-st.divider()
-show_index_chart()
-st.divider()
-show_market_signals()
-st.divider()
-show_top_movers()
+try:
+    show_data_status()
+    st.divider()
+    show_index_chart()
+    st.divider()
+    show_market_signals()
+    st.divider()
+    show_top_movers()
+except DuckDBError as e:
+    db_error_widget(e)

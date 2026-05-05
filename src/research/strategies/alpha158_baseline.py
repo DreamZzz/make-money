@@ -1,87 +1,97 @@
 """
 Alpha158 多因子基线策略。
-基于 Qlib Alpha158 因子集 + LightGBM 排序选股。
+基于 Qlib Alpha158 因子集 + LightGBM 排序选股，向量化实现。
 """
-import pandas as pd
 import numpy as np
+import pandas as pd
 from loguru import logger
 
 
-def generate_signals(predictions: pd.DataFrame, top_n: int = 50, min_confidence: float = 0.6) -> pd.DataFrame:
+def generate_signals(predictions: pd.DataFrame, top_n: int = 50) -> pd.DataFrame:
     """
-    根据 Qlib 模型预测生成调仓信号。
+    将 Qlib 预测结果转换为系统标准信号格式。
 
     Args:
-        predictions: Qlib 预测结果 DataFrame, columns=[datetime, instrument, score]
-        top_n: 买入数量
-        min_confidence: 最低置信度（基于 score 标准化后的分位数）
+        predictions: Qlib 预测 DataFrame，columns=[datetime, instrument, score]
+        top_n:       每个截面最多取多少只买入标的
 
     Returns:
-        信号 DataFrame
+        标准信号 DataFrame
     """
-    if predictions.empty:
+    if predictions.empty or "datetime" not in predictions.columns:
         return pd.DataFrame()
 
-    df = predictions.copy()
-    if "datetime" not in df.columns:
-        logger.warning("predictions missing 'datetime' column")
+    # 只取最新截面
+    latest_dt = predictions["datetime"].max()
+    latest = predictions[predictions["datetime"] == latest_dt].copy()
+
+    if latest.empty:
         return pd.DataFrame()
 
-    # 每个时间截面按 score 排序
-    latest = df["datetime"].max()
-    latest_df = df[df["datetime"] == latest].copy()
-
-    # score 标准化为 [0, 1] 置信度
-    if latest_df["score"].std() > 0:
-        latest_df["confidence"] = (latest_df["score"] - latest_df["score"].min()) / (
-            latest_df["score"].max() - latest_df["score"].min()
-        )
+    # 归一化 score → confidence [0, 1]
+    s_min, s_max = latest["score"].min(), latest["score"].max()
+    if s_max > s_min:
+        latest["confidence"] = (latest["score"] - s_min) / (s_max - s_min)
     else:
-        latest_df["confidence"] = 0.5
+        latest["confidence"] = 0.5
 
-    # 选 top_n
-    buy_candidates = latest_df.nlargest(top_n, "score")
-    buy_candidates = buy_candidates[buy_candidates["confidence"] >= min_confidence]
+    # 取 top_n
+    buy = latest.nlargest(top_n, "score").copy()
 
-    signals = []
-    for _, row in buy_candidates.iterrows():
-        signals.append({
-            "model_name": "alpha158",
-            "model_version": "1.0",
-            "symbol": row.get("instrument", ""),
-            "signal_ts": pd.Timestamp.now(),
-            "horizon": "5d",
-            "score": row["score"],
-            "side": "BUY",
-            "confidence": row["confidence"],
-            "expected_holding_days": 5,
-            "max_position_pct": 0.05,
-            "thesis": f"Alpha158 factor score: {row['score']:.3f}",
-            "risk_tags": ["multi_factor"],
-        })
+    if buy.empty:
+        return pd.DataFrame()
 
-    return pd.DataFrame(signals)
+    signals = pd.DataFrame({
+        "model_name":            "alpha158",
+        "model_version":         "1.0",
+        "symbol":                buy["instrument"].values,
+        "signal_ts":             pd.Timestamp.now(),
+        "trade_date":            latest_dt,
+        "horizon":               "5d",
+        "score":                 buy["score"].values,
+        "side":                  "BUY",
+        "confidence":            np.clip(buy["confidence"].values, 0.0, 1.0),
+        "expected_holding_days": 5,
+        "max_position_pct":      0.05,
+        "thesis":                "Alpha158 factor score: " + buy["score"].round(4).astype(str).values,
+        "risk_tags":             [["multi_factor"]] * len(buy),
+    })
+
+    logger.info(f"Alpha158 生成 {len(signals)} 条信号（截面日期: {latest_dt.date()}）")
+    return signals
 
 
 def evaluate_factors(factor_df: pd.DataFrame, returns_forward: pd.DataFrame) -> pd.DataFrame:
     """
-    因子评估：计算 IC Rank、IC Mean、IR。
+    因子评估：计算各因子的 IC（信息系数）。
+
+    Args:
+        factor_df:        因子值 DataFrame，index=(trade_date, symbol)，columns=factors
+        returns_forward:  前瞻收益 Series，index=(trade_date, symbol)
+
+    Returns:
+        按 |IC| 降序排列的因子评估 DataFrame
     """
     if factor_df.empty or returns_forward.empty:
         return pd.DataFrame()
 
     common_idx = factor_df.index.intersection(returns_forward.index)
-    factor_df = factor_df.loc[common_idx]
-    returns_forward = returns_forward.loc[common_idx]
+    if common_idx.empty:
+        return pd.DataFrame()
 
-    ic_results = []
-    for col in factor_df.columns:
-        if col in ["trade_date", "symbol"]:
-            continue
-        valid = factor_df[col].notna() & returns_forward.notna()
-        if valid.sum() < 10:
-            continue
-        ic = factor_df.loc[valid, col].corr(returns_forward.loc[valid])
-        ic_results.append({"factor": col, "ic": ic})
+    fac = factor_df.loc[common_idx]
+    ret = returns_forward.loc[common_idx]
 
-    return pd.DataFrame(ic_results).sort_values("ic", key=abs, ascending=False)
+    # 向量化 IC 计算
+    valid_cols = [c for c in fac.columns if c not in ("trade_date", "symbol")]
+    ic_vals = fac[valid_cols].corrwith(ret, method="pearson")
+
+    return (
+        ic_vals.rename("ic")
+        .reset_index()
+        .rename(columns={"index": "factor"})
+        .assign(abs_ic=lambda d: d["ic"].abs())
+        .sort_values("abs_ic", ascending=False)
+        .drop(columns="abs_ic")
+        .reset_index(drop=True)
+    )

@@ -9,7 +9,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from src.dashboard.db import get_conn
+from src.dashboard.db import get_conn, db_error_widget, DuckDBError
 
 
 def show_portfolio_summary():
@@ -121,10 +121,13 @@ def show_orders():
 
 # ----
 st.title("💼 组合监控")
-show_portfolio_summary()
-st.divider()
-show_nav_curve()
-st.divider()
-show_holdings()
-st.divider()
-show_orders()
+try:
+    show_portfolio_summary()
+    st.divider()
+    show_nav_curve()
+    st.divider()
+    show_holdings()
+    st.divider()
+    show_orders()
+except DuckDBError as e:
+    db_error_widget(e)

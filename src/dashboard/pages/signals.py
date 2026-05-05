@@ -1,12 +1,13 @@
 """调仓信号页面 — 查看最新交易信号"""
 import sys
-sys.path.insert(0, "/Users/zhaoqiang/Documents/Project/make-money")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
 import duckdb
 import pandas as pd
 import streamlit as st
 
-from src.dashboard.db import get_conn
+from src.dashboard.db import get_conn, db_error_widget, DuckDBError
 
 
 
@@ -66,33 +67,16 @@ def _show_signal_format_info():
 
 
 def show_manual_order_entry():
-    """手动订单录入（记录实际下单）"""
+    """手动订单录入（暂不可用：Dashboard 为只读模式）"""
     st.subheader("手动订单录入")
-
-    with st.form("manual_order"):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            symbol = st.text_input("股票代码", placeholder="600519.SH")
-        with col2:
-            side = st.selectbox("方向", ["BUY", "SELL"])
-        with col3:
-            qty = st.number_input("数量（股）", min_value=0, step=100)
-
-        price = st.number_input("成交价", min_value=0.0, step=0.01)
-        note = st.text_input("备注")
-
-        if st.form_submit_button("记录订单"):
-            import uuid
-            from datetime import datetime
-            conn.execute("""
-                INSERT INTO paper_orders (order_id, signal_id, symbol, side, order_qty, order_price, order_ts)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, [str(uuid.uuid4())[:8], None, symbol, side, qty, price, datetime.now()])
-            conn.close()
-            st.success(f"订单已记录: {side} {symbol} {qty}股 @ {price}")
+    st.info("Dashboard 当前以只读模式运行，写操作请使用命令行：\n\n"
+            "```bash\npython3 -m src.portfolio.paper_engine\n```")
 
 
 st.title("🎯 调仓信号")
-show_signals()
+try:
+    show_signals()
+except DuckDBError as e:
+    db_error_widget(e)
 st.divider()
 show_manual_order_entry()
