@@ -3,11 +3,10 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
-import duckdb
 import pandas as pd
 import streamlit as st
 
-from src.dashboard.db import get_conn, db_error_widget, DuckDBError
+from src.dashboard.db import query_df, db_error_widget, DuckDBError
 
 
 
@@ -15,13 +14,14 @@ from src.dashboard.db import get_conn, db_error_widget, DuckDBError
 def show_signals():
     st.subheader("最新调仓信号")
 
-    df = get_conn().execute("""
+    df = query_df("""
         SELECT signal_ts, model_name, symbol, side, score, confidence,
-               horizon, max_position_pct, thesis
+               horizon, max_position_pct, COALESCE(status, 'ACTIVE') AS status,
+               status_reason, thesis
         FROM signals
         ORDER BY signal_ts DESC, confidence DESC
         LIMIT 100
-    """).fetchdf()
+    """)
 
     if df.empty:
         st.info("暂无调仓信号。回测验证后运行 `python -m src.signals.generator` 生成信号。")

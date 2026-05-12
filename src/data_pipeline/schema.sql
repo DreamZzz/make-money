@@ -43,6 +43,35 @@ CREATE TABLE IF NOT EXISTS daily_price (
 );
 
 -- ============================================
+-- 2b. 日终行情快照表
+-- ============================================
+CREATE TABLE IF NOT EXISTS market_snapshot (
+    symbol           VARCHAR NOT NULL,
+    market           VARCHAR NOT NULL,       -- CN / HK
+    trade_date       DATE NOT NULL,
+    update_time      TIMESTAMP,
+    last_price       DOUBLE,
+    open             DOUBLE,
+    high             DOUBLE,
+    low              DOUBLE,
+    prev_close       DOUBLE,
+    pct_chg          DOUBLE,                 -- 涨跌幅（%）
+    volume           DOUBLE,
+    amount           DOUBLE,
+    turnover_rate    DOUBLE,
+    volume_ratio     DOUBLE,                 -- 量比（对比近20日均量）
+    amplitude        DOUBLE,                 -- 振幅（%）
+    pe_ttm           DOUBLE,
+    pb               DOUBLE,
+    market_cap       DOUBLE,
+    float_market_cap DOUBLE,
+    is_suspended     BOOLEAN DEFAULT FALSE,
+    source           VARCHAR DEFAULT 'daily_price',
+    updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (symbol, trade_date)
+);
+
+-- ============================================
 -- 3. 指数行情表
 -- ============================================
 CREATE TABLE IF NOT EXISTS index_daily (
@@ -100,6 +129,11 @@ CREATE TABLE IF NOT EXISTS signals (
     executed        BOOLEAN DEFAULT FALSE,   -- 是否已被纸交易引擎执行
     execution_price DOUBLE,                  -- 实际成交价
     execution_date  DATE,                    -- 实际成交日期
+    status          VARCHAR DEFAULT 'ACTIVE',-- ACTIVE / FILLED / NO_ACTION / EXPIRED / SUPERSEDED
+    status_reason   VARCHAR,                 -- 状态说明
+    expires_at      DATE,                    -- 信号最晚有效日期（可选）
+    superseded_by   VARCHAR,                 -- 替代该信号的新信号ID
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (signal_id)
 );
@@ -133,6 +167,9 @@ CREATE TABLE IF NOT EXISTS portfolio_nav (
     cash            DOUBLE,                  -- 现金余额
     position_value  DOUBLE,                  -- 持仓市值
     total_value     DOUBLE,                  -- 总资产
+    external_flow   DOUBLE DEFAULT 0,        -- 当日外部现金流（入金为正，出金为负）
+    net_contribution DOUBLE DEFAULT 0,       -- 累计净投入本金
+    investment_nav  DOUBLE DEFAULT 1,        -- 现金流校正净值
     drawdown        DOUBLE,                  -- 当日回撤（相对峰值）
     sharpe_rolling  DOUBLE,                  -- 滚动20日夏普
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -167,6 +204,161 @@ CREATE TABLE IF NOT EXISTS backtest_results (
 );
 
 -- ============================================
+-- 6b. Qlib 实验记录表
+-- ============================================
+CREATE TABLE IF NOT EXISTS qlib_experiments (
+    experiment_id   VARCHAR NOT NULL,
+    run_id          VARCHAR,
+    model_name      VARCHAR NOT NULL DEFAULT 'alpha158',
+    model_version   VARCHAR,
+    mode            VARCHAR NOT NULL,        -- fixed / walk_forward / latest_prediction
+    status          VARCHAR NOT NULL,        -- RUNNING / SUCCEEDED / FAILED
+    market          VARCHAR DEFAULT 'CN',
+    train_start     DATE,
+    train_end       DATE,
+    valid_start     DATE,
+    valid_end       DATE,
+    test_start      DATE,
+    test_end        DATE,
+    data_start      DATE,
+    data_end        DATE,
+    data_symbols    INTEGER,
+    qlib_installed  BOOLEAN,
+    qlib_data_ready BOOLEAN,
+    python_version  VARCHAR,
+    qlib_version    VARCHAR,
+    lightgbm_version VARCHAR,
+    config_snapshot TEXT,
+    metrics_json    TEXT,
+    log_path        VARCHAR,
+    error_message   VARCHAR,
+    started_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ended_at        TIMESTAMP,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (experiment_id)
+);
+
+-- ============================================
+-- 6c. Qlib 预测截面表
+-- ============================================
+CREATE TABLE IF NOT EXISTS qlib_predictions (
+    experiment_id   VARCHAR NOT NULL,
+    model_name      VARCHAR NOT NULL DEFAULT 'alpha158',
+    model_version   VARCHAR,
+    mode            VARCHAR,
+    prediction_date DATE NOT NULL,
+    symbol          VARCHAR NOT NULL,
+    score           DOUBLE,
+    rank            INTEGER,
+    confidence      DOUBLE,
+    selected        BOOLEAN DEFAULT FALSE,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (experiment_id, prediction_date, symbol)
+);
+
+-- ============================================
+-- 6d. Qlib 日度评估表
+-- ============================================
+CREATE TABLE IF NOT EXISTS qlib_daily_metrics (
+    experiment_id   VARCHAR NOT NULL,
+    metric_date     DATE NOT NULL,
+    mode            VARCHAR,
+    prediction_count INTEGER,
+    ic              DOUBLE,
+    rank_ic         DOUBLE,
+    top_return      DOUBLE,
+    bottom_return   DOUBLE,
+    spread_return   DOUBLE,
+    portfolio_return DOUBLE,
+    benchmark_return DOUBLE,
+    turnover        DOUBLE,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (experiment_id, metric_date)
+);
+
+-- ============================================
+-- 6e. Qlib 模型注册表
+-- ============================================
+CREATE TABLE IF NOT EXISTS qlib_model_registry (
+    model_version   VARCHAR NOT NULL,
+    experiment_id   VARCHAR NOT NULL,
+    model_name      VARCHAR NOT NULL DEFAULT 'alpha158',
+    status          VARCHAR NOT NULL,        -- candidate / staging / production / archived
+    market          VARCHAR DEFAULT 'CN',
+    model_path      VARCHAR,
+    metrics_json    TEXT,
+    published_at    TIMESTAMP,
+    archived_at     TIMESTAMP,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (model_version)
+);
+
+-- ============================================
+-- 6f. Qlib 参数网格评估表
+-- ============================================
+CREATE TABLE IF NOT EXISTS qlib_grid_results (
+    grid_id          VARCHAR NOT NULL,
+    source_experiment_id VARCHAR NOT NULL,
+    model_name       VARCHAR NOT NULL DEFAULT 'alpha158',
+    mode             VARCHAR,
+    top_n            INTEGER NOT NULL,
+    holding_days     INTEGER NOT NULL,
+    rebalance_freq   VARCHAR NOT NULL,       -- daily / monthly
+    buffer_n         INTEGER,
+    benchmark_name   VARCHAR NOT NULL,       -- 000300 / 000905 / ALL_EQ_PROXY / MIXED_EQUAL
+    start_date       DATE,
+    end_date         DATE,
+    annual_return    DOUBLE,
+    cumulative_return DOUBLE,
+    annual_volatility DOUBLE,
+    sharpe_ratio     DOUBLE,
+    max_drawdown     DOUBLE,
+    turnover         DOUBLE,
+    benchmark_return DOUBLE,
+    excess_return    DOUBLE,
+    metrics_json     TEXT,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (grid_id)
+);
+
+-- ============================================
+-- 6g. Qlib 候选实验批跑结果表
+-- ============================================
+CREATE TABLE IF NOT EXISTS qlib_candidate_results (
+    candidate_id       VARCHAR NOT NULL,
+    batch_id           VARCHAR NOT NULL,
+    experiment_id      VARCHAR,
+    model_name         VARCHAR NOT NULL DEFAULT 'alpha158',
+    model_family       VARCHAR NOT NULL,
+    model_variant      VARCHAR NOT NULL,
+    status             VARCHAR NOT NULL,        -- RUNNING / SUCCEEDED / FAILED / SKIPPED
+    mode               VARCHAR NOT NULL,        -- fixed / walk_forward
+    params_json        TEXT,
+    grid_json          TEXT,
+    best_benchmark     VARCHAR,
+    best_top_n         INTEGER,
+    best_holding_days  INTEGER,
+    best_rebalance_freq VARCHAR,
+    best_buffer_n      INTEGER,
+    annual_return      DOUBLE,
+    sharpe_ratio       DOUBLE,
+    max_drawdown       DOUBLE,
+    turnover           DOUBLE,
+    benchmark_return   DOUBLE,
+    excess_return      DOUBLE,
+    ic_mean            DOUBLE,
+    icir               DOUBLE,
+    rank_ic_mean       DOUBLE,
+    rank_ic_positive_rate DOUBLE,
+    score              DOUBLE,
+    error_message      VARCHAR,
+    started_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ended_at           TIMESTAMP,
+    created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (candidate_id, batch_id)
+);
+
+-- ============================================
 -- 7. 订单模拟/跟踪表
 -- ============================================
 CREATE TABLE IF NOT EXISTS paper_orders (
@@ -176,8 +368,138 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     side            VARCHAR NOT NULL,        -- BUY / SELL
     order_qty       DOUBLE,                   -- 委托数量（股）
     order_price     DOUBLE,                  -- 委托价格
+    order_value     DOUBLE,                  -- 成交金额（不含费用）
+    fee             DOUBLE,                  -- 交易费用
+    cash_before     DOUBLE,                  -- 成交前可用现金
+    cash_after      DOUBLE,                  -- 成交后可用现金
     order_ts        TIMESTAMP NOT NULL,      -- 下单时间
     status          VARCHAR DEFAULT 'PENDING', -- PENDING / FILLED / CANCELLED
+    status_reason   VARCHAR,                 -- 状态说明/跳过原因
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (order_id)
+);
+
+-- ============================================
+-- 10. 数据质量状态表
+-- ============================================
+CREATE TABLE IF NOT EXISTS data_quality_status (
+    check_ts        TIMESTAMP NOT NULL,
+    status          VARCHAR NOT NULL,        -- PASS / WARN
+    metric          VARCHAR NOT NULL,
+    value           DOUBLE,
+    threshold       DOUBLE,
+    detail          VARCHAR,
+    PRIMARY KEY (check_ts, metric)
+);
+
+-- ============================================
+-- 11. 全局资金流水表
+-- ============================================
+CREATE TABLE IF NOT EXISTS account_cashflows (
+    flow_id         VARCHAR NOT NULL,
+    flow_date       DATE NOT NULL,
+    account_id      VARCHAR NOT NULL DEFAULT 'default',
+    currency        VARCHAR NOT NULL DEFAULT 'CNY',
+    flow_type       VARCHAR NOT NULL,        -- DEPOSIT / WITHDRAW
+    amount          DOUBLE NOT NULL,
+    note            VARCHAR,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (flow_id)
+);
+
+-- ============================================
+-- 12. 全局账户每日状态表
+-- ============================================
+CREATE TABLE IF NOT EXISTS account_daily (
+    account_id      VARCHAR NOT NULL DEFAULT 'default',
+    trade_date      DATE NOT NULL,
+    cash            DOUBLE,
+    position_value  DOUBLE,
+    total_value     DOUBLE,
+    net_contribution DOUBLE,
+    daily_external_flow DOUBLE DEFAULT 0,
+    nav             DOUBLE,
+    daily_return    DOUBLE,
+    drawdown        DOUBLE,
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (account_id, trade_date)
+);
+
+-- ============================================
+-- 13. 阶段性绩效评估表
+-- ============================================
+CREATE TABLE IF NOT EXISTS performance_reviews (
+    review_id       VARCHAR NOT NULL,
+    account_id      VARCHAR NOT NULL DEFAULT 'default',
+    period_type     VARCHAR NOT NULL,        -- WEEKLY / MONTHLY
+    start_date      DATE NOT NULL,
+    end_date        DATE NOT NULL,
+    nav_return      DOUBLE,
+    total_value_change DOUBLE,
+    net_flow        DOUBLE,
+    benchmark_code  VARCHAR,
+    benchmark_return DOUBLE,
+    excess_return   DOUBLE,
+    max_drawdown    DOUBLE,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (review_id)
+);
+
+-- ============================================
+-- 14. 指数基金基本信息表
+-- ============================================
+CREATE TABLE IF NOT EXISTS fund_info (
+    fund_code       VARCHAR NOT NULL,        -- 基金/ETF代码
+    name            VARCHAR,
+    fund_type       VARCHAR,                 -- ETF / OPEN
+    tracking_index  VARCHAR,                 -- 跟踪指数代码，如 000300
+    market          VARCHAR DEFAULT 'CN',
+    currency        VARCHAR DEFAULT 'CNY',
+    enabled         BOOLEAN DEFAULT TRUE,
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (fund_code)
+);
+
+-- ============================================
+-- 15. 指数基金净值/行情表
+-- ============================================
+CREATE TABLE IF NOT EXISTS fund_nav (
+    fund_code        VARCHAR NOT NULL,
+    trade_date       DATE NOT NULL,
+    nav              DOUBLE,                 -- 开放式基金单位净值
+    close            DOUBLE,                 -- ETF收盘价；开放式基金可等于 nav
+    premium_discount DOUBLE,                 -- ETF溢价率/折价率，可为空
+    updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (fund_code, trade_date)
+);
+
+-- ============================================
+-- 16. 指数基金持仓快照表
+-- ============================================
+CREATE TABLE IF NOT EXISTS index_fund_snapshots (
+    snapshot_id      VARCHAR NOT NULL,
+    snapshot_date    DATE NOT NULL,
+    fund_code        VARCHAR NOT NULL,
+    shares           DOUBLE NOT NULL DEFAULT 0,
+    cost_amount      DOUBLE NOT NULL DEFAULT 0,
+    note             VARCHAR,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (snapshot_id)
+);
+
+-- ============================================
+-- 17. 指数基金独立信号表
+-- ============================================
+CREATE TABLE IF NOT EXISTS index_fund_signals (
+    signal_id        VARCHAR NOT NULL,
+    fund_code        VARCHAR NOT NULL,
+    index_code       VARCHAR NOT NULL,
+    signal_date      DATE NOT NULL,
+    action           VARCHAR NOT NULL,       -- BUY / ADD / HOLD / REDUCE / PAUSE
+    target_weight    DOUBLE,
+    confidence       DOUBLE,
+    thesis           VARCHAR,
+    risk_tags        VARCHAR[],
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (signal_id)
 );

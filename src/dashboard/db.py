@@ -5,8 +5,10 @@
 """
 import re
 import time
+from typing import Optional, Sequence
 
 import duckdb
+import pandas as pd
 import streamlit as st
 
 from src.data_pipeline.loader import get_db_path
@@ -31,6 +33,24 @@ def get_conn() -> duckdb.DuckDBPyConnection:
                 time.sleep(2)
             else:
                 raise
+
+
+def query_df(sql: str, params: Optional[Sequence] = None) -> pd.DataFrame:
+    """执行只读查询并立即关闭连接，避免 Streamlit 长时间持有 DuckDB 连接。"""
+    conn = get_conn()
+    try:
+        return conn.execute(sql, params or []).fetchdf()
+    finally:
+        conn.close()
+
+
+def query_one(sql: str, params: Optional[Sequence] = None):
+    """执行只读标量/单行查询并立即关闭连接。"""
+    conn = get_conn()
+    try:
+        return conn.execute(sql, params or []).fetchone()
+    finally:
+        conn.close()
 
 
 def db_error_widget(exc: Exception) -> None:

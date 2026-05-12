@@ -8,6 +8,9 @@ __pycache__/
 data/
 qlib_data/
 output/
+mlruns/
+models/
+Users/
 
 # 日志
 *.log

@@ -2,9 +2,43 @@
 yfinance 备用采集器 — 港股行情（含指数）。
 当 AkShare 反爬限制或接口异常时自动切换。
 """
-import yfinance as yf
+import logging
+
 import pandas as pd
+import yfinance as yf
 from loguru import logger
+
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+
+STATUS_OK = "ok"
+STATUS_EMPTY = "empty"
+STATUS_RATE_LIMITED = "rate_limited"
+STATUS_SOURCE_ERROR = "source_error"
+
+
+def _with_status(df: pd.DataFrame, status: str, error: str = "") -> pd.DataFrame:
+    df.attrs["source_status"] = status
+    df.attrs["source_error"] = error
+    return df
+
+
+def source_status(df: pd.DataFrame) -> str:
+    return str(df.attrs.get("source_status") or (STATUS_EMPTY if df.empty else STATUS_OK))
+
+
+def source_error(df: pd.DataFrame) -> str:
+    return str(df.attrs.get("source_error") or "")
+
+
+def is_rate_limited(df: pd.DataFrame) -> bool:
+    return source_status(df) == STATUS_RATE_LIMITED
+
+
+def _classify_exception(exc: Exception) -> str:
+    message = str(exc).lower()
+    if "too many requests" in message or "rate limited" in message or "429" in message:
+        return STATUS_RATE_LIMITED
+    return STATUS_SOURCE_ERROR
 
 
 def _hk_symbol_to_yfinance(symbol: str) -> str:
@@ -28,15 +62,16 @@ def _fix_end_date(end_date: str) -> str:
     return dt.strftime("%Y-%m-%d")
 
 
-def fetch_cn_daily(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+def fetch_cn_daily(symbol: str, start_date: str, end_date: str, log_empty: bool = True) -> pd.DataFrame:
     """拉取A股日线（通过 yfinance）"""
     try:
         ticker_str = _cn_symbol_to_yfinance(symbol)
         ticker = yf.Ticker(ticker_str)
         df = ticker.history(start=start_date, end=_fix_end_date(end_date))
         if df.empty:
-            logger.warning(f"yfinance CN daily empty: {ticker_str}")
-            return pd.DataFrame()
+            if log_empty:
+                logger.warning(f"yfinance CN daily empty: {ticker_str}")
+            return _with_status(pd.DataFrame(), STATUS_EMPTY)
         df = df.reset_index()
         df = df.rename(columns={
             "Date": "trade_date", "Open": "open", "High": "high",
@@ -44,21 +79,22 @@ def fetch_cn_daily(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         })
         df["trade_date"] = df["trade_date"].dt.tz_localize(None)
         df["symbol"] = symbol
-        return df
+        return _with_status(df, STATUS_OK)
     except Exception as e:
-        logger.error(f"yfinance fetch CN daily failed for {symbol}: {e}")
-        return pd.DataFrame()
+        logger.warning(f"yfinance fetch CN daily skipped for {symbol}: {e}")
+        return _with_status(pd.DataFrame(), _classify_exception(e), str(e))
 
 
-def fetch_hk_daily(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+def fetch_hk_daily(symbol: str, start_date: str, end_date: str, log_empty: bool = True) -> pd.DataFrame:
     """拉取港股日线（通过 yfinance）"""
     try:
         ticker_str = _hk_symbol_to_yfinance(symbol)
         ticker = yf.Ticker(ticker_str)
         df = ticker.history(start=start_date, end=_fix_end_date(end_date))
         if df.empty:
-            logger.warning(f"yfinance HK daily empty: {ticker_str}")
-            return pd.DataFrame()
+            if log_empty:
+                logger.warning(f"yfinance HK daily empty: {ticker_str}")
+            return _with_status(pd.DataFrame(), STATUS_EMPTY)
         df = df.reset_index()
         df = df.rename(columns={
             "Date": "trade_date", "Open": "open", "High": "high",
@@ -67,10 +103,10 @@ def fetch_hk_daily(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         df["trade_date"] = df["trade_date"].dt.tz_localize(None)
         df["symbol"] = symbol
         df["country"] = "HK"
-        return df
+        return _with_status(df, STATUS_OK)
     except Exception as e:
-        logger.error(f"yfinance fetch HK daily failed for {symbol}: {e}")
-        return pd.DataFrame()
+        logger.warning(f"yfinance fetch HK daily skipped for {symbol}: {e}")
+        return _with_status(pd.DataFrame(), _classify_exception(e), str(e))
 
 
 def fetch_hk_index_daily(index_yfinance_code: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -80,7 +116,7 @@ def fetch_hk_index_daily(index_yfinance_code: str, start_date: str, end_date: st
         df = ticker.history(start=start_date, end=_fix_end_date(end_date))
         if df.empty:
             logger.warning(f"yfinance index daily empty: {index_yfinance_code}")
-            return pd.DataFrame()
+            return _with_status(pd.DataFrame(), STATUS_EMPTY)
         df = df.reset_index()
         df = df.rename(columns={
             "Date": "trade_date", "Open": "open", "High": "high",
@@ -88,10 +124,10 @@ def fetch_hk_index_daily(index_yfinance_code: str, start_date: str, end_date: st
         })
         df["trade_date"] = df["trade_date"].dt.tz_localize(None)
         df["index_code"] = index_yfinance_code
-        return df
+        return _with_status(df, STATUS_OK)
     except Exception as e:
-        logger.error(f"yfinance fetch index daily failed for {index_yfinance_code}: {e}")
-        return pd.DataFrame()
+        logger.warning(f"yfinance fetch index daily skipped for {index_yfinance_code}: {e}")
+        return _with_status(pd.DataFrame(), _classify_exception(e), str(e))
 
 
 def fetch_hk_components_hsi() -> list[str]:
@@ -107,5 +143,5 @@ def fetch_hk_components_hsi() -> list[str]:
         logger.warning("Could not parse HSI components from Wikipedia")
         return []
     except Exception as e:
-        logger.error(f"Fetch HSI components failed: {e}")
+        logger.warning(f"Fetch HSI components skipped: {e}")
         return []

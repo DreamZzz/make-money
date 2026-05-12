@@ -1,0 +1,32 @@
+index_funds:
+  enabled: true
+  watchlist:
+    - fund_code: "004192"
+      name: "招商中证500指数增强A"
+      fund_type: "OPEN"
+      tracking_index: "000905"
+      tracking_index_name: "中证500"
+      market: "CN"
+      currency: "CNY"
+      target_weight: 0.34
+      enabled: true
+
+    - fund_code: "013308"
+      name: "易方达恒生科技ETF联接(QDII)A"
+      fund_type: "OPEN"
+      tracking_index: "3032.HK"
+      tracking_index_name: "恒生科技"
+      market: "CN"
+      currency: "CNY"
+      target_weight: 0.33
+      enabled: true
+
+    - fund_code: "012963"
+      name: "招商稳健平衡混合A（临时以沪深300作权益基准）"
+      fund_type: "OPEN"
+      tracking_index: "000300"
+      tracking_index_name: "沪深300（临时基准）"
+      market: "CN"
+      currency: "CNY"
+      target_weight: 0.33
+      enabled: true

@@ -20,8 +20,10 @@ def get_config() -> dict:
 
 def get_db_path() -> str:
     config = get_config()
-    db_rel = config["data"]["duckdb_path"]
-    return str(PROJECT_ROOT / db_rel)
+    db_path = Path(config["data"]["duckdb_path"])
+    if not db_path.is_absolute():
+        db_path = PROJECT_ROOT / db_path
+    return str(db_path)
 
 
 def init_db(conn: duckdb.DuckDBPyConnection) -> None:
@@ -32,14 +34,80 @@ def init_db(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute(sql)
     # 为旧库补充 signals 表的纸交易字段（新库由 schema.sql 覆盖，此处幂等）
     for col_ddl in [
+        "ALTER TABLE daily_price ADD COLUMN IF NOT EXISTS pre_close DOUBLE",
+        "ALTER TABLE daily_price ADD COLUMN IF NOT EXISTS adj_close DOUBLE",
+        "ALTER TABLE daily_price ADD COLUMN IF NOT EXISTS adj_factor DOUBLE",
+        "ALTER TABLE daily_price ADD COLUMN IF NOT EXISTS pe_ttm DOUBLE",
+        "ALTER TABLE daily_price ADD COLUMN IF NOT EXISTS pb DOUBLE",
+        "ALTER TABLE daily_price ADD COLUMN IF NOT EXISTS is_st BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE daily_price ADD COLUMN IF NOT EXISTS is_suspended BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE market_snapshot ADD COLUMN IF NOT EXISTS update_time TIMESTAMP",
+        "ALTER TABLE market_snapshot ADD COLUMN IF NOT EXISTS pct_chg DOUBLE",
+        "ALTER TABLE market_snapshot ADD COLUMN IF NOT EXISTS volume_ratio DOUBLE",
+        "ALTER TABLE market_snapshot ADD COLUMN IF NOT EXISTS amplitude DOUBLE",
+        "ALTER TABLE market_snapshot ADD COLUMN IF NOT EXISTS float_market_cap DOUBLE",
+        "ALTER TABLE market_snapshot ADD COLUMN IF NOT EXISTS source VARCHAR DEFAULT 'daily_price'",
         "ALTER TABLE signals ADD COLUMN IF NOT EXISTS executed BOOLEAN DEFAULT FALSE",
         "ALTER TABLE signals ADD COLUMN IF NOT EXISTS execution_price DOUBLE",
         "ALTER TABLE signals ADD COLUMN IF NOT EXISTS execution_date DATE",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'ACTIVE'",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS status_reason VARCHAR",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS expires_at DATE",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS superseded_by VARCHAR",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE portfolio_nav ADD COLUMN IF NOT EXISTS external_flow DOUBLE DEFAULT 0",
+        "ALTER TABLE portfolio_nav ADD COLUMN IF NOT EXISTS net_contribution DOUBLE DEFAULT 0",
+        "ALTER TABLE portfolio_nav ADD COLUMN IF NOT EXISTS investment_nav DOUBLE DEFAULT 1",
+        "ALTER TABLE paper_orders ADD COLUMN IF NOT EXISTS order_value DOUBLE",
+        "ALTER TABLE paper_orders ADD COLUMN IF NOT EXISTS fee DOUBLE",
+        "ALTER TABLE paper_orders ADD COLUMN IF NOT EXISTS cash_before DOUBLE",
+        "ALTER TABLE paper_orders ADD COLUMN IF NOT EXISTS cash_after DOUBLE",
+        "ALTER TABLE paper_orders ADD COLUMN IF NOT EXISTS status_reason VARCHAR",
+        "ALTER TABLE qlib_experiments ADD COLUMN IF NOT EXISTS mode VARCHAR",
+        "ALTER TABLE qlib_experiments ADD COLUMN IF NOT EXISTS metrics_json TEXT",
+        "ALTER TABLE qlib_experiments ADD COLUMN IF NOT EXISTS error_message VARCHAR",
+        "ALTER TABLE qlib_predictions ADD COLUMN IF NOT EXISTS confidence DOUBLE",
+        "ALTER TABLE qlib_predictions ADD COLUMN IF NOT EXISTS selected BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE qlib_daily_metrics ADD COLUMN IF NOT EXISTS portfolio_return DOUBLE",
+        "ALTER TABLE qlib_daily_metrics ADD COLUMN IF NOT EXISTS benchmark_return DOUBLE",
+        "ALTER TABLE qlib_model_registry ADD COLUMN IF NOT EXISTS published_at TIMESTAMP",
+        "ALTER TABLE qlib_model_registry ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP",
+        "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS buffer_n INTEGER",
+        "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS benchmark_name VARCHAR",
+        "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS metrics_json TEXT",
+        "ALTER TABLE qlib_candidate_results ADD COLUMN IF NOT EXISTS params_json TEXT",
+        "ALTER TABLE qlib_candidate_results ADD COLUMN IF NOT EXISTS grid_json TEXT",
+        "ALTER TABLE qlib_candidate_results ADD COLUMN IF NOT EXISTS rank_ic_positive_rate DOUBLE",
+        "ALTER TABLE qlib_candidate_results ADD COLUMN IF NOT EXISTS error_message VARCHAR",
     ]:
         try:
             conn.execute(col_ddl)
         except Exception:
             pass
+    try:
+        conn.execute("""
+            UPDATE signals s
+            SET status = CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM paper_orders po WHERE po.signal_id = s.signal_id
+                    ) THEN 'FILLED'
+                    ELSE 'SUPERSEDED'
+                END,
+                status_reason = COALESCE(
+                    status_reason,
+                    CASE
+                        WHEN EXISTS (
+                            SELECT 1 FROM paper_orders po WHERE po.signal_id = s.signal_id
+                        ) THEN '历史成交信号'
+                        ELSE '历史已处理信号归档'
+                    END
+                ),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE s.executed = TRUE
+              AND COALESCE(s.status, 'ACTIVE') = 'ACTIVE'
+        """)
+    except Exception:
+        pass
     logger.info("Database tables initialized")
 
 
@@ -57,12 +125,59 @@ def upsert_stock_info(conn: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> int:
     return len(df)
 
 
+def repair_market_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, int]:
+    """补齐历史行情里已有、但 stock_info 缺失的市场元数据。"""
+    hk_df = conn.execute("""
+        SELECT DISTINCT symbol
+        FROM daily_price
+        WHERE regexp_matches(symbol, '^[0-9]{1,5}$')
+          AND symbol NOT IN (SELECT symbol FROM stock_info)
+    """).fetchdf()
+    cn_df = conn.execute("""
+        SELECT DISTINCT symbol
+        FROM daily_price
+        WHERE regexp_matches(symbol, '^[0-9]{6}$')
+          AND symbol NOT IN (SELECT symbol FROM stock_info)
+    """).fetchdf()
+
+    inserted_hk = 0
+    inserted_cn = 0
+    if not hk_df.empty:
+        hk_df["country"] = "HK"
+        hk_df["name"] = hk_df["symbol"]
+        hk_df["exchange"] = "SEHK"
+        hk_df["currency"] = "HKD"
+        conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_hk_meta AS SELECT * FROM hk_df")
+        conn.execute("""
+            INSERT OR REPLACE INTO stock_info (symbol, country, name, exchange, currency)
+            SELECT symbol, country, name, exchange, currency FROM _tmp_hk_meta
+        """)
+        inserted_hk = len(hk_df)
+
+    if not cn_df.empty:
+        cn_df["country"] = "CN"
+        cn_df["name"] = cn_df["symbol"]
+        cn_df["exchange"] = cn_df["symbol"].map(lambda s: "SSE" if str(s).startswith(("6", "5")) else "SZSE")
+        cn_df["currency"] = "CNY"
+        conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_cn_meta AS SELECT * FROM cn_df")
+        conn.execute("""
+            INSERT OR REPLACE INTO stock_info (symbol, country, name, exchange, currency)
+            SELECT symbol, country, name, exchange, currency FROM _tmp_cn_meta
+        """)
+        inserted_cn = len(cn_df)
+
+    if inserted_hk or inserted_cn:
+        logger.info(f"Repaired market metadata: HK={inserted_hk}, CN={inserted_cn}")
+    return {"hk": inserted_hk, "cn": inserted_cn}
+
+
 def upsert_daily_price(conn: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> int:
     """导入日线行情（覆盖更新）"""
     if df.empty:
         return 0
     columns = ["symbol", "trade_date", "open", "high", "low", "close",
-               "volume", "amount", "turnover_rate"]
+               "pre_close", "volume", "amount", "adj_close", "adj_factor",
+               "turnover_rate", "pe_ttm", "pb", "is_st", "is_suspended"]
     existing = [c for c in columns if c in df.columns]
     # 确保 trade_date 是 date 类型
     if "trade_date" in df.columns:
@@ -73,6 +188,118 @@ def upsert_daily_price(conn: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> int
         SELECT {", ".join(existing)} FROM _tmp_daily
     """)
     return len(df)
+
+
+def upsert_market_snapshot(conn: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> int:
+    """导入日终行情快照（覆盖更新）。"""
+    if df.empty:
+        return 0
+    columns = [
+        "symbol", "market", "trade_date", "update_time", "last_price", "open", "high", "low",
+        "prev_close", "pct_chg", "volume", "amount", "turnover_rate", "volume_ratio",
+        "amplitude", "pe_ttm", "pb", "market_cap", "float_market_cap", "is_suspended", "source",
+    ]
+    existing = [c for c in columns if c in df.columns]
+    if "trade_date" in df.columns:
+        df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+    if "update_time" in df.columns:
+        df["update_time"] = pd.to_datetime(df["update_time"], errors="coerce")
+    conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_market_snapshot AS SELECT * FROM df")
+    conn.execute(f"""
+        INSERT OR REPLACE INTO market_snapshot ({", ".join(existing)})
+        SELECT {", ".join(existing)} FROM _tmp_market_snapshot
+    """)
+    return len(df)
+
+
+def build_market_snapshot_from_daily(
+    conn: duckdb.DuckDBPyConnection,
+    markets: Optional[list[str]] = None,
+) -> int:
+    """从最新日线派生日终快照，作为券商级快照字段的基础层。
+
+    外部行情源补齐前，先用本地日线统一计算昨收、涨跌幅、量比和振幅。
+    """
+    market_values = [m.upper() for m in (markets or ["CN", "HK"])]
+    markets_df = pd.DataFrame({"market": market_values})
+    conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_snapshot_markets AS SELECT * FROM markets_df")
+    df = conn.execute("""
+        WITH priced AS (
+            SELECT
+                dp.symbol,
+                COALESCE(
+                    si.country,
+                    CASE
+                        WHEN regexp_matches(dp.symbol, '^[0-9]{6}$') THEN 'CN'
+                        WHEN regexp_matches(dp.symbol, '^[0-9]{1,5}$') THEN 'HK'
+                        ELSE 'OTHER'
+                    END
+                ) AS market,
+                dp.trade_date,
+                CAST(dp.trade_date AS TIMESTAMP) + INTERVAL '15 hours' AS update_time,
+                dp.close AS last_price,
+                dp.open,
+                dp.high,
+                dp.low,
+                COALESCE(
+                    dp.pre_close,
+                    LAG(dp.close) OVER (PARTITION BY dp.symbol ORDER BY dp.trade_date)
+                ) AS prev_close,
+                dp.volume,
+                dp.amount,
+                dp.turnover_rate,
+                AVG(dp.volume) OVER (
+                    PARTITION BY dp.symbol
+                    ORDER BY dp.trade_date
+                    ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING
+                ) AS avg_volume_20,
+                dp.pe_ttm,
+                dp.pb,
+                si.market_cap,
+                dp.is_suspended
+            FROM daily_price dp
+            LEFT JOIN stock_info si ON dp.symbol = si.symbol
+        ),
+        latest AS (
+            SELECT *
+            FROM priced
+            WHERE market IN (SELECT market FROM _tmp_snapshot_markets)
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY trade_date DESC) = 1
+        )
+        SELECT
+            symbol,
+            market,
+            trade_date,
+            update_time,
+            last_price,
+            open,
+            high,
+            low,
+            prev_close,
+            CASE
+                WHEN prev_close IS NOT NULL AND prev_close != 0
+                THEN (last_price - prev_close) / prev_close * 100
+            END AS pct_chg,
+            volume,
+            amount,
+            turnover_rate,
+            CASE
+                WHEN avg_volume_20 IS NOT NULL AND avg_volume_20 != 0
+                THEN volume / avg_volume_20
+            END AS volume_ratio,
+            CASE
+                WHEN prev_close IS NOT NULL AND prev_close != 0
+                THEN (high - low) / prev_close * 100
+            END AS amplitude,
+            pe_ttm,
+            pb,
+            market_cap,
+            NULL::DOUBLE AS float_market_cap,
+            COALESCE(is_suspended, FALSE) AS is_suspended,
+            'daily_price' AS source
+        FROM latest
+    """).fetchdf()
+    return upsert_market_snapshot(conn, df)
 
 
 def upsert_index_daily(conn: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> int:
@@ -87,6 +314,36 @@ def upsert_index_daily(conn: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> int
     conn.execute(f"""
         INSERT OR REPLACE INTO index_daily ({", ".join(existing)})
         SELECT {", ".join(existing)} FROM _tmp_idx
+    """)
+    return len(df)
+
+
+def upsert_fund_info(conn: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> int:
+    """导入指数基金基本信息（覆盖更新）"""
+    if df.empty:
+        return 0
+    columns = ["fund_code", "name", "fund_type", "tracking_index", "market", "currency", "enabled"]
+    existing = [c for c in columns if c in df.columns]
+    conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_fund_info AS SELECT * FROM df")
+    conn.execute(f"""
+        INSERT OR REPLACE INTO fund_info ({", ".join(existing)})
+        SELECT {", ".join(existing)} FROM _tmp_fund_info
+    """)
+    return len(df)
+
+
+def upsert_fund_nav(conn: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> int:
+    """导入指数基金净值/行情（覆盖更新）"""
+    if df.empty:
+        return 0
+    columns = ["fund_code", "trade_date", "nav", "close", "premium_discount"]
+    existing = [c for c in columns if c in df.columns]
+    if "trade_date" in df.columns:
+        df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+    conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_fund_nav AS SELECT * FROM df")
+    conn.execute(f"""
+        INSERT OR REPLACE INTO fund_nav ({", ".join(existing)})
+        SELECT {", ".join(existing)} FROM _tmp_fund_nav
     """)
     return len(df)
 

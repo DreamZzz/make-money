@@ -1,0 +1,116 @@
+import sys
+
+from src.dashboard import job_manager as jm
+
+
+def _install_jobs(monkeypatch, tmp_path, jobs):
+    monkeypatch.setattr(jm, "RUNS_DIR", tmp_path)
+    monkeypatch.setattr(jm, "JOB_DEFINITIONS", jobs)
+
+
+def _job(key, steps, kind="single"):
+    return jm.JobDefinition(
+        key=key,
+        label=key,
+        desc="test job",
+        kind=kind,
+        steps=tuple(steps),
+    )
+
+
+def test_job_manager_single_success_persists_and_restores(monkeypatch, tmp_path):
+    jobs = {
+        "ok": _job("ok", [
+            jm.JobStep("hello", "hello", [sys.executable, "-c", "print('hello job')"]),
+        ])
+    }
+    _install_jobs(monkeypatch, tmp_path, jobs)
+
+    run = jm.run_job("ok")
+    restored = jm.poll_run(run.run_id)
+
+    assert run.status == jm.SUCCEEDED
+    assert restored is not None
+    assert restored.status == jm.SUCCEEDED
+    assert restored.exit_code == 0
+    assert restored.steps[0]["status"] == jm.SUCCEEDED
+    assert "hello job" in jm.tail_log(run.run_id)
+    assert jm.latest_run("ok").run_id == run.run_id
+
+
+def test_job_manager_workflow_stops_after_failed_step(monkeypatch, tmp_path):
+    jobs = {
+        "flow": _job("flow", [
+            jm.JobStep("first", "first", [sys.executable, "-c", "print('first')"]),
+            jm.JobStep("fail", "fail", [sys.executable, "-c", "import sys; print('failed'); sys.exit(7)"]),
+            jm.JobStep("after", "after", [sys.executable, "-c", "print('after')"]),
+        ], kind="workflow")
+    }
+    _install_jobs(monkeypatch, tmp_path, jobs)
+
+    run = jm.run_job("flow")
+    statuses = [step["status"] for step in run.steps]
+
+    assert run.status == jm.FAILED
+    assert run.exit_code == 7
+    assert statuses == [jm.SUCCEEDED, jm.FAILED, jm.SKIPPED]
+    log_text = jm.tail_log(run.run_id, lines=20)
+    assert "failed" in log_text
+    assert "after" not in log_text
+
+
+def test_job_manager_tail_log_limits_lines(monkeypatch, tmp_path):
+    jobs = {
+        "lines": _job("lines", [
+            jm.JobStep(
+                "emit",
+                "emit",
+                [sys.executable, "-c", "for i in range(5): print(f'line-{i}')"],
+            ),
+        ])
+    }
+    _install_jobs(monkeypatch, tmp_path, jobs)
+
+    run = jm.run_job("lines")
+    with open(run.log_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(f"line-{i}" for i in range(5)))
+
+    assert jm.tail_log("missing") == ""
+    assert jm.tail_log(run.run_id, lines=2).splitlines() == ["line-3", "line-4"]
+    assert "line-0" in jm.tail_log(run.run_id, lines=0)
+
+
+def test_job_manager_latest_run_without_session_state(monkeypatch, tmp_path):
+    jobs = {
+        "a": _job("a", [jm.JobStep("a", "a", [sys.executable, "-c", "print('a')"])]),
+        "b": _job("b", [jm.JobStep("b", "b", [sys.executable, "-c", "print('b')"])]),
+    }
+    _install_jobs(monkeypatch, tmp_path, jobs)
+
+    first = jm.run_job("a")
+    second = jm.run_job("b")
+
+    assert jm.poll_run(first.run_id).status == jm.SUCCEEDED
+    assert jm.latest_run().run_id == second.run_id
+    assert jm.latest_run("a").run_id == first.run_id
+
+
+def test_resolve_qlib_python_prefers_explicit_env(monkeypatch):
+    monkeypatch.setenv("QLIB_PYTHON", "/custom/qlib-python")
+    assert jm._resolve_qlib_python("/default", candidates=["/other"]) == "/custom/qlib-python"
+
+
+def test_resolve_qlib_python_finds_candidate_that_imports_qlib(monkeypatch):
+    monkeypatch.delenv("QLIB_PYTHON", raising=False)
+    monkeypatch.setattr(jm, "_python_can_import", lambda python, module: python == "/usr/bin/python3" and module == "qlib")
+    result = jm._resolve_qlib_python("/opt/python3.12", candidates=["/opt/python3.12", "/usr/bin/python3"])
+    assert result == "/usr/bin/python3"
+
+
+def test_qlib_job_steps_use_qlib_capable_python_when_available():
+    qlib_steps = {
+        "qlib_status", "qlib_prepare", "qlib_fixed", "qlib_walk",
+        "qlib_grid", "qlib_candidates", "qlib_predict",
+    }
+    for key in qlib_steps:
+        assert jm.SINGLE_STEPS[key].cmd[0] == jm.QLIB_PYTHON

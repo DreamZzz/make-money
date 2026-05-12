@@ -2,7 +2,9 @@
 import os
 from pathlib import Path
 
-PROJECT_ROOT = Path(os.environ.get("MM_PROJECT_ROOT", Path.cwd()))
+PROJECT_ROOT = Path(
+    os.environ.get("MM_PROJECT_ROOT", Path(__file__).resolve().parent.parent)
+).resolve()
 
 # 默认配置（与 config/settings.yaml 同步，作为无 YAML 时的回退）
 # ---- 数据质量规则 ----
@@ -44,6 +46,9 @@ DEFAULT_CONFIG = {
         "update_time": "17:00",
         "duckdb_path": "data/duckdb/market.db",
         "raw_data_path": "data/raw",
+        "max_update_failures": 0,
+        "akshare_cn_min_interval_seconds": 0.8,
+        "akshare_cn_error_circuit_threshold": 12,
     },
     "qlib": {
         "cn_data_path": "qlib_data/cn_data",
@@ -53,13 +58,21 @@ DEFAULT_CONFIG = {
         "valid_start": "2023-01-01",
         "valid_end": "2023-12-31",
         "test_start": "2024-01-01",
-        "test_end": "2025-04-29",
+        "test_end": None,
     },
     "portfolio": {
-        "initial_capital_cn": 100000,
+        "initial_capital_cn": 300000,
         "initial_capital_hk": 100000,
         "max_single_position_pct": 0.10,
+        "overweight_single_position_pct": 0.15,
+        "overweight_min_confidence": 0.90,
+        "overweight_min_rank_score": 0.85,
         "max_industry_pct": 0.30,
+        "max_gross_exposure_pct": 0.95,
+        "cash_reserve_pct": 0.05,
+        "min_rebalance_buy_confidence": 0.75,
+        "min_rebalance_buy_rank_score": 0.50,
+        "estimated_trade_fee_rate": 0.0015,
         "max_drawdown_limit": 0.20,
         "rebalance": {"frequency": "weekly", "weekday": 5},
         "benchmark_weights": {"000300.SH": 0.35, "000905.SH": 0.15, "^HSI": 0.35, "3032.HK": 0.15},
@@ -68,6 +81,43 @@ DEFAULT_CONFIG = {
         "min_confidence": 0.6,
         "output_format": "csv",
         "output_path": "output/signals",
+    },
+    "index_funds": {
+        "enabled": True,
+        "watchlist": [
+            {
+                "fund_code": "",
+                "name": "沪深300指数基金",
+                "fund_type": "ETF",
+                "tracking_index": "000300",
+                "tracking_index_name": "沪深300",
+                "market": "CN",
+                "currency": "CNY",
+                "target_weight": 0.50,
+                "enabled": True,
+            },
+            {
+                "fund_code": "",
+                "name": "中证500指数基金",
+                "fund_type": "ETF",
+                "tracking_index": "000905",
+                "tracking_index_name": "中证500",
+                "market": "CN",
+                "currency": "CNY",
+                "target_weight": 0.50,
+                "enabled": True,
+            },
+        ],
+        "rules": {
+            "valuation_window_days": 756,
+            "low_valuation_percentile": 0.30,
+            "high_valuation_percentile": 0.80,
+            "trend_ma_fast": 120,
+            "trend_ma_slow": 250,
+            "rebalance_threshold_pct": 0.05,
+            "single_adjust_pct": 0.10,
+            "min_confidence": 0.45,
+        },
     },
     "logging": {"level": "INFO", "file": "output/system.log"},
 }

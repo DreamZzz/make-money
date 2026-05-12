@@ -13,7 +13,7 @@ import click
 import pandas as pd
 from loguru import logger
 
-from src.config import PROJECT_ROOT, load_config
+from src.config import DATA_QUALITY_RULES, PROJECT_ROOT, load_config
 
 # 绕过代理访问金融数据 API（如果代理拦截了 *.eastmoney.com / 东方财富）
 _NO_PROXY_DOMAINS = "eastmoney.com,push2his.eastmoney.com,yahoo.com,github.com,wikipedia.org"
@@ -56,10 +56,12 @@ def _fix_urllib3():
 from src.data_pipeline.fetchers import akshare_fetcher as ak
 from src.data_pipeline.fetchers import yfinance_fetcher as yf
 from src.data_pipeline.loader import (
+    build_market_snapshot_from_daily,
     get_all_symbols,
     get_connection,
     get_last_trade_date,
     init_db,
+    repair_market_metadata,
     upsert_daily_price,
     upsert_index_daily,
     upsert_stock_info,
@@ -216,30 +218,106 @@ def update_all(conn, config: dict):
     logger.info("=== 增量更新 ===")
     start_date, end_date = _default_dates(config)
     start_date_yf, end_date_yf = _default_dates_yf(config)
+    repair_market_metadata(conn)
+    stats = {
+        "cn_attempted": 0,
+        "cn_updated": 0,
+        "cn_no_data": 0,
+        "cn_source_error": 0,
+        "cn_akshare_source_error": 0,
+        "cn_akshare_circuit_skip": 0,
+        "cn_yfinance_source_error": 0,
+        "cn_yfinance_rate_limited": 0,
+        "cn_yfinance_skipped_circuit": 0,
+        "cn_failed": 0,
+        "hk_attempted": 0,
+        "hk_updated": 0,
+        "hk_no_data": 0,
+        "hk_source_error": 0,
+        "hk_yfinance_rate_limited": 0,
+        "hk_failed": 0,
+        "index_updated": 0,
+        "index_failed": 0,
+    }
 
     # 只更新 daily_price 表中已有的股票
     cn_with_data = conn.execute(
         "SELECT DISTINCT symbol FROM daily_price WHERE symbol IN (SELECT symbol FROM stock_info WHERE country='CN')"
     ).fetchall()
     hk_with_data = conn.execute(
-        "SELECT DISTINCT symbol FROM daily_price WHERE symbol IN (SELECT symbol FROM stock_info WHERE country='HK')"
+        """
+        SELECT DISTINCT dp.symbol
+        FROM daily_price dp
+        LEFT JOIN stock_info si ON dp.symbol = si.symbol
+        WHERE si.country = 'HK' OR regexp_matches(dp.symbol, '^[0-9]{1,5}$')
+        """
     ).fetchall()
     cn_symbols = [r[0] for r in cn_with_data]
     hk_symbols = [r[0] for r in hk_with_data]
 
-    # A股 增量（yfinance 主通道，和 init_all 保持一致）
+    # A股 增量：AkShare 主通道；yfinance 只做兜底，遇到限流后本轮熔断。
     logger.info(f"Updating CN: {len(cn_symbols)} symbols with data")
+    yfinance_cn_circuit_open = False
+    akshare_cn_circuit_open = False
+    akshare_consecutive_errors = 0
+    data_cfg = config.get("data", {})
+    akshare_circuit_threshold = int(data_cfg.get("akshare_cn_error_circuit_threshold", 12))
+    ak.configure_cn_daily_rate_limit(float(data_cfg.get("akshare_cn_min_interval_seconds", 0.8)))
     for sym in cn_symbols:
         last = get_last_trade_date(conn, sym)
         if last and (date.today() - last).days == 0:
             continue  # 今天已有数据，跳过
+        stats["cn_attempted"] += 1
         fetch_start_yf = (last + timedelta(days=1)).strftime("%Y-%m-%d") if last else start_date_yf
+        fetch_start_ak = (last + timedelta(days=1)).strftime("%Y%m%d") if last else start_date
         try:
-            df = yf.fetch_cn_daily(sym, fetch_start_yf, end_date_yf)
+            akshare_skipped_current = False
+            if akshare_cn_circuit_open:
+                df = pd.DataFrame()
+                ak_status = ak.STATUS_SOURCE_ERROR
+                akshare_skipped_current = True
+                stats["cn_akshare_circuit_skip"] += 1
+            else:
+                df = ak.fetch_cn_stock_daily(sym, start_date=fetch_start_ak, end_date=end_date, log_empty=False)
+                ak_status = ak.source_status(df)
+                if ak_status == ak.STATUS_SOURCE_ERROR:
+                    akshare_consecutive_errors += 1
+                    if ak.is_transient_source_error(df) and akshare_consecutive_errors >= akshare_circuit_threshold:
+                        akshare_cn_circuit_open = True
+                        logger.warning(
+                            "AkShare CN transient errors reached "
+                            f"{akshare_consecutive_errors}; circuit opened for the rest of this update run"
+                        )
+                else:
+                    akshare_consecutive_errors = 0
+
+            yf_status = None
+            if df.empty and not yfinance_cn_circuit_open:
+                df_yf = yf.fetch_cn_daily(sym, fetch_start_yf, end_date_yf, log_empty=False)
+                yf_status = yf.source_status(df_yf)
+                if yf.is_rate_limited(df_yf):
+                    yfinance_cn_circuit_open = True
+                    stats["cn_yfinance_rate_limited"] += 1
+                    logger.warning("yfinance CN rate limited; circuit opened for the rest of this update run")
+                elif yf_status == yf.STATUS_SOURCE_ERROR:
+                    stats["cn_yfinance_source_error"] += 1
+                if not df_yf.empty:
+                    df = df_yf
+            elif df.empty and yfinance_cn_circuit_open:
+                stats["cn_yfinance_skipped_circuit"] += 1
+
             if not df.empty:
                 upsert_daily_price(conn, df)
-        except Exception:
-            pass
+                stats["cn_updated"] += 1
+            elif ak_status == ak.STATUS_SOURCE_ERROR and (yf_status is None or yf_status in {yf.STATUS_SOURCE_ERROR, yf.STATUS_RATE_LIMITED}):
+                stats["cn_source_error"] += 1
+                if not akshare_skipped_current:
+                    stats["cn_akshare_source_error"] += 1
+            else:
+                stats["cn_no_data"] += 1
+        except Exception as e:
+            stats["cn_failed"] += 1
+            logger.warning(f"CN daily update failed after fallback {sym}: {e}")
 
     # 港股 增量（yfinance 主通道）
     logger.info(f"Updating HK: {len(hk_symbols)} symbols with data")
@@ -247,13 +325,30 @@ def update_all(conn, config: dict):
         last = get_last_trade_date(conn, sym)
         if last and (date.today() - last).days == 0:
             continue
+        stats["hk_attempted"] += 1
         fetch_start_yf = (last + timedelta(days=1)).strftime("%Y-%m-%d") if last else start_date_yf
+        fetch_start_ak = (last + timedelta(days=1)).strftime("%Y%m%d") if last else start_date
         try:
-            df = yf.fetch_hk_daily(sym, fetch_start_yf, end_date_yf)
+            df = yf.fetch_hk_daily(sym, fetch_start_yf, end_date_yf, log_empty=False)
+            yf_status = yf.source_status(df)
             if not df.empty:
                 upsert_daily_price(conn, df)
-        except Exception:
-            pass
+                stats["hk_updated"] += 1
+            else:
+                if yf.is_rate_limited(df):
+                    stats["hk_yfinance_rate_limited"] += 1
+                df = ak.fetch_hk_stock_daily(sym, start_date=fetch_start_ak, end_date=end_date, log_empty=False)
+                ak_status = ak.source_status(df)
+                if not df.empty:
+                    upsert_daily_price(conn, df)
+                    stats["hk_updated"] += 1
+                elif yf_status in {yf.STATUS_SOURCE_ERROR, yf.STATUS_RATE_LIMITED} and ak_status == ak.STATUS_SOURCE_ERROR:
+                    stats["hk_source_error"] += 1
+                else:
+                    stats["hk_no_data"] += 1
+        except Exception as e:
+            stats["hk_failed"] += 1
+            logger.warning(f"HK daily update failed after fallback {sym}: {e}")
 
     # 指数增量
     for code in CN_INDEX_AKSHARE:
@@ -261,32 +356,106 @@ def update_all(conn, config: dict):
             df = ak.fetch_cn_index_daily(code, start_date=start_date, end_date=end_date)
             if not df.empty:
                 upsert_index_daily(conn, df)
-        except Exception:
-            pass
+                stats["index_updated"] += 1
+        except Exception as e:
+            stats["index_failed"] += 1
+            logger.warning(f"CN index update failed {code}: {e}")
     for code, ycode in HK_INDEX_YFINANCE.items():
         try:
             df = yf.fetch_hk_index_daily(ycode, start_date=start_date_yf, end_date=end_date_yf)
             if not df.empty:
                 upsert_index_daily(conn, df)
-        except Exception:
-            pass
+                stats["index_updated"] += 1
+        except Exception as e:
+            stats["index_failed"] += 1
+            logger.warning(f"HK index update failed {ycode}: {e}")
 
+    logger.info(
+        "增量更新汇总: "
+        f"CN attempted={stats['cn_attempted']} updated={stats['cn_updated']} "
+        f"no_data={stats['cn_no_data']} source_error={stats['cn_source_error']} failed={stats['cn_failed']} "
+        f"(ak_error={stats['cn_akshare_source_error']}, ak_circuit_skip={stats['cn_akshare_circuit_skip']}, "
+        f"yf_error={stats['cn_yfinance_source_error']}, "
+        f"yf_rate_limited={stats['cn_yfinance_rate_limited']}, yf_circuit_skip={stats['cn_yfinance_skipped_circuit']}) | "
+        f"HK attempted={stats['hk_attempted']} updated={stats['hk_updated']} "
+        f"no_data={stats['hk_no_data']} source_error={stats['hk_source_error']} failed={stats['hk_failed']} "
+        f"(yf_rate_limited={stats['hk_yfinance_rate_limited']}) | "
+        f"index updated={stats['index_updated']} failed={stats['index_failed']}"
+    )
     logger.info("=== 增量更新完成 ===")
+    return stats
+
+
+def _write_quality_status(conn, rows: list[dict]) -> None:
+    """Persist the latest structured data-quality check."""
+    if not rows:
+        return
+    df_quality = pd.DataFrame(rows)
+    conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_quality AS SELECT * FROM df_quality")
+    conn.execute("DELETE FROM data_quality_status")
+    conn.execute("""
+        INSERT INTO data_quality_status (check_ts, status, metric, value, threshold, detail)
+        SELECT check_ts, status, metric, value, threshold, detail FROM _tmp_quality
+    """)
 
 
 def check_data(conn, _config: dict, full: bool = False):
     """数据完整性检查。full=True 时进行成分股覆盖对比。"""
     from datetime import date as dt_date
     logger.info("=== 数据完整性检查 ===")
+    repair_market_metadata(conn)
 
     # 基础统计
     cn_all = conn.execute("SELECT COUNT(DISTINCT symbol) FROM daily_price WHERE symbol IN (SELECT symbol FROM stock_info WHERE country='CN')").fetchone()[0]
-    hk_all = conn.execute("SELECT COUNT(DISTINCT symbol) FROM daily_price WHERE symbol IN (SELECT symbol FROM stock_info WHERE country='HK')").fetchone()[0]
+    hk_all = conn.execute("""
+        SELECT COUNT(DISTINCT dp.symbol)
+        FROM daily_price dp
+        LEFT JOIN stock_info si ON dp.symbol = si.symbol
+        WHERE si.country='HK' OR regexp_matches(dp.symbol, '^[0-9]{1,5}$')
+    """).fetchone()[0]
     latest = conn.execute("SELECT MAX(trade_date) FROM daily_price").fetchone()[0]
     oldest = conn.execute("SELECT MIN(trade_date) FROM daily_price").fetchone()[0]
 
     logger.info(f"  A股日线: {cn_all} 只 | 港股日线: {hk_all} 只 | 合计: {cn_all+hk_all}")
     logger.info(f"  时间范围: {oldest} ~ {latest}")
+
+    check_ts = pd.Timestamp.now()
+    quality_rows = []
+
+    def add_quality(metric: str, value, threshold, passed: bool, detail: str):
+        quality_rows.append({
+            "check_ts": check_ts,
+            "status": "PASS" if passed else "WARN",
+            "metric": metric,
+            "value": float(value) if value is not None else None,
+            "threshold": float(threshold) if threshold is not None else None,
+            "detail": detail,
+        })
+
+    rules = DATA_QUALITY_RULES
+    add_quality(
+        "cn_stock_coverage",
+        cn_all,
+        rules["cn_min_stocks"],
+        cn_all >= rules["cn_min_stocks"],
+        f"A股覆盖 {cn_all} 只，阈值 {rules['cn_min_stocks']} 只",
+    )
+    add_quality(
+        "hk_stock_coverage",
+        hk_all,
+        rules["hk_min_stocks"],
+        hk_all >= rules["hk_min_stocks"],
+        f"港股覆盖 {hk_all} 只，阈值 {rules['hk_min_stocks']} 只",
+    )
+    if oldest and latest:
+        history_years = (latest - oldest).days / 365.0
+        add_quality(
+            "history_years",
+            history_years,
+            rules["min_history_years"],
+            history_years >= rules["min_history_years"],
+            f"历史区间 {oldest} ~ {latest}，约 {history_years:.1f} 年",
+        )
 
     # 近10天覆盖
     recent = conn.execute("""
@@ -349,12 +518,39 @@ def check_data(conn, _config: dict, full: bool = False):
     logger.info("=== 数据新鲜度 ===")
     today = dt_date.today()
     cn_latest = conn.execute("SELECT MAX(trade_date) FROM daily_price WHERE symbol IN (SELECT symbol FROM stock_info WHERE country='CN')").fetchone()[0]
-    hk_latest = conn.execute("SELECT MAX(trade_date) FROM daily_price WHERE symbol IN (SELECT symbol FROM stock_info WHERE country='HK')").fetchone()[0]
+    hk_latest = conn.execute("""
+        SELECT MAX(dp.trade_date)
+        FROM daily_price dp
+        LEFT JOIN stock_info si ON dp.symbol = si.symbol
+        WHERE si.country='HK' OR regexp_matches(dp.symbol, '^[0-9]{1,5}$')
+    """).fetchone()[0]
     for label, lat in [("A股", cn_latest), ("港股", hk_latest)]:
         if lat:
             behind = (today - lat).days
             flag = "✅ 正常" if behind <= 1 else ("🟡 落后" if behind <= 3 else "🔴 严重落后")
             logger.info(f"  {label}: {lat} ({flag}, {behind}天)")
+            add_quality(
+                f"{'cn' if label == 'A股' else 'hk'}_data_age_days",
+                behind,
+                DATA_QUALITY_RULES["max_data_age_days"],
+                behind <= DATA_QUALITY_RULES["max_data_age_days"],
+                f"{label}最新日期 {lat}，落后 {behind} 天",
+            )
+
+    try:
+        _write_quality_status(conn, quality_rows)
+        failed = [r for r in quality_rows if r["status"] != "PASS"]
+        if failed:
+            logger.warning(f"数据质量检查完成：{len(failed)} 项告警 / {len(quality_rows)} 项")
+        else:
+            logger.info(f"数据质量检查通过：{len(quality_rows)} 项")
+    except Exception as e:
+        logger.warning(f"数据质量状态写入失败: {e}")
+
+    return {
+        "status": "WARN" if any(r["status"] != "PASS" for r in quality_rows) else "PASS",
+        "checks": quality_rows,
+    }
 
 
 @click.group()
@@ -380,16 +576,42 @@ def update():
     """每日增量更新"""
     _setup_environment()
     conn = get_connection()
+    init_db(conn)
     config = _load_config()
-    update_all(conn, config)
+    stats = update_all(conn, config)
     conn.close()
+    failure_count = (
+        stats.get("cn_failed", 0)
+        + stats.get("hk_failed", 0)
+        + stats.get("cn_source_error", 0)
+        + stats.get("hk_source_error", 0)
+        + stats.get("index_failed", 0)
+    )
+    max_failures = config.get("data", {}).get("max_update_failures", 0)
+    if failure_count > max_failures:
+        raise click.ClickException(
+            f"增量更新存在 {failure_count} 个失败项，超过阈值 {max_failures}。"
+        )
+
+
+@cli.command("update-snapshot")
+@click.option("--markets", default="CN,HK", help="逗号分隔市场列表，例如 CN,HK")
+def update_snapshot(markets):
+    """从最新日线派生日终行情快照。"""
+    conn = get_connection()
+    init_db(conn)
+    market_list = [item.strip().upper() for item in markets.split(",") if item.strip()]
+    rows = build_market_snapshot_from_daily(conn, markets=market_list)
+    conn.close()
+    logger.info(f"市场行情快照更新完成: markets={','.join(market_list)} rows={rows}")
 
 
 @cli.command()
 @click.option("--full", is_flag=True, help="全面检查：对比指数成分股覆盖")
 def check(full):
     """数据完整性检查（--full 进行成分股覆盖对比）"""
-    conn = get_connection(read_only=True)
+    conn = get_connection()
+    init_db(conn)
     config = _load_config()
     check_data(conn, config, full=full)
     conn.close()

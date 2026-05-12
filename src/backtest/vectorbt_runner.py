@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
+from src.backtest.results import compute_metrics, load_benchmark_returns, save_backtest_result
+
 
 def _load_price_data(market: str = "cn") -> pd.DataFrame:
     """从 DuckDB 加载日线数据，整理为 vectorbt 需要的宽表格式"""
@@ -30,7 +32,12 @@ def _load_price_data(market: str = "cn") -> pd.DataFrame:
     return close.sort_index()
 
 
-def run_momentum_backtest(lookback: int = 20, top_n: int = 20, rebalance_freq: str = "W") -> dict:
+def run_momentum_backtest(
+    lookback: int = 20,
+    top_n: int = 20,
+    rebalance_freq: str = "W",
+    save_result: bool = False,
+) -> dict:
     """
     动量策略回测：买入过去 lookback 天涨幅最大的 top_n 只股票。
     等权重、每周调仓。
@@ -45,14 +52,13 @@ def run_momentum_backtest(lookback: int = 20, top_n: int = 20, rebalance_freq: s
     # 计算动量信号
     momentum = close.pct_change(lookback).dropna(how="all")
 
-    # 每周生成持仓信号
-    rebalance_dates = momentum.resample(rebalance_freq).last().index
+    # 每周生成持仓信号；resample 标签可能是周末，不要求它存在于原交易日索引。
+    rebalance_scores = momentum.resample(rebalance_freq).last().dropna(how="all")
+    rebalance_dates = rebalance_scores.index
 
     portfolio_returns = []
     for i, dt in enumerate(rebalance_dates):
-        if dt not in momentum.index:
-            continue
-        scores = momentum.loc[dt].dropna().nlargest(top_n)
+        scores = rebalance_scores.loc[dt].dropna().nlargest(top_n)
         if scores.empty:
             continue
 
@@ -68,24 +74,19 @@ def run_momentum_backtest(lookback: int = 20, top_n: int = 20, rebalance_freq: s
     all_returns = pd.concat(portfolio_returns).sort_index()
     all_returns = all_returns[~all_returns.index.duplicated()]
 
-    # 计算指标
-    cumulative = (1 + all_returns).cumprod()
-    annual_return = (cumulative.iloc[-1]) ** (252 / len(all_returns)) - 1
-    annual_vol = all_returns.std() * np.sqrt(252)
-    sharpe = (annual_return - 0.03) / annual_vol if annual_vol > 0 else 0  # 假设无风险利率 3%
-
-    peak = cumulative.expanding().max()
-    drawdown = (cumulative - peak) / peak
-    max_dd = drawdown.min()
-
-    return {
-        "annual_return": annual_return,
-        "cumulative_return": cumulative.iloc[-1] - 1,
-        "annual_volatility": annual_vol,
-        "sharpe_ratio": sharpe,
-        "max_drawdown": max_dd,
-        "turnover": 52 / lookback * top_n,  # 粗略估计
-    }
+    metrics = compute_metrics(
+        all_returns,
+        benchmark_returns=load_benchmark_returns("000300"),
+        turnover=52 / lookback * top_n,
+    )
+    if save_result and metrics:
+        metrics["run_id"] = save_backtest_result(
+            "momentum_topn",
+            "CN",
+            metrics,
+            {"lookback": lookback, "top_n": top_n, "rebalance_freq": rebalance_freq},
+        )
+    return metrics
 
 
 def run_benchmark(benchmark: str = "000300.SH") -> dict:
@@ -115,13 +116,14 @@ def run_benchmark(benchmark: str = "000300.SH") -> dict:
     peak = cumulative.expanding().max()
     drawdown = (cumulative - peak) / peak
 
-    return {
+    metrics = {
         "annual_return": annual_return,
         "cumulative_return": cumulative.iloc[-1] - 1,
         "annual_volatility": annual_vol,
         "sharpe_ratio": sharpe,
         "max_drawdown": drawdown.min(),
     }
+    return metrics
 
 
 def compare_with_qlib(
