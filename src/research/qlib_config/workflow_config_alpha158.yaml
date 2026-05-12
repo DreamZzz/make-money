@@ -9,7 +9,7 @@ market: &market csi300
 
 data_handler_config: &data_handler_config
     start_time: 2019-01-01
-    end_time: 2025-12-31
+    end_time: 2026-12-31
     fit_start_time: 2019-01-01
     fit_end_time: 2022-12-31
     instruments: *market
@@ -40,7 +40,7 @@ task:
             segments:
                 train: [2019-01-01, 2022-12-31]
                 valid: [2023-01-01, 2023-12-31]
-                test: [2024-01-01, 2025-12-31]
+                test: [2024-01-01, 2026-12-31]
 
     record:
         - class: SignalRecord
@@ -55,7 +55,7 @@ task:
 # 回测配置
 backtest:
     start_time: 2024-01-01
-    end_time: 2025-04-29
+    end_time: 2026-12-31
     account: 100000
     benchmark: "000300.SH"
     exchange_kwargs:

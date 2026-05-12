@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import click
+import numpy as np
 import pandas as pd
 from loguru import logger
 
@@ -19,22 +20,73 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 def _dump_bin(csv_file: Path, target_dir: Path, include_fields: str) -> bool:
     """调用 Qlib dump_bin 将 CSV 转为二进制格式"""
-    cmd = [
-        sys.executable, "-m", "qlib.run.dump_bin", "dump_all",
-        "--csv-path", str(csv_file),
-        "--qlib-data-dir", str(target_dir),
-        "--symbol-field-name", "symbol",
-        "--date-field-name", "date",
-        "--include-fields", include_fields,
-        "--freq", "day",
-    ]
-    logger.info(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        logger.error(f"dump_bin failed:\n{result.stderr[-2000:]}")
-        return False
-    logger.info("dump_bin completed")
-    return True
+    module_candidates = ["qlib.run.dump_bin", "qlib.scripts.dump_bin"]
+    for module in module_candidates:
+        cmd = [
+            sys.executable, "-m", module, "dump_all",
+            "--csv-path", str(csv_file),
+            "--qlib-data-dir", str(target_dir),
+            "--symbol-field-name", "symbol",
+            "--date-field-name", "date",
+            "--include-fields", include_fields,
+            "--freq", "day",
+        ]
+        logger.info(f"Running: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            logger.info("dump_bin completed")
+            return True
+        logger.warning(f"{module} unavailable or failed:\n{result.stderr[-1200:]}")
+    return False
+
+
+def _write_feature_bin(path: Path, start_idx: int, values: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.hstack([[float(start_idx)], values.astype(np.float32)]).astype("<f").tofile(path)
+
+
+def _manual_dump_bin(df: pd.DataFrame, target_dir: Path, include_fields: str) -> None:
+    """Write the minimal Qlib file storage format when dump_bin is not packaged."""
+    fields = [field.strip().lower() for field in include_fields.split(",") if field.strip()]
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"])
+    df["symbol"] = df["symbol"].astype(str)
+    calendar = pd.Index(sorted(df["date"].dropna().unique()))
+    calendar_map = {dt: i for i, dt in enumerate(calendar)}
+
+    calendar_dir = target_dir / "calendars"
+    instrument_dir = target_dir / "instruments"
+    feature_dir = target_dir / "features"
+    calendar_dir.mkdir(parents=True, exist_ok=True)
+    instrument_dir.mkdir(parents=True, exist_ok=True)
+    feature_dir.mkdir(parents=True, exist_ok=True)
+
+    pd.Series(calendar.strftime("%Y-%m-%d")).to_csv(calendar_dir / "day.txt", index=False, header=False)
+
+    inst_rows = []
+    for symbol, sub in df.groupby("symbol"):
+        dates = pd.to_datetime(sub["date"])
+        inst_rows.append((symbol, dates.min().strftime("%Y-%m-%d"), dates.max().strftime("%Y-%m-%d")))
+    inst = pd.DataFrame(inst_rows, columns=["symbol", "start", "end"]).sort_values("symbol")
+    for name in ("all", "csi300", "csi500"):
+        inst.to_csv(instrument_dir / f"{name}.txt", sep="\t", index=False, header=False)
+
+    for symbol, sub in df.groupby("symbol"):
+        sub = sub.sort_values("date")
+        idx = sub["date"].map(calendar_map).astype(int)
+        start_idx = int(idx.min())
+        full_index = pd.RangeIndex(start_idx, int(idx.max()) + 1)
+        for field in fields:
+            if field not in sub.columns:
+                continue
+            values = pd.Series(pd.to_numeric(sub[field], errors="coerce").values, index=idx)
+            values = values.groupby(level=0).last().reindex(full_index).astype("float32").values
+            _write_feature_bin(feature_dir / symbol.lower() / f"{field}.day.bin", start_idx, values)
+
+    logger.info(
+        f"Manual Qlib data ready: calendar={len(calendar)}, instruments={len(inst)}, "
+        f"fields={fields}, dir={target_dir}"
+    )
 
 
 @click.command()
@@ -88,14 +140,8 @@ def _convert(market: str, target_dir: Path, include_fields: str):
     if ok:
         logger.info(f"Qlib {market} data ready at {target_dir}")
     else:
-        logger.warning(
-            f"dump_bin failed. Manual command:\n"
-            f"  python -m qlib.run.dump_bin dump_all \\\n"
-            f"    --csv-path {csv_file} \\\n"
-            f"    --qlib-data-dir {target_dir} \\\n"
-            f"    --symbol-field-name symbol --date-field-name date \\\n"
-            f"    --include-fields {include_fields} --freq day"
-        )
+        logger.warning("Packaged Qlib dump_bin entrypoint is unavailable; using local file-storage writer.")
+        _manual_dump_bin(df, target_dir, include_fields)
 
 
 if __name__ == "__main__":

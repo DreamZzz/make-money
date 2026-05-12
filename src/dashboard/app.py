@@ -19,16 +19,19 @@ st.set_page_config(
 # 页面路由
 pages = {
     "行情概览": [
-        st.Page("pages/market_overview.py", title="市场行情", icon="📈"),
+        st.Page("views/market_overview.py", title="市场行情", icon="📈"),
     ],
     "策略研究": [
-        st.Page("pages/strategy_compare.py", title="策略对比", icon="⚖️"),
-        st.Page("pages/qlib_analysis.py", title="Qlib分析", icon="🧠"),
+        st.Page("views/strategy_compare.py", title="策略对比", icon="⚖️"),
+        st.Page("views/qlib_analysis.py", title="Qlib分析", icon="🧠"),
     ],
     "信号 & 调仓": [
-        st.Page("pages/weekly_report.py", title="本周建议", icon="📋"),
-        st.Page("pages/signals.py", title="调仓信号", icon="🎯"),
-        st.Page("pages/portfolio.py", title="组合监控", icon="💼"),
+        st.Page("views/weekly_report.py", title="本周建议", icon="📋"),
+        st.Page("views/signals.py", title="调仓信号", icon="🎯"),
+        st.Page("views/portfolio.py", title="组合监控", icon="💼"),
+    ],
+    "指数基金": [
+        st.Page("views/index_funds.py", title="指数基金", icon="🧭"),
     ],
 }
 

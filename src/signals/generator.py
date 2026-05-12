@@ -10,6 +10,7 @@ import pandas as pd
 from loguru import logger
 
 from src.config import load_config
+from src.signals.lifecycle import expire_stale_signals, retire_replaced_signals
 
 
 def _get_config():
@@ -43,13 +44,38 @@ def apply_filters(df: pd.DataFrame, min_confidence: float = 0.6) -> pd.DataFrame
     return df
 
 
+def filter_executable_universe(df: pd.DataFrame, price_data: pd.DataFrame) -> pd.DataFrame:
+    """过滤不在价格矩阵中、信号日缺少价格或价格无效的标的。"""
+    if df.empty or price_data is None or price_data.empty or "symbol" not in df.columns:
+        return df
+
+    result = df[df["symbol"].isin(price_data.columns)].copy()
+    if "trade_date" not in result.columns:
+        latest_prices = price_data.iloc[-1]
+        return result[result["symbol"].map(lambda s: pd.notna(latest_prices.get(s)) and latest_prices.get(s) > 0)]
+
+    price_index = pd.to_datetime(price_data.index)
+    price_lookup = price_data.copy()
+    price_lookup.index = price_index
+
+    def _has_price(row) -> bool:
+        dt = pd.to_datetime(row["trade_date"])
+        sym = row["symbol"]
+        if dt not in price_lookup.index or sym not in price_lookup.columns:
+            return False
+        value = price_lookup.at[dt, sym]
+        return pd.notna(value) and value > 0
+
+    return result[result.apply(_has_price, axis=1)].reset_index(drop=True)
+
+
 def generate_signal_id() -> str:
     return f"SIG-{uuid.uuid4().hex[:8].upper()}"
 
 
 def save_to_db(df: pd.DataFrame) -> int:
     """保存信号到 DuckDB（批量 INSERT）"""
-    from src.data_pipeline.loader import get_connection
+    from src.data_pipeline.loader import get_connection, init_db
 
     if df.empty:
         return 0
@@ -60,10 +86,11 @@ def save_to_db(df: pd.DataFrame) -> int:
     if "signal_ts" not in insert_df.columns:
         # 用信号对应的交易日而非当前时间，确保 T+1 成交逻辑能找到正确的交易日
         insert_df["signal_ts"] = insert_df["trade_date"] if "trade_date" in insert_df.columns else datetime.now()
+    insert_df["status"] = "ACTIVE"
 
     cols = ["signal_id", "model_name", "model_version", "symbol", "signal_ts",
             "horizon", "score", "side", "confidence", "expected_holding_days",
-            "max_position_pct", "thesis", "risk_tags"]
+            "max_position_pct", "thesis", "risk_tags", "status"]
     for col in cols:
         if col not in insert_df.columns:
             insert_df[col] = None
@@ -71,6 +98,9 @@ def save_to_db(df: pd.DataFrame) -> int:
 
     cols_str = ", ".join(cols)
     conn = get_connection()
+    init_db(conn)
+    expire_stale_signals(conn)
+    retire_replaced_signals(conn, insert_df)
     conn.execute(f"INSERT INTO signals ({cols_str}) SELECT {cols_str} FROM insert_df")
     conn.close()
     return len(insert_df)
@@ -159,6 +189,8 @@ def generate_all(price_data: pd.DataFrame = None,
         latest_date = all_signals["trade_date"].max()
         all_signals = all_signals[all_signals["trade_date"] == latest_date]
         logger.info(f"latest_only: 保留 {latest_date} 的信号 ({len(all_signals)} 条)")
+
+    all_signals = filter_executable_universe(all_signals, price_data)
 
     filtered = apply_filters(all_signals, min_conf)
 

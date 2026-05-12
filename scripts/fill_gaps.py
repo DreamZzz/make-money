@@ -1,7 +1,9 @@
-#!/opt/homebrew/bin/python3.12
+#!/usr/bin/env python3
 """补全缺失的股票日线数据。只拉已有 index 成分股中缺失的。"""
 import sys, time
-sys.path.insert(0, '/Users/zhaoqiang/Documents/Project/make-money')
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.data_pipeline.loader import get_connection, upsert_daily_price
 from src.data_pipeline.fetchers import yfinance_fetcher as yf

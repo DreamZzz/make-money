@@ -1,11 +1,13 @@
-#!/opt/homebrew/bin/python3.12
+#!/usr/bin/env python3
 """每日数据更新 wrapper：停 Dashboard → 跑更新 → 启 Dashboard"""
 import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
-PROJECT = "/Users/zhaoqiang/Documents/Project/make-money"
+PROJECT = str(Path(__file__).resolve().parent.parent)
+PYTHON = os.environ.get("PYTHON") or "python3"
 DASHBOARD_PLIST = os.path.expanduser("~/Library/LaunchAgents/com.quant.dashboard.plist")
 
 
@@ -30,7 +32,7 @@ os.environ.pop("HTTPS_PROXY", None)
 os.environ["no_proxy"] = "*"
 
 result = subprocess.run(
-    ["/opt/homebrew/bin/python3.12", "-m", "src.data_pipeline.main", "update"],
+    [PYTHON, "-m", "src.data_pipeline.main", "update"],
     cwd=PROJECT,
     capture_output=True, text=True, timeout=300,
 )

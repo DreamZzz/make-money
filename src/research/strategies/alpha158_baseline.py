@@ -21,6 +21,9 @@ def generate_signals(predictions: pd.DataFrame, top_n: int = 50) -> pd.DataFrame
     if predictions.empty or "datetime" not in predictions.columns:
         return pd.DataFrame()
 
+    predictions = predictions.copy()
+    predictions["datetime"] = pd.to_datetime(predictions["datetime"])
+
     # 只取最新截面
     latest_dt = predictions["datetime"].max()
     latest = predictions[predictions["datetime"] == latest_dt].copy()
