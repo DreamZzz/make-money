@@ -6,12 +6,19 @@ import pytest
 
 from src.backtest.results import compute_metrics
 from src.backtest.qlib_runner import (
+    _latest_covered_cn_data_date,
     _passes_publish_gate,
+    _persist_prediction_frame,
+    _production_inference_segments,
+    _should_skip_rebalance_signal_write,
+    _valid_rebalance_horizon,
     compute_daily_ic,
     default_candidate_specs,
     save_candidate_result,
     score_candidate_grid_row,
     select_best_candidate_grid,
+    simulate_topn_open_constrained,
+    simulate_topn_open,
     simulate_topn_t1_open,
 )
 from src.config import PROJECT_ROOT
@@ -154,13 +161,87 @@ def test_update_all_cn_opens_akshare_circuit_after_transient_errors(monkeypatch)
             "history_years": 1,
             "akshare_cn_error_circuit_threshold": 2,
             "akshare_cn_min_interval_seconds": 0,
+            "cn_backup_after_akshare_circuit": False,
         }
     })
     assert calls["ak"] == 2
-    assert calls["yf"] == 3
+    assert calls["yf"] == 2
     assert stats["cn_akshare_source_error"] == 2
     assert stats["cn_akshare_circuit_skip"] == 1
     assert stats["cn_source_error"] == 3
+
+
+def test_update_all_cn_uses_batch_yfinance_after_akshare_circuit(monkeypatch):
+    import duckdb
+    from src.data_pipeline import main
+
+    conn = duckdb.connect(":memory:")
+    _seed_update_db(conn)
+    for symbol, name in [("000002", "万科A"), ("000003", "测试三")]:
+        conn.execute("INSERT INTO stock_info (symbol, country, name) VALUES (?, 'CN', ?)", [symbol, name])
+        conn.execute(
+            """
+            INSERT INTO daily_price (symbol, trade_date, open, high, low, close, volume)
+            VALUES (?, DATE '2024-01-02', 10, 10, 10, 10, 1000)
+            """,
+            [symbol],
+        )
+    calls = {"ak": 0, "yf_single": 0, "yf_batch": 0}
+
+    def fake_ak(*_args, **_kwargs):
+        calls["ak"] += 1
+        return _status_df("source_error", error="Connection aborted by remote")
+
+    def fake_yf_single(*_args, **_kwargs):
+        calls["yf_single"] += 1
+        return _status_df("source_error", error="single fallback failed")
+
+    def fake_yf_batch(symbols, *_args, **_kwargs):
+        calls["yf_batch"] += 1
+        out = {}
+        for idx, symbol in enumerate(symbols, start=1):
+            df = pd.DataFrame({
+                "symbol": [symbol],
+                "trade_date": [pd.Timestamp("2024-01-03")],
+                "open": [10 + idx],
+                "high": [10 + idx],
+                "low": [10 + idx],
+                "close": [10 + idx],
+                "volume": [1000],
+            })
+            df.attrs["source_status"] = "ok"
+            out[symbol] = df
+        return out
+
+    monkeypatch.setattr(main.ak, "fetch_cn_stock_daily", fake_ak)
+    monkeypatch.setattr(main.yf, "fetch_cn_daily", fake_yf_single)
+    monkeypatch.setattr(main.yf, "fetch_cn_daily_batch", fake_yf_batch, raising=False)
+    monkeypatch.setattr(main.yf, "fetch_hk_index_daily", lambda *_args, **_kwargs: pd.DataFrame())
+    monkeypatch.setattr(main.ak, "fetch_cn_index_daily", lambda *_args, **_kwargs: pd.DataFrame())
+
+    stats = main.update_all(conn, {
+        "data": {
+            "history_years": 1,
+            "akshare_cn_error_circuit_threshold": 1,
+            "akshare_cn_min_interval_seconds": 0,
+            "cn_backup_after_akshare_circuit": True,
+            "cn_backup_batch_size": 50,
+            "cn_backup_max_symbols_after_circuit": 500,
+        }
+    })
+
+    assert calls == {"ak": 1, "yf_single": 1, "yf_batch": 1}
+    assert stats["cn_akshare_circuit_skip"] == 2
+    assert stats["cn_yfinance_batch_attempted"] == 2
+    assert stats["cn_yfinance_batch_updated"] == 2
+    assert stats["cn_source_error"] == 1
+    updated = conn.execute("""
+        SELECT symbol, close
+        FROM daily_price
+        WHERE trade_date = DATE '2024-01-03'
+        ORDER BY symbol
+    """).fetchall()
+    assert updated == [("000002", 11.0), ("000003", 12.0)]
 
 
 def test_compute_metrics_contains_backtest_result_fields():
@@ -440,7 +521,7 @@ def test_paper_engine_prioritizes_reduces_before_buys():
     assert ordered["signal_id"].tolist()[-2:] == ["buy_a", "buy_d"]
 
 
-def test_signal_lifecycle_expires_after_t_plus_two_window():
+def test_signal_lifecycle_expires_after_t_plus_one_window():
     import duckdb
 
     conn = duckdb.connect(":memory:")
@@ -465,8 +546,8 @@ def test_signal_lifecycle_expires_after_t_plus_two_window():
                 TIMESTAMP '2024-01-02 15:00:00', 'BUY', 1, 0.9, FALSE, 'ACTIVE')
     """)
 
-    assert expire_stale_signals(conn, as_of=pd.Timestamp("2024-01-04").date()) == 0
-    assert expire_stale_signals(conn, as_of=pd.Timestamp("2024-01-05").date()) == 1
+    assert expire_stale_signals(conn, as_of=pd.Timestamp("2024-01-03").date()) == 0
+    assert expire_stale_signals(conn, as_of=pd.Timestamp("2024-01-04").date()) == 1
     row = conn.execute("SELECT executed, status FROM signals WHERE signal_id = 'old_buy'").fetchone()
     assert row == (True, "EXPIRED")
     conn.close()
@@ -610,6 +691,177 @@ def test_qlib_candidate_scoring_prefers_production_friendly_low_turnover():
     assert best["rebalance_freq"] == "monthly"
 
 
+def test_qlib_candidate_scoring_can_target_medium_turnover_band():
+    grid = pd.DataFrame([
+        {
+            "benchmark_name": "MIXED_EQUAL",
+            "top_n": 20,
+            "holding_days": 1,
+            "rebalance_freq": "daily",
+            "buffer_n": 30,
+            "annual_return": 0.30,
+            "sharpe_ratio": 0.70,
+            "max_drawdown": -0.36,
+            "turnover": 190.0,
+            "benchmark_return": 0.23,
+            "excess_return": 0.07,
+        },
+        {
+            "benchmark_name": "MIXED_EQUAL",
+            "top_n": 50,
+            "holding_days": 9,
+            "rebalance_freq": "monthly",
+            "buffer_n": 75,
+            "annual_return": 0.10,
+            "sharpe_ratio": 0.43,
+            "max_drawdown": -0.20,
+            "turnover": 11.0,
+            "benchmark_return": 0.03,
+            "excess_return": 0.07,
+        },
+        {
+            "benchmark_name": "MIXED_EQUAL",
+            "top_n": 30,
+            "holding_days": 5,
+            "rebalance_freq": "daily",
+            "buffer_n": 45,
+            "annual_return": 0.14,
+            "sharpe_ratio": 0.62,
+            "max_drawdown": -0.18,
+            "turnover": 41.0,
+            "benchmark_return": 0.03,
+            "excess_return": 0.08,
+        },
+    ])
+
+    assert score_candidate_grid_row(grid.iloc[2], turnover_profile="medium") > score_candidate_grid_row(
+        grid.iloc[1], turnover_profile="medium"
+    )
+    assert score_candidate_grid_row(grid.iloc[2], turnover_profile="medium") > score_candidate_grid_row(
+        grid.iloc[0], turnover_profile="medium"
+    )
+    best = select_best_candidate_grid(grid, turnover_profile="medium")
+    assert best["top_n"] == 30
+    assert best["turnover"] == 41.0
+
+
+def test_constrained_qlib_simulation_skips_unaffordable_high_price_lots():
+    dates = pd.bdate_range("2026-01-01", periods=8)
+    pred = pd.DataFrame([
+        {"datetime": dt, "instrument": symbol, "score": score}
+        for dt in dates
+        for symbol, score in [("HIGH", 3.0), ("MID", 2.0), ("LOW", 1.0)]
+    ])
+    prices = pd.DataFrame([
+        {
+            "trade_date": dt,
+            "symbol": symbol,
+            "open": price + i,
+            "close": price + i,
+            "pe_ttm": pe,
+        }
+        for i, dt in enumerate(dates)
+        for symbol, price, pe in [("HIGH", 300.0, 30.0), ("MID", 100.0, 18.0), ("LOW", 10.0, 12.0)]
+    ])
+
+    returns = simulate_topn_open_constrained(
+        pred,
+        prices,
+        top_n=3,
+        holding_days=2,
+        rebalance_freq="weekly",
+        buffer_n=3,
+        account_capital=300_000,
+        max_position_pct=0.06,
+        cash_reserve_pct=0.05,
+    )
+
+    assert not returns.empty
+    assert returns.attrs["constraint_profile"] == "small_account_300k"
+    assert returns.attrs["avg_selected_count"] == pytest.approx(2.0)
+    assert returns.attrs["min_selected_count"] == 2
+    assert returns.attrs["skipped_price_cap_avg"] == pytest.approx(1.0)
+    assert returns.attrs["max_actual_position_pct"] <= 0.06 + 1e-9
+    assert returns.attrs["avg_cash_drag"] > 0
+
+
+def test_small_account_grid_rows_are_preferred_over_theoretical_equal_weight_rows():
+    grid = pd.DataFrame([
+        {
+            "benchmark_name": "MIXED_EQUAL",
+            "constraint_profile": "theoretical_equal_weight",
+            "top_n": 100,
+            "holding_days": 10,
+            "rebalance_freq": "monthly",
+            "annual_return": 0.30,
+            "excess_return": 0.25,
+            "sharpe_ratio": 0.90,
+            "max_drawdown": -0.24,
+            "turnover": 8.0,
+        },
+        {
+            "benchmark_name": "MIXED_EQUAL",
+            "constraint_profile": "small_account_300k",
+            "account_capital": 300_000,
+            "avg_selected_count": 28,
+            "avg_cash_drag": 0.08,
+            "max_actual_position_pct": 0.058,
+            "top_n": 50,
+            "holding_days": 10,
+            "rebalance_freq": "monthly",
+            "annual_return": 0.18,
+            "excess_return": 0.12,
+            "sharpe_ratio": 0.70,
+            "max_drawdown": -0.18,
+            "turnover": 10.0,
+        },
+    ])
+
+    best = select_best_candidate_grid(grid)
+
+    assert best["constraint_profile"] == "small_account_300k"
+    assert best["account_capital"] == 300_000
+
+
+def test_simulate_topn_open_supports_weekly_rebalance_frequency():
+    dates = pd.bdate_range("2026-01-01", periods=15)
+    pred = pd.DataFrame([
+        {"datetime": dt, "instrument": symbol, "score": score}
+        for dt in dates
+        for symbol, score in [("000001", 1.0), ("000002", 0.5)]
+    ])
+    prices = pd.DataFrame([
+        {
+            "trade_date": dt,
+            "symbol": symbol,
+            "open": 10 + i + offset,
+            "close": 10 + i + offset,
+        }
+        for i, dt in enumerate(dates)
+        for symbol, offset in [("000001", 0.0), ("000002", 1.0)]
+    ])
+
+    returns = simulate_topn_open(
+        pred,
+        prices,
+        top_n=1,
+        holding_days=2,
+        rebalance_freq="weekly",
+        buffer_n=1,
+    )
+
+    assert not returns.empty
+    assert returns.attrs["periods_per_year"] == 52
+    assert returns.attrs["turnover"] is not None
+
+
+def test_qlib_grid_skips_overlapping_weekly_holding_windows():
+    assert _valid_rebalance_horizon("weekly", 5)
+    assert not _valid_rebalance_horizon("weekly", 6)
+    assert _valid_rebalance_horizon("daily", 10)
+    assert _valid_rebalance_horizon("monthly", 10)
+
+
 def test_qlib_candidate_result_persistence_records_best_combo():
     import duckdb
 
@@ -633,6 +885,11 @@ def test_qlib_candidate_result_persistence_records_best_combo():
             "best_holding_days": 9,
             "best_rebalance_freq": "monthly",
             "best_buffer_n": 75,
+            "best_constraint_profile": "small_account_300k",
+            "best_account_capital": 300000,
+            "avg_selected_count": 32.5,
+            "avg_cash_drag": 0.08,
+            "max_actual_position_pct": 0.058,
             "annual_return": 0.10,
             "sharpe_ratio": 0.43,
             "max_drawdown": -0.20,
@@ -648,9 +905,147 @@ def test_qlib_candidate_result_persistence_records_best_combo():
     )
 
     row = conn.execute("""
-        SELECT status, best_top_n, best_holding_days, best_rebalance_freq, score
+        SELECT status, best_top_n, best_holding_days, best_rebalance_freq,
+               best_constraint_profile, best_account_capital, avg_selected_count,
+               avg_cash_drag, max_actual_position_pct, score
         FROM qlib_candidate_results
         WHERE candidate_id = 'lgb_balanced'
     """).fetchone()
-    assert row == ("SUCCEEDED", 50, 9, "monthly", pytest.approx(0.02))
+    assert row == (
+        "SUCCEEDED", 50, 9, "monthly", "small_account_300k", 300000,
+        pytest.approx(32.5), pytest.approx(0.08), pytest.approx(0.058), pytest.approx(0.02),
+    )
+    conn.close()
+
+
+def test_production_prediction_monthly_rebalance_skips_same_period_signal():
+    import duckdb
+
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    conn.execute("""
+        INSERT INTO signals (
+            signal_id, model_name, model_version, symbol, signal_ts, horizon,
+            score, side, confidence, expected_holding_days, max_position_pct,
+            thesis, risk_tags, status
+        )
+        VALUES (
+            'sig_existing', 'alpha158', 'alpha158-prod', '000001',
+            TIMESTAMP '2026-05-05 15:00:00', '15d', 0.9, 'BUY',
+            0.9, 15, 0.05, 'existing monthly signal', ['multi_factor'], 'ACTIVE'
+        )
+    """)
+
+    skip, reason = _should_skip_rebalance_signal_write(
+        conn,
+        model_version="alpha158-prod",
+        prediction_date=pd.Timestamp("2026-05-13").date(),
+        rebalance_freq="monthly",
+    )
+    next_month_skip, _ = _should_skip_rebalance_signal_write(
+        conn,
+        model_version="alpha158-prod",
+        prediction_date=pd.Timestamp("2026-06-01").date(),
+        rebalance_freq="monthly",
+    )
+    daily_skip, _ = _should_skip_rebalance_signal_write(
+        conn,
+        model_version="alpha158-prod",
+        prediction_date=pd.Timestamp("2026-05-13").date(),
+        rebalance_freq="daily",
+    )
+
+    assert skip
+    assert "monthly" in reason
+    assert not next_month_skip
+    assert not daily_skip
+    conn.close()
+
+
+def test_production_walk_forward_inference_uses_latest_year_fold():
+    segments = _production_inference_segments(
+        mode="walk_forward",
+        base_segments={
+            "train_start": "2019-01-01",
+            "train_end": "2022-12-31",
+            "valid_start": "2023-01-01",
+            "valid_end": "2023-12-31",
+            "test_start": "2024-01-01",
+            "test_end": "2026-05-14",
+        },
+        latest_data=pd.Timestamp("2026-05-14").date(),
+    )
+
+    assert segments == {
+        "train_start": "2019-01-01",
+        "train_end": "2024-12-31",
+        "valid_start": "2025-01-01",
+        "valid_end": "2025-12-31",
+        "test_start": "2026-01-01",
+        "test_end": "2026-05-14",
+    }
+
+
+def test_persist_prediction_frame_upserts_latest_production_scores():
+    import duckdb
+
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    pred = pd.DataFrame({
+        "datetime": [pd.Timestamp("2026-05-14")] * 3,
+        "instrument": ["000001", "000002", "000003"],
+        "score": [0.3, 0.8, 0.1],
+    })
+
+    written = _persist_prediction_frame(
+        conn,
+        experiment_id="QLIB-PROD",
+        model_version="alpha158-prod",
+        mode="production_inference",
+        pred=pred,
+        top_n=2,
+    )
+
+    rows = conn.execute("""
+        SELECT prediction_date, symbol, score, rank, confidence, selected, model_version, mode
+        FROM qlib_predictions
+        WHERE experiment_id = 'QLIB-PROD'
+        ORDER BY rank
+    """).fetchall()
+
+    assert written == 3
+    assert rows[0][1:6] == ("000002", 0.8, 1, 1.0, True)
+    assert rows[1][1] == "000001"
+    assert rows[1][3] == 2
+    assert rows[1][5] is True
+    assert rows[2][1] == "000003"
+    assert rows[2][5] is False
+    assert {row[6] for row in rows} == {"alpha158-prod"}
+    assert {row[7] for row in rows} == {"production_inference"}
+    conn.close()
+
+
+def test_latest_covered_cn_data_date_ignores_partial_target_updates():
+    import duckdb
+
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    conn.execute("""
+        INSERT INTO stock_info (symbol, country, name)
+        VALUES ('000001', 'CN', 'A'), ('000002', 'CN', 'B'), ('000003', 'CN', 'C')
+    """)
+    conn.execute("""
+        INSERT INTO daily_price (symbol, trade_date, open, high, low, close, volume)
+        VALUES
+          ('000001', DATE '2026-05-13', 10, 10, 10, 10, 1000),
+          ('000002', DATE '2026-05-13', 10, 10, 10, 10, 1000),
+          ('000003', DATE '2026-05-13', 10, 10, 10, 10, 1000),
+          ('000001', DATE '2026-05-14', 11, 11, 11, 11, 1000)
+    """)
+
+    latest = _latest_covered_cn_data_date(conn, min_coverage=0.80)
+    partial_allowed = _latest_covered_cn_data_date(conn, min_coverage=0.30)
+
+    assert latest == pd.Timestamp("2026-05-13").date()
+    assert partial_allowed == pd.Timestamp("2026-05-14").date()
     conn.close()

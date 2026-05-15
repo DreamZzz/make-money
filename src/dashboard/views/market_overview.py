@@ -15,6 +15,7 @@ from src.dashboard.market_service import (
     DISTRIBUTION_BUCKETS,
     INDEX_DEFS,
     load_data_quality_status,
+    load_data_source_health,
     load_field_coverage,
     load_index_benchmarks,
     load_market_breadth,
@@ -93,6 +94,11 @@ def _cached_field_coverage():
 @st.cache_data(ttl=300)
 def _cached_quality():
     return load_data_quality_status()
+
+
+@st.cache_data(ttl=120)
+def _cached_source_health():
+    return load_data_source_health(limit=80)
 
 
 @st.cache_data(ttl=300)
@@ -352,6 +358,51 @@ def show_movers():
 
 def show_data_quality():
     st.subheader("数据口径与质量")
+    source_health = _cached_source_health()
+    st.markdown("#### 数据源健康")
+    if source_health.empty:
+        st.info("尚无数据源健康记录。下一次执行 `python -m src.data_pipeline.main update` 后会自动生成。")
+    else:
+        latest_run = source_health["run_id"].iloc[0]
+        latest = source_health[source_health["run_id"] == latest_run].copy()
+        cols = st.columns(min(3, len(latest)))
+        for col, (_, row) in zip(cols, latest.iterrows()):
+            score = row.get("health_score")
+            score_text = _ratio_pct(score) if pd.notna(score) else "—"
+            with col:
+                st.metric(
+                    f"{row['market']} · {row['source']}",
+                    row["status"],
+                    score_text,
+                    help=f"更新 {int(row['updated'])}/{int(row['attempted'])}；错误 {int(row['source_error'])}；熔断跳过 {int(row['circuit_skip'])}",
+                )
+        display_health = source_health.copy()
+        display_health["健康度"] = display_health["health_score"].map(_ratio_pct)
+        st.dataframe(
+            display_health[[
+                "ended_at", "run_id", "market", "source", "status", "attempted", "updated",
+                "健康度", "no_data", "source_error", "rate_limited", "circuit_skip", "failed", "message",
+            ]],
+            column_config={
+                "ended_at": "结束时间",
+                "run_id": "运行ID",
+                "market": "市场",
+                "source": "数据源",
+                "status": "状态",
+                "attempted": "尝试",
+                "updated": "更新",
+                "no_data": "无数据",
+                "source_error": "源错误",
+                "rate_limited": "限流",
+                "circuit_skip": "熔断跳过",
+                "failed": "失败",
+                "message": "说明",
+            },
+            hide_index=True,
+            width="stretch",
+        )
+
+    st.markdown("#### 字段覆盖")
     coverage = _cached_field_coverage()
     if coverage.empty:
         st.info("暂无可统计字段覆盖率。")

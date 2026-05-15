@@ -146,6 +146,37 @@ def test_index_benchmarks_return_normalized_series_and_summary():
     assert row_300["max_drawdown"] == pytest.approx(-0.0454545, rel=1e-5)
 
 
+def test_market_index_defs_use_real_hstech_index_not_etf_proxy():
+    from src.dashboard.market_service import INDEX_DEFS
+    from src.data_pipeline.main import HK_INDEX_AKSHARE_SINA
+
+    defs = {item["name"]: item["index_code"] for item in INDEX_DEFS}
+    assert defs["恒生指数"] == "HSI"
+    assert defs["恒生科技"] == "HSTECH"
+    assert "3032.HK" not in defs.values()
+    assert HK_INDEX_AKSHARE_SINA["HSTECH"] == "HSTECH"
+
+
+def test_fetch_hk_index_daily_sina_normalizes_hstech(monkeypatch):
+    from src.data_pipeline.fetchers import akshare_fetcher as ak_fetcher
+
+    raw = pd.DataFrame({
+        "date": ["2026-05-12"],
+        "open": [5129.54],
+        "high": [5141.49],
+        "low": [5059.58],
+        "close": [5070.60986],
+        "volume": [1265664507],
+        "amount": [63019317466],
+    })
+    monkeypatch.setattr(ak_fetcher.ak, "stock_hk_index_daily_sina", lambda symbol: raw)
+
+    df = ak_fetcher.fetch_hk_index_daily_sina("HSTECH", "20260501", "20260513")
+    assert df.iloc[0]["index_code"] == "HSTECH"
+    assert df.iloc[0]["close"] == pytest.approx(5070.60986)
+    assert df.iloc[0]["trade_date"] == pd.Timestamp("2026-05-12")
+
+
 def test_market_movers_falls_back_to_daily_and_adds_links_and_names():
     from src.dashboard.market_service import load_market_movers
 
@@ -185,3 +216,36 @@ def test_latest_quotes_ignore_stale_snapshot_for_updated_market():
     assert row["trade_date"] == date(2024, 1, 4)
     assert row["last_price"] == pytest.approx(12.0)
     assert row["source"] == "daily_price"
+
+
+def test_data_source_health_records_are_queryable():
+    from src.dashboard.market_service import load_data_source_health
+    from src.data_pipeline.loader import record_data_source_health
+
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+
+    record_data_source_health(conn, [{
+        "run_id": "RUN-1",
+        "source": "akshare",
+        "market": "CN",
+        "operation": "daily_update",
+        "status": "DEGRADED",
+        "attempted": 10,
+        "updated": 6,
+        "no_data": 1,
+        "source_error": 3,
+        "rate_limited": 0,
+        "circuit_skip": 4,
+        "failed": 0,
+        "message": "AkShare circuit opened",
+        "stats_json": '{"example": true}',
+    }])
+
+    health = load_data_source_health(conn)
+    assert len(health) == 1
+    row = health.iloc[0]
+    assert row["run_id"] == "RUN-1"
+    assert row["source"] == "akshare"
+    assert row["health_score"] == pytest.approx(0.6)
+    assert row["status"] == "DEGRADED"

@@ -198,6 +198,32 @@ def fetch_cn_index_daily(index_code: str, start_date: str, end_date: str) -> pd.
         return pd.DataFrame()
 
 
+def fetch_hk_index_daily_sina(index_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """拉取港股指数日线，如 HSI（恒生指数）、HSTECH（恒生科技指数）。"""
+    try:
+        df = ak.stock_hk_index_daily_sina(symbol=index_code)
+        if df.empty:
+            return _with_status(pd.DataFrame(), STATUS_EMPTY)
+        df = df.rename(columns={
+            "date": "trade_date",
+            "open": "open",
+            "high": "high",
+            "low": "low",
+            "close": "close",
+            "volume": "volume",
+            "amount": "amount",
+        })
+        df["trade_date"] = pd.to_datetime(df["trade_date"])
+        start = pd.to_datetime(start_date)
+        end = pd.to_datetime(end_date)
+        df = df[(df["trade_date"] >= start) & (df["trade_date"] <= end)].copy()
+        df["index_code"] = index_code
+        return _with_status(df, STATUS_OK if not df.empty else STATUS_EMPTY)
+    except Exception as e:
+        logger.warning(f"Fetch HK index daily via Sina failed for {index_code}: {e}")
+        return _with_status(pd.DataFrame(), STATUS_SOURCE_ERROR, str(e))
+
+
 def fetch_index_components(index_code: str) -> list[str]:
     """获取指数成分股列表"""
     try:

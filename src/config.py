@@ -49,6 +49,9 @@ DEFAULT_CONFIG = {
         "max_update_failures": 0,
         "akshare_cn_min_interval_seconds": 0.8,
         "akshare_cn_error_circuit_threshold": 12,
+        "cn_backup_after_akshare_circuit": True,
+        "cn_backup_batch_size": 80,
+        "cn_backup_max_symbols_after_circuit": 800,
     },
     "qlib": {
         "cn_data_path": "qlib_data/cn_data",
@@ -75,7 +78,7 @@ DEFAULT_CONFIG = {
         "estimated_trade_fee_rate": 0.0015,
         "max_drawdown_limit": 0.20,
         "rebalance": {"frequency": "weekly", "weekday": 5},
-        "benchmark_weights": {"000300.SH": 0.35, "000905.SH": 0.15, "^HSI": 0.35, "3032.HK": 0.15},
+        "benchmark_weights": {"000300.SH": 0.35, "000905.SH": 0.15, "HSI": 0.35, "HSTECH": 0.15},
     },
     "signals": {
         "min_confidence": 0.6,

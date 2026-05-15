@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS market_snapshot (
 -- 3. 指数行情表
 -- ============================================
 CREATE TABLE IF NOT EXISTS index_daily (
-    index_code      VARCHAR NOT NULL,        -- 指数代码: 000300.SH, ^HSI
+    index_code      VARCHAR NOT NULL,        -- 指数代码: 000300, HSI, HSTECH
     trade_date      DATE NOT NULL,
     open            DOUBLE,
     high            DOUBLE,
@@ -303,9 +303,24 @@ CREATE TABLE IF NOT EXISTS qlib_grid_results (
     mode             VARCHAR,
     top_n            INTEGER NOT NULL,
     holding_days     INTEGER NOT NULL,
-    rebalance_freq   VARCHAR NOT NULL,       -- daily / monthly
+    rebalance_freq   VARCHAR NOT NULL,       -- daily / weekly / monthly
     buffer_n         INTEGER,
     benchmark_name   VARCHAR NOT NULL,       -- 000300 / 000905 / ALL_EQ_PROXY / MIXED_EQUAL
+    constraint_profile VARCHAR DEFAULT 'theoretical_equal_weight',
+    account_capital  DOUBLE,
+    max_position_pct DOUBLE,
+    cash_reserve_pct DOUBLE,
+    lot_size         INTEGER,
+    avg_selected_count DOUBLE,
+    min_selected_count INTEGER,
+    avg_cash_drag   DOUBLE,
+    max_actual_position_pct DOUBLE,
+    avg_weight_deviation DOUBLE,
+    skipped_price_cap_avg DOUBLE,
+    skipped_valuation_avg DOUBLE,
+    skipped_budget_avg DOUBLE,
+    max_pe_ttm      DOUBLE,
+    max_pb          DOUBLE,
     start_date       DATE,
     end_date         DATE,
     annual_return    DOUBLE,
@@ -322,7 +337,43 @@ CREATE TABLE IF NOT EXISTS qlib_grid_results (
 );
 
 -- ============================================
--- 6g. Qlib 候选实验批跑结果表
+-- 6g. 规则 vs Qlib A/B 影子跟踪
+-- ============================================
+CREATE TABLE IF NOT EXISTS rule_qlib_ab_snapshots (
+    run_id          VARCHAR NOT NULL,
+    snapshot_date   DATE NOT NULL,
+    signal_date     DATE,
+    prediction_date DATE,
+    experiment_id   VARCHAR,
+    model_version   VARCHAR,
+    top_n           INTEGER,
+    secondary_top_n INTEGER,
+    champion_source VARCHAR,
+    status          VARCHAR,
+    summary_json    TEXT,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (run_id)
+);
+
+CREATE TABLE IF NOT EXISTS rule_qlib_ab_members (
+    run_id          VARCHAR NOT NULL,
+    arm             VARCHAR NOT NULL,        -- A_RULE_BUY / B_QLIB_TOPN / C_CONSENSUS
+    symbol          VARCHAR NOT NULL,
+    name            VARCHAR,
+    classification  VARCHAR,
+    rule_side       VARCHAR,
+    rule_models     VARCHAR,
+    rule_confidence DOUBLE,
+    rule_score      DOUBLE,
+    qlib_rank       INTEGER,
+    qlib_score      DOUBLE,
+    weight          DOUBLE,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (run_id, arm, symbol)
+);
+
+-- ============================================
+-- 6h. Qlib 候选实验批跑结果表
 -- ============================================
 CREATE TABLE IF NOT EXISTS qlib_candidate_results (
     candidate_id       VARCHAR NOT NULL,
@@ -340,6 +391,11 @@ CREATE TABLE IF NOT EXISTS qlib_candidate_results (
     best_holding_days  INTEGER,
     best_rebalance_freq VARCHAR,
     best_buffer_n      INTEGER,
+    best_constraint_profile VARCHAR,
+    best_account_capital DOUBLE,
+    avg_selected_count DOUBLE,
+    avg_cash_drag      DOUBLE,
+    max_actual_position_pct DOUBLE,
     annual_return      DOUBLE,
     sharpe_ratio       DOUBLE,
     max_drawdown       DOUBLE,
@@ -390,6 +446,30 @@ CREATE TABLE IF NOT EXISTS data_quality_status (
     threshold       DOUBLE,
     detail          VARCHAR,
     PRIMARY KEY (check_ts, metric)
+);
+
+-- ============================================
+-- 10b. 数据源健康状态表
+-- ============================================
+CREATE TABLE IF NOT EXISTS data_source_health (
+    run_id          VARCHAR NOT NULL,
+    source          VARCHAR NOT NULL,        -- akshare / yfinance / baostock 等
+    market          VARCHAR NOT NULL,        -- CN / HK / INDEX
+    operation       VARCHAR NOT NULL,        -- daily_update / index_update
+    started_at      TIMESTAMP,
+    ended_at        TIMESTAMP,
+    status          VARCHAR NOT NULL,        -- OK / DEGRADED / FAILED / SKIPPED
+    attempted       INTEGER DEFAULT 0,
+    updated         INTEGER DEFAULT 0,
+    no_data         INTEGER DEFAULT 0,
+    source_error    INTEGER DEFAULT 0,
+    rate_limited    INTEGER DEFAULT 0,
+    circuit_skip    INTEGER DEFAULT 0,
+    failed          INTEGER DEFAULT 0,
+    message         VARCHAR,
+    stats_json      TEXT,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (run_id, source, market, operation)
 );
 
 -- ============================================

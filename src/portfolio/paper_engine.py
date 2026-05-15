@@ -18,19 +18,37 @@ def _load_config():
 def _get_next_trading_day(conn: duckdb.DuckDBPyConnection, signal_date: date, market: str) -> Optional[date]:
     """获取信号日之后的下一个交易日"""
     result = conn.execute("""
-        SELECT MIN(trade_date) FROM daily_price
-        WHERE trade_date > ?
-        AND symbol IN (SELECT symbol FROM stock_info WHERE country=?)
-    """, [signal_date, market]).fetchone()
+        WITH trading_days AS (
+            SELECT dp.trade_date
+            FROM daily_price dp
+            JOIN stock_info si ON dp.symbol = si.symbol
+            WHERE dp.trade_date > ? AND si.country = ?
+            UNION
+            SELECT ms.trade_date
+            FROM market_snapshot ms
+            WHERE ms.trade_date > ? AND ms.market = ?
+        )
+        SELECT MIN(trade_date) FROM trading_days
+    """, [signal_date, market, signal_date, market]).fetchone()
     return result[0] if result and result[0] else None
 
 
 def _get_open_price(conn: duckdb.DuckDBPyConnection, symbol: str, trade_date: date) -> Optional[float]:
-    """获取某股票在某日的开盘价"""
+    """获取某股票在某日的开盘价，盘中优先使用快照表，日线作为兜底。"""
     result = conn.execute("""
-        SELECT open FROM daily_price
-        WHERE symbol = ? AND trade_date = ?
-    """, [symbol, trade_date]).fetchone()
+        SELECT open
+        FROM (
+            SELECT open, 1 AS priority
+            FROM market_snapshot
+            WHERE symbol = ? AND trade_date = ? AND open IS NOT NULL
+            UNION ALL
+            SELECT open, 2 AS priority
+            FROM daily_price
+            WHERE symbol = ? AND trade_date = ? AND open IS NOT NULL
+        )
+        ORDER BY priority
+        LIMIT 1
+    """, [symbol, trade_date, symbol, trade_date]).fetchone()
     return result[0] if result else None
 
 
@@ -66,11 +84,14 @@ def _prioritize_signals(signals: pd.DataFrame) -> pd.DataFrame:
     ordered["_side_priority"] = ordered["side"].map(_side_priority)
     ordered["_confidence"] = pd.to_numeric(ordered.get("confidence", 0), errors="coerce").fillna(0.0)
     ordered["_score"] = pd.to_numeric(ordered.get("score", 0), errors="coerce").fillna(0.0)
-    ordered = ordered.sort_values(
-        ["signal_date", "_side_priority", "_confidence", "_score", "symbol"],
-        ascending=[True, True, False, False, True],
-        kind="mergesort",
-    )
+    sort_cols = ["_side_priority", "signal_date", "_confidence", "_score"]
+    ascending = [True, True, False, False]
+    if "model_name" in ordered.columns:
+        sort_cols.append("model_name")
+        ascending.append(True)
+    sort_cols.append("symbol")
+    ascending.append(True)
+    ordered = ordered.sort_values(sort_cols, ascending=ascending, kind="mergesort")
     return ordered.drop(columns=["_side_priority", "_confidence", "_score"])
 
 
@@ -78,11 +99,9 @@ def _latest_position_qty(conn: duckdb.DuckDBPyConnection, strategy_name: str, sy
     pos = conn.execute("""
         SELECT quantity FROM paper_positions
         WHERE strategy_name = ? AND symbol = ?
-        AND trade_date = (
-            SELECT MAX(trade_date) FROM paper_positions
-            WHERE strategy_name = ? AND symbol = ?
-        )
-    """, [strategy_name, symbol, strategy_name, symbol]).fetchone()
+        ORDER BY trade_date DESC
+        LIMIT 1
+    """, [strategy_name, symbol]).fetchone()
     return float(pos[0]) if pos and pos[0] else 0.0
 
 
@@ -106,203 +125,276 @@ def _mark_signal_handled(
     """, [execution_price, execution_date, status, status_reason, signal_id])
 
 
-def run(strategy_name: str, initial_capital: Optional[float] = None, market: str = "CN") -> dict:
-    """
-    执行纸交易：将未执行的信号转换为模拟成交。
-
-    Returns:
-        dict with summary stats
-    """
-    config = _load_config()
-    initial_capital = initial_capital or _default_initial_capital(config, market)
-    market_key = "cn" if market == "CN" else "hk"
-    cost_cfg = config["markets"][market_key]
-    portfolio_cfg = config.get("portfolio", {})
-    commission = cost_cfg["commission_rate"]
-    stamp_duty = cost_cfg.get("stamp_duty_rate", 0)
-
-    from src.data_pipeline.loader import get_connection, init_db
-    from src.portfolio.cashbook import get_account_summary, get_available_cash
-    from src.signals.lifecycle import expire_stale_signals
-    conn = get_connection()
-    init_db(conn)
-    expire_stale_signals(conn)
-
-    # 1. 获取未执行的信号（按时间排序）
-    signals = conn.execute("""
-        SELECT signal_id, model_name, symbol, side, signal_ts, score, confidence,
-               expected_holding_days, max_position_pct, thesis
-        FROM signals
-        WHERE model_name = ?
-          AND executed = FALSE
-          AND COALESCE(status, 'ACTIVE') = 'ACTIVE'
-        ORDER BY signal_ts ASC
-    """, [strategy_name]).fetchdf()
-
-    if signals.empty:
-        logger.info(f"No pending signals for {strategy_name}")
-        conn.close()
-        return {"executed": 0}
-
-    signals["signal_date"] = pd.to_datetime(signals["signal_ts"]).dt.date
-    signals = _prioritize_signals(signals)
-    executed = 0
-    handled_without_order = 0
-    conn.close()
-
-    # 初始化本次执行的全局现金账本（session 内跨信号保持连续）
-    account_summary = get_account_summary()
-    session_cash = get_available_cash()
-    current_total = float(account_summary.get("total_value") or initial_capital)
-    conn = get_connection()
-
-    # 2. 逐条处理信号
-    for _, sig in signals.iterrows():
-        sig_date = sig["signal_date"]
-        sym = sig["symbol"]
-        side = str(sig["side"] or "").upper()
-        order_side = "SELL" if side in {"SELL", "SHORT"} else side
-
-        # 找下一个交易日
-        next_day = _get_next_trading_day(conn, sig_date, market)
-        if next_day is None:
-            logger.warning(f"No trading day after {sig_date} for {sym}")
-            continue
-
-        held_qty = 0.0
-        if side in {"SELL", "SHORT"}:
-            held_qty = _latest_position_qty(conn, strategy_name, sym)
-            if held_qty <= 0:
-                _mark_signal_handled(
-                    conn,
-                    sig["signal_id"],
-                    next_day,
-                    status="NO_ACTION",
-                    status_reason="当前无持仓，无需卖出",
-                )
-                handled_without_order += 1
-                logger.info(f"  跳过 {sym} {side}：当前无持仓，信号已按无需动作处理")
-                continue
-
-        # 获取成交价格（开盘价）
-        price = _get_open_price(conn, sym, next_day)
-        if price is None or price <= 0:
-            logger.warning(f"No open price for {sym} on {next_day}")
-            continue
-
-        # 3. 计算交易量
-        max_position = sig["max_position_pct"] if sig["max_position_pct"] else 0.05
-
-        if side == "BUY":
-            score = float(sig["score"] or 0)
-            confidence = float(sig["confidence"] or 0)
-            rank_score = confidence * max(score, 0)
-            min_conf = float(portfolio_cfg.get("min_rebalance_buy_confidence", 0.75))
-            min_rank = float(portfolio_cfg.get("min_rebalance_buy_rank_score", 0.50))
-            if confidence < min_conf or rank_score < min_rank:
-                logger.info(
-                    f"  跳过 {sym} BUY：低于执行门槛 "
-                    f"(confidence={confidence:.2f}, rank_score={rank_score:.2f})"
-                )
-                continue
-
-            normal_cap = float(portfolio_cfg.get("max_single_position_pct", 0.10))
-            overweight_cap = float(portfolio_cfg.get("overweight_single_position_pct", 0.15))
-            overweight_min_conf = float(portfolio_cfg.get("overweight_min_confidence", 0.90))
-            overweight_min_rank = float(portfolio_cfg.get("overweight_min_rank_score", 0.85))
-            allowed_cap = overweight_cap if (
-                confidence >= overweight_min_conf and rank_score >= overweight_min_rank
-            ) else normal_cap
-            max_position = min(float(max_position), allowed_cap)
-
-            # 买入：按 max_position_pct 计算买入数量（A股每手100股，向下取整）
-            target_value = current_total * max_position
-            lots = int(target_value / price / 100)  # 可买手数
-            if lots == 0:
-                logger.info(f"  跳过 {sym}：仓位 {max_position*100:.0f}% × 总资产 {current_total:,.0f} = {target_value:,.0f}，不足一手 ({price:.0f}×100={price*100:,.0f})")
-                continue
-            qty = lots * 100
-
-        elif side in {"SELL", "SHORT"}:
-            # 卖出：清仓该标的
-            qty = held_qty
-        else:
-            continue
-
-        execution_value = float(qty * price)
-        execution_cost = float(execution_value * (commission + (stamp_duty if order_side == "SELL" else 0)))
-        min_fee = 5.0 if market == "CN" else 10.0
-        if execution_cost < min_fee:
-            execution_cost = min_fee
-
-        # 现金余额校验：BUY 需有足够现金
-        cash_before = session_cash
-        if order_side == "BUY":
-            required = execution_value + execution_cost
-            if session_cash < required:
-                logger.warning(f"  跳过 {sym} BUY：现金不足 (可用 {session_cash:,.0f} < 需要 {required:,.0f})")
-                continue
-            session_cash -= required
-        else:
-            session_cash += execution_value - execution_cost
-        cash_after = session_cash
-
-        # 4. 记录成交（更新 paper_orders）
-        import uuid
-        order_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
-        order_ts = _execution_timestamp(conn, next_day, market)
-        conn.execute("""
-            INSERT INTO paper_orders (
-                order_id, signal_id, symbol, side, order_qty, order_price,
-                order_value, fee, cash_before, cash_after, order_ts, status, status_reason
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'FILLED', '成交')
-        """, [
-            order_id, sig["signal_id"], sym, order_side, qty, price,
-            execution_value, execution_cost, cash_before, cash_after, pd.Timestamp(order_ts),
-        ])
-
-        # 5. 标记信号已执行
-        _mark_signal_handled(conn, sig["signal_id"], next_day, price)
-
-        executed += 1
-
-    conn.close()
-    logger.info(
-        f"Paper engine: {strategy_name} executed {executed}/{len(signals)} signals "
-        f"(handled_without_order={handled_without_order})"
-    )
-    return {
-        "executed": executed,
-        "handled_without_order": handled_without_order,
-        "pending": len(signals) - executed - handled_without_order,
-        "total": len(signals),
-    }
-
-
-def run_all_strategies(initial_capital: Optional[float] = None) -> dict:
-    """对所有有信号的策略执行纸交易"""
-    from src.data_pipeline.loader import get_connection, init_db
-    conn = get_connection()
-    init_db(conn)
-    rows = conn.execute("""
-        SELECT s.model_name,
-               COALESCE(si.country, 'CN') AS market
+def _load_pending_signals(
+    conn: duckdb.DuckDBPyConnection,
+    strategy_name: Optional[str],
+    default_market: str,
+) -> pd.DataFrame:
+    params: list[object] = [default_market]
+    strategy_filter = ""
+    if strategy_name:
+        strategy_filter = "AND s.model_name = ?"
+        params.append(strategy_name)
+    signals = conn.execute(f"""
+        SELECT s.signal_id, s.model_name, s.symbol, s.side, s.signal_ts, s.score, s.confidence,
+               s.expected_holding_days, s.max_position_pct, s.thesis,
+               COALESCE(si.country, ?) AS market
         FROM signals s
         LEFT JOIN stock_info si ON s.symbol = si.symbol
         WHERE s.executed = FALSE
           AND COALESCE(s.status, 'ACTIVE') = 'ACTIVE'
-        GROUP BY s.model_name, si.country
-    """).fetchall()
-    conn.close()
+          {strategy_filter}
+        ORDER BY s.signal_ts ASC
+    """, params).fetchdf()
+    if signals.empty:
+        return signals
+    signals["signal_date"] = pd.to_datetime(signals["signal_ts"]).dt.date
+    return _prioritize_signals(signals)
 
-    results = {}
-    for name, market in rows:
-        results[name] = run(name, initial_capital, market)
-        if results[name].get("executed", 0) > 0:
-            from src.portfolio.cashbook import rebuild_account_daily
 
-            rebuild_account_daily()
+def _new_result(total: int = 0) -> dict:
+    return {
+        "executed": 0,
+        "handled_without_order": 0,
+        "pending": total,
+        "total": total,
+        "skipped_no_price": 0,
+        "skipped_no_trading_day": 0,
+        "skipped_cash": 0,
+        "skipped_threshold": 0,
+        "skipped_lot": 0,
+    }
+
+
+def _finalize_results(results: dict[str, dict]) -> dict[str, dict]:
+    for result in results.values():
+        result["pending"] = (
+            result["total"]
+            - result["executed"]
+            - result["handled_without_order"]
+        )
+    return results
+
+
+def _run_signal_batch(
+    strategy_name: Optional[str],
+    initial_capital: Optional[float] = None,
+    market: str = "CN",
+) -> dict[str, dict]:
+    """Execute pending signals in one transaction and one serial cash session."""
+    config = _load_config()
+    initial_capital = initial_capital or _default_initial_capital(config, market)
+    portfolio_cfg = config.get("portfolio", {})
+
+    from src.data_pipeline.loader import get_connection, init_db
+    from src.portfolio.cashbook import get_account_summary, get_available_cash
+    from src.signals.lifecycle import expire_stale_signals
+
+    account_summary = get_account_summary()
+    session_cash = get_available_cash()
+    current_total = float(account_summary.get("total_value") or initial_capital)
+
+    conn = get_connection()
+    in_transaction = False
+    try:
+        init_db(conn)
+        conn.execute("BEGIN TRANSACTION")
+        in_transaction = True
+        expire_stale_signals(conn)
+        signals = _load_pending_signals(conn, strategy_name, market)
+
+        if signals.empty:
+            logger.info(f"No pending signals for {strategy_name or 'all strategies'}")
+            conn.execute("COMMIT")
+            in_transaction = False
+            return {}
+
+        results: dict[str, dict] = {}
+        position_cache: dict[tuple[str, str], float] = {}
+
+        for _, sig in signals.iterrows():
+            sig_date = sig["signal_date"]
+            sym = str(sig["symbol"])
+            strategy = str(sig["model_name"])
+            signal_market = str(sig.get("market") or market or "CN")
+            side = str(sig["side"] or "").upper()
+            order_side = "SELL" if side in {"SELL", "SHORT"} else side
+            stats = results.setdefault(strategy, _new_result())
+            stats["total"] += 1
+
+            next_day = _get_next_trading_day(conn, sig_date, signal_market)
+            if next_day is None:
+                stats["skipped_no_trading_day"] += 1
+                logger.warning(f"No trading day after {sig_date} for {sym}")
+                continue
+
+            held_qty = 0.0
+            if side in {"SELL", "SHORT"}:
+                cache_key = (strategy, sym)
+                if cache_key not in position_cache:
+                    position_cache[cache_key] = _latest_position_qty(conn, strategy, sym)
+                held_qty = position_cache[cache_key]
+                if held_qty <= 0:
+                    _mark_signal_handled(
+                        conn,
+                        sig["signal_id"],
+                        next_day,
+                        status="NO_ACTION",
+                        status_reason="当前无持仓，无需卖出",
+                    )
+                    stats["handled_without_order"] += 1
+                    logger.info(f"  跳过 {sym} {side}：当前无持仓，信号已按无需动作处理")
+                    continue
+
+            price = _get_open_price(conn, sym, next_day)
+            if price is None or price <= 0:
+                stats["skipped_no_price"] += 1
+                logger.warning(f"No open price for {sym} on {next_day}")
+                continue
+
+            max_position = sig["max_position_pct"] if sig["max_position_pct"] else 0.05
+
+            if side == "BUY":
+                score = float(sig["score"] or 0)
+                confidence = float(sig["confidence"] or 0)
+                rank_score = confidence * max(score, 0)
+                min_conf = float(portfolio_cfg.get("min_rebalance_buy_confidence", 0.75))
+                min_rank = float(portfolio_cfg.get("min_rebalance_buy_rank_score", 0.50))
+                if confidence < min_conf or rank_score < min_rank:
+                    stats["skipped_threshold"] += 1
+                    _mark_signal_handled(
+                        conn,
+                        sig["signal_id"],
+                        next_day,
+                        status="NO_ACTION",
+                        status_reason=(
+                            f"低于执行门槛: confidence={confidence:.2f}, "
+                            f"rank_score={rank_score:.2f}"
+                        ),
+                    )
+                    stats["handled_without_order"] += 1
+                    logger.info(
+                        f"  跳过 {sym} BUY：低于执行门槛 "
+                        f"(confidence={confidence:.2f}, rank_score={rank_score:.2f})"
+                    )
+                    continue
+
+                normal_cap = float(portfolio_cfg.get("max_single_position_pct", 0.10))
+                overweight_cap = float(portfolio_cfg.get("overweight_single_position_pct", 0.15))
+                overweight_min_conf = float(portfolio_cfg.get("overweight_min_confidence", 0.90))
+                overweight_min_rank = float(portfolio_cfg.get("overweight_min_rank_score", 0.85))
+                allowed_cap = overweight_cap if (
+                    confidence >= overweight_min_conf and rank_score >= overweight_min_rank
+                ) else normal_cap
+                max_position = min(float(max_position), allowed_cap)
+
+                target_value = current_total * max_position
+                lots = int(target_value / price / 100)
+                if lots == 0:
+                    stats["skipped_lot"] += 1
+                    reason = (
+                        f"不足一手: 仓位 {max_position*100:.0f}% × 总资产 {current_total:,.0f} = "
+                        f"{target_value:,.0f}，不足一手 ({price:.0f}×100={price*100:,.0f})"
+                    )
+                    _mark_signal_handled(
+                        conn,
+                        sig["signal_id"],
+                        next_day,
+                        status="NO_ACTION",
+                        status_reason=reason,
+                    )
+                    stats["handled_without_order"] += 1
+                    logger.info(
+                        f"  跳过 {sym}：仓位 {max_position*100:.0f}% × 总资产 {current_total:,.0f} = "
+                        f"{target_value:,.0f}，不足一手 ({price:.0f}×100={price*100:,.0f})"
+                    )
+                    continue
+                qty = lots * 100
+
+            elif side in {"SELL", "SHORT"}:
+                qty = held_qty
+            else:
+                continue
+
+            market_key = "cn" if signal_market == "CN" else "hk"
+            cost_cfg = config["markets"].get(market_key, config["markets"]["cn"])
+            commission = float(cost_cfg["commission_rate"])
+            stamp_duty = float(cost_cfg.get("stamp_duty_rate", 0))
+            execution_value = float(qty * price)
+            execution_cost = float(execution_value * (commission + (stamp_duty if order_side == "SELL" else 0)))
+            min_fee = 5.0 if signal_market == "CN" else 10.0
+            if execution_cost < min_fee:
+                execution_cost = min_fee
+
+            cash_before = session_cash
+            if order_side == "BUY":
+                required = execution_value + execution_cost
+                if session_cash < required:
+                    stats["skipped_cash"] += 1
+                    logger.warning(f"  跳过 {sym} BUY：现金不足 (可用 {session_cash:,.0f} < 需要 {required:,.0f})")
+                    continue
+                session_cash -= required
+            else:
+                session_cash += execution_value - execution_cost
+                position_cache[(strategy, sym)] = 0.0
+            cash_after = session_cash
+
+            import uuid
+            order_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
+            order_ts = _execution_timestamp(conn, next_day, signal_market)
+            conn.execute("""
+                INSERT INTO paper_orders (
+                    order_id, signal_id, symbol, side, order_qty, order_price,
+                    order_value, fee, cash_before, cash_after, order_ts, status, status_reason
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'FILLED', '成交')
+            """, [
+                order_id, sig["signal_id"], sym, order_side, qty, price,
+                execution_value, execution_cost, cash_before, cash_after, pd.Timestamp(order_ts),
+            ])
+
+            _mark_signal_handled(conn, sig["signal_id"], next_day, price)
+            stats["executed"] += 1
+
+        conn.execute("COMMIT")
+        in_transaction = False
+        results = _finalize_results(results)
+        for name, result in results.items():
+            logger.info(
+                f"Paper engine: {name} executed {result['executed']}/{result['total']} signals "
+                f"(handled_without_order={result['handled_without_order']}, "
+                f"no_price={result['skipped_no_price']}, cash={result['skipped_cash']})"
+            )
+        return results
+    except Exception:
+        if in_transaction:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+        raise
+    finally:
+        conn.close()
+
+
+def run(strategy_name: str, initial_capital: Optional[float] = None, market: str = "CN") -> dict:
+    """
+    执行单个策略的纸交易：将未执行的信号转换为模拟成交。
+
+    Returns:
+        dict with summary stats
+    """
+    results = _run_signal_batch(strategy_name, initial_capital, market)
+    return results.get(strategy_name, {"executed": 0})
+
+
+def run_all_strategies(initial_capital: Optional[float] = None) -> dict:
+    """对所有有信号的策略执行纸交易，共享一个卖出优先的串行现金会话。"""
+    results = _run_signal_batch(None, initial_capital, "CN")
+    if any(result.get("executed", 0) > 0 for result in results.values()):
+        from src.portfolio.cashbook import rebuild_account_daily
+
+        rebuild_account_daily()
     if results:
         from src.portfolio.nav_calculator import calculate_all_strategies
 

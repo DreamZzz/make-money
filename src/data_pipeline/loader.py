@@ -2,6 +2,7 @@
 DuckDB 数据入库模块。
 支持全量导入和增量更新，自动建表。
 """
+import json
 import os
 from datetime import date
 from pathlib import Path
@@ -74,11 +75,32 @@ def init_db(conn: duckdb.DuckDBPyConnection) -> None:
         "ALTER TABLE qlib_model_registry ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP",
         "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS buffer_n INTEGER",
         "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS benchmark_name VARCHAR",
+        "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS constraint_profile VARCHAR DEFAULT 'theoretical_equal_weight'",
+        "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS account_capital DOUBLE",
+        "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS max_position_pct DOUBLE",
+        "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS cash_reserve_pct DOUBLE",
+        "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS lot_size INTEGER",
+        "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS avg_selected_count DOUBLE",
+        "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS min_selected_count INTEGER",
+        "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS avg_cash_drag DOUBLE",
+        "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS max_actual_position_pct DOUBLE",
+        "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS avg_weight_deviation DOUBLE",
+        "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS skipped_price_cap_avg DOUBLE",
+        "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS skipped_valuation_avg DOUBLE",
+        "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS skipped_budget_avg DOUBLE",
+        "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS max_pe_ttm DOUBLE",
+        "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS max_pb DOUBLE",
         "ALTER TABLE qlib_grid_results ADD COLUMN IF NOT EXISTS metrics_json TEXT",
         "ALTER TABLE qlib_candidate_results ADD COLUMN IF NOT EXISTS params_json TEXT",
         "ALTER TABLE qlib_candidate_results ADD COLUMN IF NOT EXISTS grid_json TEXT",
+        "ALTER TABLE qlib_candidate_results ADD COLUMN IF NOT EXISTS best_constraint_profile VARCHAR",
+        "ALTER TABLE qlib_candidate_results ADD COLUMN IF NOT EXISTS best_account_capital DOUBLE",
+        "ALTER TABLE qlib_candidate_results ADD COLUMN IF NOT EXISTS avg_selected_count DOUBLE",
+        "ALTER TABLE qlib_candidate_results ADD COLUMN IF NOT EXISTS avg_cash_drag DOUBLE",
+        "ALTER TABLE qlib_candidate_results ADD COLUMN IF NOT EXISTS max_actual_position_pct DOUBLE",
         "ALTER TABLE qlib_candidate_results ADD COLUMN IF NOT EXISTS rank_ic_positive_rate DOUBLE",
         "ALTER TABLE qlib_candidate_results ADD COLUMN IF NOT EXISTS error_message VARCHAR",
+        "ALTER TABLE data_source_health ADD COLUMN IF NOT EXISTS stats_json TEXT",
     ]:
         try:
             conn.execute(col_ddl)
@@ -314,6 +336,51 @@ def upsert_index_daily(conn: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> int
     conn.execute(f"""
         INSERT OR REPLACE INTO index_daily ({", ".join(existing)})
         SELECT {", ".join(existing)} FROM _tmp_idx
+    """)
+    return len(df)
+
+
+def record_data_source_health(conn: duckdb.DuckDBPyConnection, rows: list[dict]) -> int:
+    """Persist per-source update health rows for Dashboard diagnostics."""
+    if not rows:
+        return 0
+    now = pd.Timestamp.now()
+    normalized = []
+    columns = [
+        "run_id", "source", "market", "operation", "started_at", "ended_at", "status",
+        "attempted", "updated", "no_data", "source_error", "rate_limited",
+        "circuit_skip", "failed", "message", "stats_json",
+    ]
+    for row in rows:
+        item = {col: row.get(col) for col in columns}
+        item["run_id"] = str(item.get("run_id") or f"UPDATE-{now.strftime('%Y%m%d%H%M%S')}")
+        item["source"] = str(item.get("source") or "unknown")
+        item["market"] = str(item.get("market") or "UNKNOWN")
+        item["operation"] = str(item.get("operation") or "daily_update")
+        item["started_at"] = pd.to_datetime(item.get("started_at") or now)
+        item["ended_at"] = pd.to_datetime(item.get("ended_at") or now)
+        item["status"] = str(item.get("status") or "OK")
+        for metric in ["attempted", "updated", "no_data", "source_error", "rate_limited", "circuit_skip", "failed"]:
+            item[metric] = int(item.get(metric) or 0)
+        stats_json = item.get("stats_json")
+        if isinstance(stats_json, (dict, list)):
+            item["stats_json"] = json.dumps(stats_json, ensure_ascii=False, default=str)
+        elif stats_json is not None:
+            item["stats_json"] = str(stats_json)
+        normalized.append(item)
+    df = pd.DataFrame(normalized, columns=columns)
+    conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_data_source_health AS SELECT * FROM df")
+    conn.execute("""
+        INSERT OR REPLACE INTO data_source_health (
+            run_id, source, market, operation, started_at, ended_at, status,
+            attempted, updated, no_data, source_error, rate_limited, circuit_skip,
+            failed, message, stats_json
+        )
+        SELECT
+            run_id, source, market, operation, started_at, ended_at, status,
+            attempted, updated, no_data, source_error, rate_limited, circuit_skip,
+            failed, message, stats_json
+        FROM _tmp_data_source_health
     """)
     return len(df)
 

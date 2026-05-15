@@ -23,6 +23,9 @@ METRIC_COLUMNS = [
     "rank_ic_mean",
     "rank_ic_positive_rate",
     "primary_benchmark",
+    "avg_selected_count",
+    "avg_cash_drag",
+    "max_actual_position_pct",
 ]
 
 
@@ -74,6 +77,18 @@ METRIC_HIGHLIGHT_STANDARDS = [
         "label": "低换手",
         "winner_rule": "越低越好",
         "highlight_standard": "中长线风格下换手越低越容易落地，成功实验中最低者胜出。",
+    },
+    {
+        "metric": "avg_cash_drag",
+        "label": "低现金拖累",
+        "winner_rule": "越低越好",
+        "highlight_standard": "小资金约束实验中，真实一手成交后闲置现金越少，越接近可执行组合。",
+    },
+    {
+        "metric": "max_actual_position_pct",
+        "label": "单票不过度集中",
+        "winner_rule": "低于约束上限",
+        "highlight_standard": "30万档硬约束 6%，50万档硬约束 5%；超过约束的高价股会被跳过。",
     },
 ]
 
@@ -142,6 +157,27 @@ METRIC_GLOSSARY = [
         "plain_explanation": "这是给中长线可落地性打的总分，不让高收益但高换手/大回撤的结果轻易胜出。",
         "watch_out": "它是本地定义的选优规则，不是行业统一标准。",
     },
+    {
+        "metric": "avg_selected_count",
+        "label": "平均可持仓数",
+        "meaning": "小资金约束回测中，每次调仓真实能买入的一手股票数量均值。",
+        "plain_explanation": "不是模型想买多少只，而是在 30/50 万资金、100股一手、单票上限下真的买得起多少只。",
+        "watch_out": "数量太少会让组合集中，和 Top-N 理论组合偏离更大。",
+    },
+    {
+        "metric": "avg_cash_drag",
+        "label": "现金拖累",
+        "meaning": "小资金约束回测中，因为一手/上限/估值过滤而无法投入的平均现金比例。",
+        "plain_explanation": "钱放着没买股票的比例。越高，说明组合越难把资金有效配置出去。",
+        "watch_out": "现金拖累可能降低波动和回撤，但也会稀释收益。",
+    },
+    {
+        "metric": "max_actual_position_pct",
+        "label": "最大单票占比",
+        "meaning": "小资金约束回测中，单只股票实际买入金额占账户总资产的最高比例。",
+        "plain_explanation": "用来防止一手高价股一下子占掉太大仓位。",
+        "watch_out": "超过约束上限的股票会直接跳过，不会进入小资金可执行组合。",
+    },
 ]
 
 
@@ -161,6 +197,11 @@ def load_experiment_report(conn: Any, limit: int = 100) -> dict[str, Any]:
     grid = conn.execute("""
         SELECT source_experiment_id, model_name, mode, top_n, holding_days,
                rebalance_freq, buffer_n, benchmark_name, start_date, end_date,
+               constraint_profile, account_capital, max_position_pct,
+               cash_reserve_pct, lot_size, avg_selected_count,
+               min_selected_count, avg_cash_drag, max_actual_position_pct,
+               avg_weight_deviation, skipped_price_cap_avg, skipped_valuation_avg,
+               skipped_budget_avg, max_pe_ttm, max_pb,
                annual_return, cumulative_return, annual_volatility, sharpe_ratio,
                max_drawdown, turnover, benchmark_return, excess_return, created_at
         FROM qlib_grid_results
@@ -169,6 +210,8 @@ def load_experiment_report(conn: Any, limit: int = 100) -> dict[str, Any]:
         SELECT candidate_id, batch_id, experiment_id, model_name, model_family,
                model_variant, status, mode, params_json, grid_json, best_benchmark,
                best_top_n, best_holding_days, best_rebalance_freq, best_buffer_n,
+               best_constraint_profile, best_account_capital, avg_selected_count,
+               avg_cash_drag, max_actual_position_pct,
                annual_return, sharpe_ratio, max_drawdown, turnover,
                benchmark_return, excess_return, ic_mean, icir, rank_ic_mean,
                rank_ic_positive_rate, score, error_message, started_at, ended_at
@@ -189,7 +232,11 @@ def build_experiment_report(
     grid_best = prepare_grid_best_frame(grid)
     candidate_results = prepare_candidate_frame(candidates)
     summary = summarize_report(exp, grid_best, candidate_results)
-    exp = annotate_experiment_highlights(exp, summary.get("best_experiment"))
+    exp = annotate_experiment_highlights(
+        exp,
+        summary.get("best_experiment"),
+        summary.get("best_candidate"),
+    )
     return {
         "experiments": exp,
         "benchmarks": benchmarks,
@@ -216,11 +263,13 @@ def get_metric_glossary() -> list[dict[str, str]]:
 def annotate_experiment_highlights(
     experiments: pd.DataFrame,
     best_experiment: dict[str, Any] | None,
+    best_candidate: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     if experiments.empty:
         return experiments.copy()
     df = experiments.copy()
     df["is_final_selected"] = False
+    df["is_candidate_selected"] = False
     df["winning_metrics"] = ""
     df["highlight_reason"] = ""
 
@@ -244,6 +293,9 @@ def annotate_experiment_highlights(
     best_id = best_experiment.get("experiment_id") if best_experiment else None
     if best_id is not None and "experiment_id" in df:
         df.loc[df["experiment_id"] == best_id, "is_final_selected"] = True
+    candidate_best_id = best_candidate.get("experiment_id") if best_candidate else None
+    if candidate_best_id is not None and "experiment_id" in df:
+        df.loc[df["experiment_id"] == candidate_best_id, "is_candidate_selected"] = True
 
     for idx, labels in winner_labels.items():
         if labels:
@@ -252,7 +304,9 @@ def annotate_experiment_highlights(
     def reason(row: pd.Series) -> str:
         parts: list[str] = []
         if bool(row.get("is_final_selected")):
-            parts.append("最终选出")
+            parts.append("实验指标最终选出")
+        if bool(row.get("is_candidate_selected")):
+            parts.append("候选批跑最终选出")
         if row.get("winning_metrics"):
             parts.append(f"胜出指标：{row.get('winning_metrics')}")
         if not parts and row.get("verdict"):
@@ -314,16 +368,25 @@ def prepare_grid_best_frame(grid: pd.DataFrame) -> pd.DataFrame:
     if grid.empty:
         return grid.copy()
     df = grid.copy()
+    if "constraint_profile" not in df:
+        df["constraint_profile"] = "theoretical_equal_weight"
+    df["_is_small_account"] = df["constraint_profile"].fillna("").astype(str).str.startswith("small_account")
     df["selection_score"] = df.apply(score_candidate_grid_row, axis=1)
     sort_cols = [
         "source_experiment_id",
         "benchmark_name",
+        "_is_small_account",
         "selection_score",
         "excess_return",
         "sharpe_ratio",
     ]
-    df = df.sort_values(sort_cols, ascending=[True, True, False, False, False], na_position="last")
-    return df.groupby(["source_experiment_id", "benchmark_name"], as_index=False).head(1).reset_index(drop=True)
+    df = df.sort_values(sort_cols, ascending=[True, True, False, False, False, False], na_position="last")
+    return (
+        df.groupby(["source_experiment_id", "benchmark_name"], as_index=False)
+        .head(1)
+        .drop(columns=["_is_small_account"], errors="ignore")
+        .reset_index(drop=True)
+    )
 
 
 def prepare_candidate_frame(candidates: pd.DataFrame) -> pd.DataFrame:

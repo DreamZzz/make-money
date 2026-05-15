@@ -61,14 +61,16 @@ from src.data_pipeline.loader import (
     get_connection,
     get_last_trade_date,
     init_db,
+    record_data_source_health,
     repair_market_metadata,
     upsert_daily_price,
     upsert_index_daily,
     upsert_stock_info,
 )
 
-# 港股代码后缀映射
-HK_INDEX_YFINANCE = {"HSI": "^HSI", "HSTECH": "3032.HK"}
+# 港股指数映射：优先使用 AkShare/Sina 的真实指数代码，yfinance 仅作兜底。
+HK_INDEX_AKSHARE_SINA = {"HSI": "HSI", "HSTECH": "HSTECH"}
+HK_INDEX_YFINANCE_FALLBACK = {"HSI": "^HSI", "HSTECH": "HSTECH.HK"}
 CN_INDEX_AKSHARE = {"000300": "000300.SH", "000905": "000905.SH"}
 
 # 恒生指数主要成分股（硬编码备用，当联网获取失败时使用）
@@ -115,6 +117,138 @@ def _default_dates_yf(config: dict):
     end_date = date.today().strftime("%Y-%m-%d")
     start_date = (date.today() - timedelta(days=history_years * 365)).strftime("%Y-%m-%d")
     return start_date, end_date
+
+
+def _chunks(items: list, size: int):
+    size = max(int(size), 1)
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
+def _source_health_status(attempted: int, updated: int, source_error: int = 0, failed: int = 0, rate_limited: int = 0) -> str:
+    if attempted <= 0:
+        return "SKIPPED"
+    if failed or (updated == 0 and (source_error or rate_limited)):
+        return "FAILED"
+    if source_error or rate_limited or updated < attempted:
+        return "DEGRADED"
+    return "OK"
+
+
+def _record_update_source_health(conn, run_id: str, started_at, stats: dict) -> None:
+    ended_at = pd.Timestamp.now()
+    rows = [
+        {
+            "run_id": run_id,
+            "source": "akshare",
+            "market": "CN",
+            "operation": "daily_update",
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "status": _source_health_status(
+                stats.get("cn_akshare_attempted", 0),
+                stats.get("cn_akshare_updated", 0),
+                stats.get("cn_akshare_source_error", 0),
+                0,
+            ),
+            "attempted": stats.get("cn_akshare_attempted", 0),
+            "updated": stats.get("cn_akshare_updated", 0),
+            "source_error": stats.get("cn_akshare_source_error", 0),
+            "circuit_skip": stats.get("cn_akshare_circuit_skip", 0),
+            "message": "AkShare A股主源；连续瞬时错误会熔断",
+            "stats_json": stats,
+        },
+        {
+            "run_id": run_id,
+            "source": "yfinance",
+            "market": "CN",
+            "operation": "daily_update",
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "status": _source_health_status(
+                stats.get("cn_yfinance_attempted", 0) + stats.get("cn_yfinance_batch_attempted", 0),
+                stats.get("cn_yfinance_updated", 0) + stats.get("cn_yfinance_batch_updated", 0),
+                stats.get("cn_yfinance_source_error", 0) + stats.get("cn_yfinance_batch_source_error", 0),
+                0,
+                stats.get("cn_yfinance_rate_limited", 0),
+            ),
+            "attempted": stats.get("cn_yfinance_attempted", 0) + stats.get("cn_yfinance_batch_attempted", 0),
+            "updated": stats.get("cn_yfinance_updated", 0) + stats.get("cn_yfinance_batch_updated", 0),
+            "no_data": stats.get("cn_yfinance_batch_empty", 0),
+            "source_error": stats.get("cn_yfinance_source_error", 0) + stats.get("cn_yfinance_batch_source_error", 0),
+            "rate_limited": stats.get("cn_yfinance_rate_limited", 0),
+            "circuit_skip": stats.get("cn_yfinance_skipped_circuit", 0) + stats.get("cn_yfinance_batch_skipped_circuit", 0),
+            "message": "A股备源；AkShare 熔断后批量接管剩余标的",
+            "stats_json": stats,
+        },
+        {
+            "run_id": run_id,
+            "source": "yfinance",
+            "market": "HK",
+            "operation": "daily_update",
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "status": _source_health_status(
+                stats.get("hk_attempted", 0),
+                stats.get("hk_yfinance_updated", 0),
+                stats.get("hk_source_error", 0),
+                stats.get("hk_failed", 0),
+                stats.get("hk_yfinance_rate_limited", 0),
+            ),
+            "attempted": stats.get("hk_attempted", 0),
+            "updated": stats.get("hk_yfinance_updated", 0),
+            "source_error": stats.get("hk_source_error", 0),
+            "rate_limited": stats.get("hk_yfinance_rate_limited", 0),
+            "failed": stats.get("hk_failed", 0),
+            "message": "港股主源；失败后尝试 AkShare",
+            "stats_json": stats,
+        },
+    ]
+    record_data_source_health(conn, rows)
+
+
+def _run_cn_yfinance_batch_backup(
+    conn,
+    queue: list[dict],
+    end_date_yf: str,
+    batch_size: int,
+    stats: dict,
+) -> None:
+    if not queue:
+        return
+    by_start: dict[str, list[str]] = {}
+    for item in queue:
+        by_start.setdefault(item["start_date"], []).append(item["symbol"])
+    logger.info(f"Running CN yfinance batch backup for {len(queue)} symbols after AkShare circuit")
+    for fetch_start, symbols in by_start.items():
+        for chunk in _chunks(symbols, batch_size):
+            stats["cn_yfinance_batch_attempted"] += len(chunk)
+            try:
+                batch = yf.fetch_cn_daily_batch(chunk, fetch_start, end_date_yf, log_empty=False)
+            except Exception as exc:
+                stats["cn_yfinance_batch_source_error"] += len(chunk)
+                stats["cn_source_error"] += len(chunk)
+                logger.warning(f"CN yfinance batch backup failed for {len(chunk)} symbols: {exc}")
+                continue
+            for sym in chunk:
+                df = batch.get(sym, pd.DataFrame())
+                status = yf.source_status(df)
+                if not df.empty:
+                    upsert_daily_price(conn, df)
+                    stats["cn_updated"] += 1
+                    stats["cn_yfinance_batch_updated"] += 1
+                elif yf.is_rate_limited(df):
+                    stats["cn_yfinance_rate_limited"] += 1
+                    stats["cn_yfinance_batch_skipped_circuit"] += max(len(chunk) - chunk.index(sym) - 1, 0)
+                    stats["cn_source_error"] += len(chunk) - chunk.index(sym)
+                    logger.warning("yfinance CN batch rate limited; remaining current batch marked as source_error")
+                    break
+                elif status == yf.STATUS_SOURCE_ERROR:
+                    stats["cn_yfinance_batch_source_error"] += 1
+                    stats["cn_source_error"] += 1
+                else:
+                    stats["cn_yfinance_batch_empty"] += 1
+                    stats["cn_no_data"] += 1
 
 
 def init_all(conn, config: dict):
@@ -202,13 +336,17 @@ def init_all(conn, config: dict):
         except Exception as e:
             logger.error(f"CN index daily failed {code}: {e}")
 
-    for code, ycode in HK_INDEX_YFINANCE.items():
+    for code, index_code in HK_INDEX_AKSHARE_SINA.items():
         try:
-            df = yf.fetch_hk_index_daily(ycode, start_date=start_date_yf, end_date=end_date_yf)
+            df = ak.fetch_hk_index_daily_sina(index_code, start_date=start_date, end_date=end_date)
+            if df.empty:
+                df = yf.fetch_hk_index_daily(HK_INDEX_YFINANCE_FALLBACK[code], start_date=start_date_yf, end_date=end_date_yf)
+                if not df.empty:
+                    df["index_code"] = code
             if not df.empty:
                 upsert_index_daily(conn, df)
         except Exception as e:
-            logger.error(f"HK index daily failed {ycode}: {e}")
+            logger.error(f"HK index daily failed {code}: {e}")
 
     logger.info("=== 初始化完成 ===")
 
@@ -216,22 +354,37 @@ def init_all(conn, config: dict):
 def update_all(conn, config: dict):
     """每日增量更新：只更新已有日线数据的股票"""
     logger.info("=== 增量更新 ===")
+    run_started_at = pd.Timestamp.now()
+    run_id = f"UPDATE-{run_started_at.strftime('%Y%m%d%H%M%S')}"
     start_date, end_date = _default_dates(config)
     start_date_yf, end_date_yf = _default_dates_yf(config)
     repair_market_metadata(conn)
     stats = {
+        "run_id": run_id,
         "cn_attempted": 0,
         "cn_updated": 0,
         "cn_no_data": 0,
         "cn_source_error": 0,
+        "cn_akshare_attempted": 0,
+        "cn_akshare_updated": 0,
         "cn_akshare_source_error": 0,
         "cn_akshare_circuit_skip": 0,
+        "cn_yfinance_attempted": 0,
+        "cn_yfinance_updated": 0,
         "cn_yfinance_source_error": 0,
         "cn_yfinance_rate_limited": 0,
         "cn_yfinance_skipped_circuit": 0,
+        "cn_yfinance_batch_attempted": 0,
+        "cn_yfinance_batch_updated": 0,
+        "cn_yfinance_batch_empty": 0,
+        "cn_yfinance_batch_source_error": 0,
+        "cn_yfinance_batch_skipped_limit": 0,
+        "cn_yfinance_batch_skipped_circuit": 0,
         "cn_failed": 0,
         "hk_attempted": 0,
         "hk_updated": 0,
+        "hk_yfinance_updated": 0,
+        "hk_akshare_updated": 0,
         "hk_no_data": 0,
         "hk_source_error": 0,
         "hk_yfinance_rate_limited": 0,
@@ -242,7 +395,12 @@ def update_all(conn, config: dict):
 
     # 只更新 daily_price 表中已有的股票
     cn_with_data = conn.execute(
-        "SELECT DISTINCT symbol FROM daily_price WHERE symbol IN (SELECT symbol FROM stock_info WHERE country='CN')"
+        """
+        SELECT DISTINCT symbol
+        FROM daily_price
+        WHERE symbol IN (SELECT symbol FROM stock_info WHERE country='CN')
+        ORDER BY symbol
+        """
     ).fetchall()
     hk_with_data = conn.execute(
         """
@@ -250,6 +408,7 @@ def update_all(conn, config: dict):
         FROM daily_price dp
         LEFT JOIN stock_info si ON dp.symbol = si.symbol
         WHERE si.country = 'HK' OR regexp_matches(dp.symbol, '^[0-9]{1,5}$')
+        ORDER BY dp.symbol
         """
     ).fetchall()
     cn_symbols = [r[0] for r in cn_with_data]
@@ -262,6 +421,10 @@ def update_all(conn, config: dict):
     akshare_consecutive_errors = 0
     data_cfg = config.get("data", {})
     akshare_circuit_threshold = int(data_cfg.get("akshare_cn_error_circuit_threshold", 12))
+    cn_backup_after_akshare_circuit = bool(data_cfg.get("cn_backup_after_akshare_circuit", True))
+    cn_backup_batch_size = int(data_cfg.get("cn_backup_batch_size", 80))
+    cn_backup_max_symbols = int(data_cfg.get("cn_backup_max_symbols_after_circuit", 800))
+    cn_backup_queue: list[dict] = []
     ak.configure_cn_daily_rate_limit(float(data_cfg.get("akshare_cn_min_interval_seconds", 0.8)))
     for sym in cn_symbols:
         last = get_last_trade_date(conn, sym)
@@ -272,14 +435,27 @@ def update_all(conn, config: dict):
         fetch_start_ak = (last + timedelta(days=1)).strftime("%Y%m%d") if last else start_date
         try:
             akshare_skipped_current = False
+            source_used = None
             if akshare_cn_circuit_open:
                 df = pd.DataFrame()
                 ak_status = ak.STATUS_SOURCE_ERROR
                 akshare_skipped_current = True
                 stats["cn_akshare_circuit_skip"] += 1
+                if cn_backup_after_akshare_circuit and not yfinance_cn_circuit_open:
+                    if len(cn_backup_queue) < cn_backup_max_symbols:
+                        cn_backup_queue.append({"symbol": sym, "start_date": fetch_start_yf})
+                    else:
+                        stats["cn_yfinance_batch_skipped_limit"] += 1
+                        stats["cn_source_error"] += 1
+                else:
+                    stats["cn_source_error"] += 1
+                continue
             else:
+                stats["cn_akshare_attempted"] += 1
                 df = ak.fetch_cn_stock_daily(sym, start_date=fetch_start_ak, end_date=end_date, log_empty=False)
                 ak_status = ak.source_status(df)
+                if not df.empty:
+                    source_used = "akshare"
                 if ak_status == ak.STATUS_SOURCE_ERROR:
                     akshare_consecutive_errors += 1
                     if ak.is_transient_source_error(df) and akshare_consecutive_errors >= akshare_circuit_threshold:
@@ -292,7 +468,8 @@ def update_all(conn, config: dict):
                     akshare_consecutive_errors = 0
 
             yf_status = None
-            if df.empty and not yfinance_cn_circuit_open:
+            if df.empty and not yfinance_cn_circuit_open and not akshare_skipped_current:
+                stats["cn_yfinance_attempted"] += 1
                 df_yf = yf.fetch_cn_daily(sym, fetch_start_yf, end_date_yf, log_empty=False)
                 yf_status = yf.source_status(df_yf)
                 if yf.is_rate_limited(df_yf):
@@ -303,12 +480,17 @@ def update_all(conn, config: dict):
                     stats["cn_yfinance_source_error"] += 1
                 if not df_yf.empty:
                     df = df_yf
+                    source_used = "yfinance"
             elif df.empty and yfinance_cn_circuit_open:
                 stats["cn_yfinance_skipped_circuit"] += 1
 
             if not df.empty:
                 upsert_daily_price(conn, df)
                 stats["cn_updated"] += 1
+                if source_used == "akshare":
+                    stats["cn_akshare_updated"] += 1
+                elif source_used == "yfinance":
+                    stats["cn_yfinance_updated"] += 1
             elif ak_status == ak.STATUS_SOURCE_ERROR and (yf_status is None or yf_status in {yf.STATUS_SOURCE_ERROR, yf.STATUS_RATE_LIMITED}):
                 stats["cn_source_error"] += 1
                 if not akshare_skipped_current:
@@ -318,6 +500,8 @@ def update_all(conn, config: dict):
         except Exception as e:
             stats["cn_failed"] += 1
             logger.warning(f"CN daily update failed after fallback {sym}: {e}")
+
+    _run_cn_yfinance_batch_backup(conn, cn_backup_queue, end_date_yf, cn_backup_batch_size, stats)
 
     # 港股 增量（yfinance 主通道）
     logger.info(f"Updating HK: {len(hk_symbols)} symbols with data")
@@ -334,6 +518,7 @@ def update_all(conn, config: dict):
             if not df.empty:
                 upsert_daily_price(conn, df)
                 stats["hk_updated"] += 1
+                stats["hk_yfinance_updated"] += 1
             else:
                 if yf.is_rate_limited(df):
                     stats["hk_yfinance_rate_limited"] += 1
@@ -342,6 +527,7 @@ def update_all(conn, config: dict):
                 if not df.empty:
                     upsert_daily_price(conn, df)
                     stats["hk_updated"] += 1
+                    stats["hk_akshare_updated"] += 1
                 elif yf_status in {yf.STATUS_SOURCE_ERROR, yf.STATUS_RATE_LIMITED} and ak_status == ak.STATUS_SOURCE_ERROR:
                     stats["hk_source_error"] += 1
                 else:
@@ -360,15 +546,19 @@ def update_all(conn, config: dict):
         except Exception as e:
             stats["index_failed"] += 1
             logger.warning(f"CN index update failed {code}: {e}")
-    for code, ycode in HK_INDEX_YFINANCE.items():
+    for code, index_code in HK_INDEX_AKSHARE_SINA.items():
         try:
-            df = yf.fetch_hk_index_daily(ycode, start_date=start_date_yf, end_date=end_date_yf)
+            df = ak.fetch_hk_index_daily_sina(index_code, start_date=start_date, end_date=end_date)
+            if df.empty:
+                df = yf.fetch_hk_index_daily(HK_INDEX_YFINANCE_FALLBACK[code], start_date=start_date_yf, end_date=end_date_yf)
+                if not df.empty:
+                    df["index_code"] = code
             if not df.empty:
                 upsert_index_daily(conn, df)
                 stats["index_updated"] += 1
         except Exception as e:
             stats["index_failed"] += 1
-            logger.warning(f"HK index update failed {ycode}: {e}")
+            logger.warning(f"HK index update failed {code}: {e}")
 
     logger.info(
         "增量更新汇总: "
@@ -376,12 +566,14 @@ def update_all(conn, config: dict):
         f"no_data={stats['cn_no_data']} source_error={stats['cn_source_error']} failed={stats['cn_failed']} "
         f"(ak_error={stats['cn_akshare_source_error']}, ak_circuit_skip={stats['cn_akshare_circuit_skip']}, "
         f"yf_error={stats['cn_yfinance_source_error']}, "
-        f"yf_rate_limited={stats['cn_yfinance_rate_limited']}, yf_circuit_skip={stats['cn_yfinance_skipped_circuit']}) | "
+        f"yf_rate_limited={stats['cn_yfinance_rate_limited']}, yf_circuit_skip={stats['cn_yfinance_skipped_circuit']}, "
+        f"yf_batch_attempted={stats['cn_yfinance_batch_attempted']}, yf_batch_updated={stats['cn_yfinance_batch_updated']}) | "
         f"HK attempted={stats['hk_attempted']} updated={stats['hk_updated']} "
         f"no_data={stats['hk_no_data']} source_error={stats['hk_source_error']} failed={stats['hk_failed']} "
         f"(yf_rate_limited={stats['hk_yfinance_rate_limited']}) | "
         f"index updated={stats['index_updated']} failed={stats['index_failed']}"
     )
+    _record_update_source_health(conn, run_id, run_started_at, stats)
     logger.info("=== 增量更新完成 ===")
     return stats
 

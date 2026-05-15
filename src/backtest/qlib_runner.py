@@ -30,6 +30,24 @@ from src.config import PROJECT_ROOT, load_config
 MODEL_NAME = "alpha158"
 DEFAULT_TOP_N = 50
 _QLIB_INITIALIZED = False
+DEFAULT_SMALL_ACCOUNT_PROFILES = [
+    {
+        "account_capital": 300_000,
+        "max_position_pct": 0.06,
+        "cash_reserve_pct": 0.05,
+        "lot_size": 100,
+        "max_pe_ttm": 120.0,
+        "max_pb": None,
+    },
+    {
+        "account_capital": 500_000,
+        "max_position_pct": 0.05,
+        "cash_reserve_pct": 0.05,
+        "lot_size": 100,
+        "max_pe_ttm": 120.0,
+        "max_pb": None,
+    },
+]
 
 
 def _json(value: Any) -> str:
@@ -316,7 +334,7 @@ def _load_price_frame(symbols: list[str], start: str, end: str) -> pd.DataFrame:
     conn = get_connection(read_only=True)
     try:
         prices = conn.execute(f"""
-            SELECT symbol, trade_date, open, close
+            SELECT symbol, trade_date, open, close, pe_ttm, pb
             FROM daily_price
             WHERE symbol IN ({ph})
               AND trade_date >= ?
@@ -425,13 +443,14 @@ def simulate_topn_open(
     groups = []
     for dt, group in pred.groupby("datetime"):
         groups.append((pd.to_datetime(dt), group))
-    if rebalance_freq == "monthly":
-        monthly = {}
+    if rebalance_freq in {"weekly", "monthly"}:
+        sampled = {}
+        period_freq = "W-FRI" if rebalance_freq == "weekly" else "M"
         for dt, group in groups:
-            monthly[dt.to_period("M")] = (dt, group)
-        groups = [monthly[k] for k in sorted(monthly)]
+            sampled[dt.to_period(period_freq)] = (dt, group)
+        groups = [sampled[k] for k in sorted(sampled)]
     elif rebalance_freq != "daily":
-        raise ValueError("rebalance_freq must be daily or monthly")
+        raise ValueError("rebalance_freq must be daily, weekly, or monthly")
 
     current_holdings: set[str] = set()
     turnover_values: dict[pd.Timestamp, float] = {}
@@ -471,9 +490,193 @@ def simulate_topn_open(
         current_holdings = new_holdings
 
     returns = pd.Series([r for _, r in daily_returns], index=pd.to_datetime([dt for dt, _ in daily_returns]))
-    periods_per_year = 12 if rebalance_freq == "monthly" else 252
+    periods_per_year = {"daily": 252, "weekly": 52, "monthly": 12}[rebalance_freq]
     returns.attrs["turnover"] = float(pd.Series(turnover_values).mean() * periods_per_year) if turnover_values else None
     returns.attrs["periods_per_year"] = periods_per_year
+    return returns
+
+
+def _small_account_profile_name(account_capital: float) -> str:
+    return f"small_account_{int(round(float(account_capital) / 1000))}k"
+
+
+def simulate_topn_open_constrained(
+    pred: pd.DataFrame,
+    prices: pd.DataFrame,
+    top_n: int,
+    holding_days: int,
+    rebalance_freq: str = "daily",
+    buffer_n: Optional[int] = None,
+    account_capital: float = 300_000,
+    max_position_pct: float = 0.06,
+    cash_reserve_pct: float = 0.05,
+    lot_size: int = 100,
+    commission_rate: float = 0.00025,
+    stamp_duty_rate: float = 0.001,
+    max_pe_ttm: Optional[float] = None,
+    max_pb: Optional[float] = None,
+) -> pd.Series:
+    """T signal -> T+1 open execution with account size, lot and concentration constraints."""
+    if pred.empty or prices.empty:
+        return pd.Series(dtype=float)
+    if holding_days < 1:
+        raise ValueError("holding_days must be >= 1")
+    if account_capital <= 0:
+        raise ValueError("account_capital must be positive")
+    if not 0 < max_position_pct <= 1:
+        raise ValueError("max_position_pct must be in (0, 1]")
+
+    pred = pred.copy()
+    pred["datetime"] = pd.to_datetime(pred["datetime"])
+    open_px = prices.pivot(index="trade_date", columns="symbol", values="open").sort_index()
+    forward_returns = open_px.shift(-(holding_days + 1)) / open_px.shift(-1) - 1
+    entry_prices = open_px.shift(-1)
+    pe_frame = (
+        prices.pivot(index="trade_date", columns="symbol", values="pe_ttm").sort_index()
+        if "pe_ttm" in prices.columns else pd.DataFrame()
+    )
+    pb_frame = (
+        prices.pivot(index="trade_date", columns="symbol", values="pb").sort_index()
+        if "pb" in prices.columns else pd.DataFrame()
+    )
+
+    groups = [(pd.to_datetime(dt), group) for dt, group in pred.groupby("datetime")]
+    if rebalance_freq in {"weekly", "monthly"}:
+        sampled = {}
+        period_freq = "W-FRI" if rebalance_freq == "weekly" else "M"
+        for dt, group in groups:
+            sampled[dt.to_period(period_freq)] = (dt, group)
+        groups = [sampled[k] for k in sorted(sampled)]
+    elif rebalance_freq != "daily":
+        raise ValueError("rebalance_freq must be daily, weekly, or monthly")
+
+    buffer_n = max(buffer_n or top_n, top_n)
+    investable_cash = account_capital * max(0.0, 1.0 - cash_reserve_pct)
+    target_slot_value = investable_cash / max(top_n, 1)
+    max_position_value = account_capital * max_position_pct
+    cost_rate = commission_rate + commission_rate + stamp_duty_rate
+
+    current_holdings: set[str] = set()
+    daily_returns = []
+    turnover_values: dict[pd.Timestamp, float] = {}
+    selected_counts = []
+    cash_drags = []
+    max_weights = []
+    weight_deviations = []
+    skipped_price_caps = []
+    skipped_valuations = []
+    skipped_budget_counts = []
+
+    for dt, group in groups:
+        if dt not in forward_returns.index or dt not in entry_prices.index:
+            continue
+        ranked = group.sort_values("score", ascending=False)["instrument"].astype(str).tolist()
+        ranked = [
+            s for s in ranked
+            if s in forward_returns.columns
+            and s in entry_prices.columns
+            and pd.notna(forward_returns.loc[dt, s])
+            and pd.notna(entry_prices.loc[dt, s])
+        ]
+        if not ranked:
+            continue
+
+        keep_pool = set(ranked[:buffer_n])
+        ordered = [s for s in current_holdings if s in keep_pool]
+        ordered.extend([s for s in ranked if s not in ordered])
+
+        positions: dict[str, float] = {}
+        spent = 0.0
+        skipped_price_cap = 0
+        skipped_valuation = 0
+        skipped_budget = 0
+
+        for sym in ordered:
+            if len(positions) >= top_n:
+                break
+            price = float(entry_prices.loc[dt, sym])
+            if price <= 0 or not np.isfinite(price):
+                continue
+
+            if max_pe_ttm is not None and not pe_frame.empty and dt in pe_frame.index and sym in pe_frame.columns:
+                pe = pe_frame.loc[dt, sym]
+                if pd.notna(pe) and float(pe) > max_pe_ttm:
+                    skipped_valuation += 1
+                    continue
+            if max_pb is not None and not pb_frame.empty and dt in pb_frame.index and sym in pb_frame.columns:
+                pb = pb_frame.loc[dt, sym]
+                if pd.notna(pb) and float(pb) > max_pb:
+                    skipped_valuation += 1
+                    continue
+
+            lot_value = price * lot_size
+            if lot_value > max_position_value + 1e-9:
+                skipped_price_cap += 1
+                continue
+
+            desired_value = min(max_position_value, max(target_slot_value, lot_value))
+            quantity = int(desired_value // lot_value) * lot_size
+            if quantity <= 0:
+                continue
+            order_value = quantity * price
+            entry_fee = order_value * commission_rate
+            if spent + order_value + entry_fee > investable_cash + 1e-9:
+                skipped_budget += 1
+                continue
+            positions[sym] = order_value
+            spent += order_value + entry_fee
+
+        if not positions:
+            continue
+
+        new_holdings = set(positions)
+        if current_holdings:
+            turnover = len(new_holdings.symmetric_difference(current_holdings)) / max(len(new_holdings | current_holdings), 1)
+        else:
+            turnover = 1.0
+        invested_weight = sum(positions.values()) / account_capital
+        gross_period = float(sum(
+            (value / account_capital) * float(forward_returns.loc[dt, sym])
+            for sym, value in positions.items()
+        ))
+        net_period = gross_period - cost_rate * turnover * invested_weight
+        if rebalance_freq == "daily" and net_period > -1:
+            net = (1 + net_period) ** (1 / holding_days) - 1
+        else:
+            net = net_period
+
+        ideal_weight = (1.0 - cash_reserve_pct) / max(top_n, 1)
+        weights = [value / account_capital for value in positions.values()]
+        daily_returns.append((dt, net))
+        turnover_values[dt] = turnover
+        selected_counts.append(len(positions))
+        cash_drags.append(max(0.0, 1.0 - invested_weight))
+        max_weights.append(max(weights))
+        weight_deviations.append(float(np.mean([abs(w - ideal_weight) for w in weights])) if weights else 0.0)
+        skipped_price_caps.append(skipped_price_cap)
+        skipped_valuations.append(skipped_valuation)
+        skipped_budget_counts.append(skipped_budget)
+        current_holdings = new_holdings
+
+    returns = pd.Series([r for _, r in daily_returns], index=pd.to_datetime([dt for dt, _ in daily_returns]))
+    periods_per_year = {"daily": 252, "weekly": 52, "monthly": 12}[rebalance_freq]
+    returns.attrs["turnover"] = float(pd.Series(turnover_values).mean() * periods_per_year) if turnover_values else None
+    returns.attrs["periods_per_year"] = periods_per_year
+    returns.attrs["constraint_profile"] = _small_account_profile_name(account_capital)
+    returns.attrs["account_capital"] = float(account_capital)
+    returns.attrs["max_position_pct"] = float(max_position_pct)
+    returns.attrs["cash_reserve_pct"] = float(cash_reserve_pct)
+    returns.attrs["lot_size"] = int(lot_size)
+    returns.attrs["avg_selected_count"] = float(np.mean(selected_counts)) if selected_counts else 0.0
+    returns.attrs["min_selected_count"] = int(min(selected_counts)) if selected_counts else 0
+    returns.attrs["avg_cash_drag"] = float(np.mean(cash_drags)) if cash_drags else None
+    returns.attrs["max_actual_position_pct"] = float(max(max_weights)) if max_weights else None
+    returns.attrs["avg_weight_deviation"] = float(np.mean(weight_deviations)) if weight_deviations else None
+    returns.attrs["skipped_price_cap_avg"] = float(np.mean(skipped_price_caps)) if skipped_price_caps else 0.0
+    returns.attrs["skipped_valuation_avg"] = float(np.mean(skipped_valuations)) if skipped_valuations else 0.0
+    returns.attrs["skipped_budget_avg"] = float(np.mean(skipped_budget_counts)) if skipped_budget_counts else 0.0
+    returns.attrs["max_pe_ttm"] = float(max_pe_ttm) if max_pe_ttm is not None else None
+    returns.attrs["max_pb"] = float(max_pb) if max_pb is not None else None
     return returns
 
 
@@ -542,6 +745,11 @@ def align_benchmark_to_strategy_periods(
     return aligned
 
 
+def _valid_rebalance_horizon(rebalance_freq: str, holding_days: int) -> bool:
+    """Avoid overlapping periodic windows in the simple single-cohort grid backtest."""
+    return not (rebalance_freq == "weekly" and holding_days > 5)
+
+
 def load_all_stock_equal_weight_returns() -> pd.Series:
     """Proxy for 中证全指 when the real index is not available locally."""
     from src.data_pipeline.loader import get_connection
@@ -596,12 +804,48 @@ def _parse_int_grid(value: str) -> list[int]:
     return sorted(set(result))
 
 
+def _parse_float_grid(value: str) -> list[float]:
+    result: list[float] = []
+    for part in str(value).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        result.append(float(part))
+    return result
+
+
+def small_account_profiles(
+    capitals: Optional[list[float]] = None,
+    max_pe_ttm: Optional[float] = 120.0,
+    max_pb: Optional[float] = None,
+) -> list[dict[str, Any]]:
+    profiles = []
+    if capitals is None:
+        base_profiles = DEFAULT_SMALL_ACCOUNT_PROFILES
+    else:
+        base_profiles = [{"account_capital": capital} for capital in capitals]
+    for base in base_profiles:
+        capital = base["account_capital"]
+        capital = float(capital)
+        max_position_pct = float(base.get("max_position_pct") or (0.06 if capital <= 300_000 else 0.05))
+        profiles.append({
+            "account_capital": capital,
+            "max_position_pct": max_position_pct,
+            "cash_reserve_pct": float(base.get("cash_reserve_pct") or 0.05),
+            "lot_size": int(base.get("lot_size") or 100),
+            "max_pe_ttm": max_pe_ttm if max_pe_ttm is not None else base.get("max_pe_ttm"),
+            "max_pb": max_pb if max_pb is not None else base.get("max_pb"),
+        })
+    return profiles
+
+
 def evaluate_parameter_grid(
     experiment_id: str,
     top_ns: list[int],
     holding_days: list[int],
     rebalance_freqs: list[str],
     buffer_mult: float = 1.5,
+    account_profiles: Optional[list[dict[str, Any]]] = None,
 ) -> pd.DataFrame:
     from src.data_pipeline.loader import get_connection, init_db
 
@@ -637,6 +881,8 @@ def evaluate_parameter_grid(
         buffer_n = int(np.ceil(top_n * buffer_mult))
         for h in holding_days:
             for freq in rebalance_freqs:
+                if not _valid_rebalance_horizon(freq, h):
+                    continue
                 returns = simulate_topn_open(
                     pred,
                     prices,
@@ -672,10 +918,90 @@ def evaluate_parameter_grid(
                         "rebalance_freq": freq,
                         "buffer_n": buffer_n,
                         "benchmark_name": bench_name,
+                        "constraint_profile": "theoretical_equal_weight",
+                        "account_capital": None,
+                        "max_position_pct": None,
+                        "cash_reserve_pct": None,
+                        "lot_size": None,
+                        "avg_selected_count": None,
+                        "min_selected_count": None,
+                        "avg_cash_drag": None,
+                        "max_actual_position_pct": None,
+                        "avg_weight_deviation": None,
+                        "skipped_price_cap_avg": None,
+                        "skipped_valuation_avg": None,
+                        "skipped_budget_avg": None,
+                        "max_pe_ttm": None,
+                        "max_pb": None,
                         **metrics,
                         "metrics_json": _json(metrics),
                     }
                     rows.append(row)
+                for profile in account_profiles or []:
+                    constrained_returns = simulate_topn_open_constrained(
+                        pred,
+                        prices,
+                        top_n=top_n,
+                        holding_days=h,
+                        rebalance_freq=freq,
+                        buffer_n=buffer_n,
+                        account_capital=float(profile.get("account_capital", 300_000)),
+                        max_position_pct=float(profile.get("max_position_pct", 0.06)),
+                        cash_reserve_pct=float(profile.get("cash_reserve_pct", 0.05)),
+                        lot_size=int(profile.get("lot_size", 100)),
+                        max_pe_ttm=profile.get("max_pe_ttm"),
+                        max_pb=profile.get("max_pb"),
+                    )
+                    if constrained_returns.empty:
+                        continue
+                    attrs = constrained_returns.attrs
+                    for bench_name, bench_returns in benchmarks.items():
+                        aligned_benchmark = align_benchmark_to_strategy_periods(
+                            bench_returns,
+                            pd.DatetimeIndex(constrained_returns.index),
+                            holding_days=h,
+                            rebalance_freq=freq,
+                        )
+                        metrics = compute_periodic_metrics(
+                            constrained_returns,
+                            benchmark_returns=aligned_benchmark,
+                            periods_per_year=int(attrs.get("periods_per_year", 252)),
+                            turnover=attrs.get("turnover"),
+                        )
+                        if not metrics:
+                            continue
+                        executable_metrics = {
+                            "constraint_profile": attrs.get("constraint_profile"),
+                            "account_capital": attrs.get("account_capital"),
+                            "max_position_pct": attrs.get("max_position_pct"),
+                            "cash_reserve_pct": attrs.get("cash_reserve_pct"),
+                            "lot_size": attrs.get("lot_size"),
+                            "avg_selected_count": attrs.get("avg_selected_count"),
+                            "min_selected_count": attrs.get("min_selected_count"),
+                            "avg_cash_drag": attrs.get("avg_cash_drag"),
+                            "max_actual_position_pct": attrs.get("max_actual_position_pct"),
+                            "avg_weight_deviation": attrs.get("avg_weight_deviation"),
+                            "skipped_price_cap_avg": attrs.get("skipped_price_cap_avg"),
+                            "skipped_valuation_avg": attrs.get("skipped_valuation_avg"),
+                            "skipped_budget_avg": attrs.get("skipped_budget_avg"),
+                            "max_pe_ttm": attrs.get("max_pe_ttm"),
+                            "max_pb": attrs.get("max_pb"),
+                        }
+                        row = {
+                            "grid_id": f"GRID-{uuid.uuid4().hex[:10].upper()}",
+                            "source_experiment_id": experiment_id,
+                            "model_name": MODEL_NAME,
+                            "mode": meta[1],
+                            "top_n": top_n,
+                            "holding_days": h,
+                            "rebalance_freq": freq,
+                            "buffer_n": buffer_n,
+                            "benchmark_name": bench_name,
+                            **executable_metrics,
+                            **metrics,
+                            "metrics_json": _json({**metrics, **executable_metrics}),
+                        }
+                        rows.append(row)
     result = pd.DataFrame(rows)
     if result.empty:
         return result
@@ -688,6 +1014,11 @@ def evaluate_parameter_grid(
         cols = [
             "grid_id", "source_experiment_id", "model_name", "mode", "top_n",
             "holding_days", "rebalance_freq", "buffer_n", "benchmark_name",
+            "constraint_profile", "account_capital", "max_position_pct",
+            "cash_reserve_pct", "lot_size", "avg_selected_count",
+            "min_selected_count", "avg_cash_drag", "max_actual_position_pct",
+            "avg_weight_deviation", "skipped_price_cap_avg",
+            "skipped_valuation_avg", "skipped_budget_avg", "max_pe_ttm", "max_pb",
             "start_date", "end_date", "annual_return", "cumulative_return",
             "annual_volatility", "sharpe_ratio", "max_drawdown", "turnover",
             "benchmark_return", "excess_return", "metrics_json",
@@ -798,7 +1129,7 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def score_candidate_grid_row(row: Any) -> float:
+def score_candidate_grid_row(row: Any, turnover_profile: str = "low") -> float:
     """Score a grid row for a medium/long-term production style.
 
     Excess return matters, but very high turnover and deep drawdowns are
@@ -811,16 +1142,52 @@ def score_candidate_grid_row(row: Any) -> float:
     max_drawdown = min(_safe_float(get("max_drawdown")), 0.0)
     turnover = max(_safe_float(get("turnover")), 0.0)
     monthly_bonus = 0.02 if get("rebalance_freq") == "monthly" else 0.0
+    constraint_profile = str(get("constraint_profile") or "theoretical_equal_weight")
+    executable_bonus = 0.0
+    executable_penalty = 0.0
+    if constraint_profile.startswith("small_account"):
+        avg_selected = _safe_float(get("avg_selected_count"))
+        cash_drag = max(_safe_float(get("avg_cash_drag")), 0.0)
+        max_weight = max(_safe_float(get("max_actual_position_pct")), 0.0)
+        executable_bonus = 0.02
+        if avg_selected < 15:
+            executable_penalty += (15 - avg_selected) * 0.003
+        executable_penalty += cash_drag * 0.08
+        if max_weight > 0.08:
+            executable_penalty += (max_weight - 0.08) * 1.5
+    base = excess + 0.05 * sharpe - 0.20 * abs(max_drawdown) + monthly_bonus + executable_bonus - executable_penalty
+    if turnover_profile == "medium":
+        target_low, target_high = 30.0, 50.0
+        if turnover < target_low:
+            turnover_penalty = (target_low - turnover) * 0.0015
+            turnover_bonus = 0.0
+        elif turnover > target_high:
+            turnover_penalty = (turnover - target_high) * 0.0030
+            turnover_bonus = 0.0
+        else:
+            turnover_penalty = 0.0
+            turnover_bonus = 0.025
+        return base + turnover_bonus - turnover_penalty
     return excess + 0.05 * sharpe - 0.20 * abs(max_drawdown) - 0.002 * turnover + monthly_bonus
 
 
-def select_best_candidate_grid(grid: pd.DataFrame, benchmark_name: str = "MIXED_EQUAL") -> dict[str, Any]:
+def select_best_candidate_grid(
+    grid: pd.DataFrame,
+    benchmark_name: str = "MIXED_EQUAL",
+    turnover_profile: str = "low",
+) -> dict[str, Any]:
     if grid.empty:
         return {}
     pool = grid[grid["benchmark_name"] == benchmark_name].copy()
     if pool.empty:
         pool = grid.copy()
-    pool["score"] = pool.apply(score_candidate_grid_row, axis=1)
+    if "constraint_profile" in pool.columns:
+        constrained = pool[
+            pool["constraint_profile"].fillna("theoretical_equal_weight").astype(str).str.startswith("small_account")
+        ].copy()
+        if not constrained.empty:
+            pool = constrained
+    pool["score"] = pool.apply(lambda row: score_candidate_grid_row(row, turnover_profile=turnover_profile), axis=1)
     pool = pool.sort_values(
         ["score", "excess_return", "sharpe_ratio"],
         ascending=[False, False, False],
@@ -834,7 +1201,9 @@ def save_candidate_result(conn: Any, row: dict[str, Any]) -> None:
         "candidate_id", "batch_id", "experiment_id", "model_name", "model_family",
         "model_variant", "status", "mode", "params_json", "grid_json",
         "best_benchmark", "best_top_n", "best_holding_days", "best_rebalance_freq",
-        "best_buffer_n", "annual_return", "sharpe_ratio", "max_drawdown",
+        "best_buffer_n", "best_constraint_profile", "best_account_capital",
+        "avg_selected_count", "avg_cash_drag", "max_actual_position_pct",
+        "annual_return", "sharpe_ratio", "max_drawdown",
         "turnover", "benchmark_return", "excess_return", "ic_mean", "icir",
         "rank_ic_mean", "rank_ic_positive_rate", "score", "error_message",
         "started_at", "ended_at",
@@ -974,6 +1343,72 @@ def evaluate_predictions(
     return metrics
 
 
+def _latest_covered_cn_data_date(conn: Any, min_coverage: float = 0.80) -> Optional[date]:
+    """Return the latest CN date with enough cross-section coverage for inference."""
+    rows = conn.execute("""
+        SELECT dp.trade_date, COUNT(DISTINCT dp.symbol) AS symbols
+        FROM daily_price dp
+        JOIN stock_info si ON si.symbol = dp.symbol
+        WHERE si.country = 'CN'
+        GROUP BY dp.trade_date
+        ORDER BY dp.trade_date DESC
+    """).fetchall()
+    if not rows:
+        row = conn.execute("SELECT MAX(trade_date) FROM daily_price").fetchone()
+        return row[0] if row and row[0] is not None else None
+    total = max(int(symbols or 0) for _, symbols in rows)
+    if total <= 0:
+        return None
+    threshold = max(float(min_coverage or 0), 0.0)
+    for trade_date, symbols in rows:
+        if float(symbols or 0) / total >= threshold:
+            return trade_date
+    return None
+
+
+def _persist_prediction_frame(
+    conn: Any,
+    experiment_id: str,
+    model_version: str,
+    mode: str,
+    pred: pd.DataFrame,
+    top_n: int = DEFAULT_TOP_N,
+) -> int:
+    """Persist a prediction frame without requiring forward-return evaluation data."""
+    if pred.empty:
+        return 0
+    pred_out = pred.copy()
+    pred_out["datetime"] = pd.to_datetime(pred_out["datetime"])
+    pred_out["instrument"] = pred_out["instrument"].astype(str)
+    pred_out["prediction_date"] = pred_out["datetime"].dt.date
+    pred_out["rank"] = (
+        pred_out.groupby("prediction_date")["score"]
+        .rank(ascending=False, method="first")
+        .astype(int)
+    )
+    pred_out["selected"] = pred_out["rank"] <= max(int(top_n or 1), 1)
+    pred_out["confidence"] = pred_out.groupby("prediction_date")["score"].transform(_minmax_confidence)
+    pred_out = pred_out.rename(columns={"instrument": "symbol"})[
+        ["prediction_date", "symbol", "score", "rank", "confidence", "selected"]
+    ].copy()
+    pred_out["experiment_id"] = experiment_id
+    pred_out["model_name"] = MODEL_NAME
+    pred_out["model_version"] = model_version
+    pred_out["mode"] = mode
+
+    conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_qlib_predictions AS SELECT * FROM pred_out")
+    conn.execute("""
+        INSERT OR REPLACE INTO qlib_predictions (
+            experiment_id, model_name, model_version, mode, prediction_date,
+            symbol, score, rank, confidence, selected
+        )
+        SELECT experiment_id, model_name, model_version, mode, prediction_date,
+               symbol, score, rank, confidence, selected
+        FROM _tmp_qlib_predictions
+    """)
+    return len(pred_out)
+
+
 def _minmax_confidence(values: pd.Series) -> pd.Series:
     min_v = values.min()
     max_v = values.max()
@@ -1013,6 +1448,264 @@ def _passes_publish_gate(metrics: dict[str, Any]) -> tuple[bool, str]:
     if excess is not None and excess < -0.05:
         failures.append("相对基准年化劣化超过 5%")
     return not failures, "；".join(failures)
+
+
+def _rebalance_period_expr(rebalance_freq: str) -> str:
+    freq = str(rebalance_freq or "daily").lower()
+    if freq == "monthly":
+        return "strftime(signal_ts, '%Y-%m')"
+    if freq == "weekly":
+        return "strftime(signal_ts, '%G-W%V')"
+    return ""
+
+
+def _rebalance_period_value(prediction_date: date, rebalance_freq: str) -> str:
+    ts = pd.Timestamp(prediction_date)
+    freq = str(rebalance_freq or "daily").lower()
+    if freq == "monthly":
+        return ts.strftime("%Y-%m")
+    if freq == "weekly":
+        iso = ts.isocalendar()
+        return f"{iso.year}-W{iso.week:02d}"
+    return ts.strftime("%Y-%m-%d")
+
+
+def _should_skip_rebalance_signal_write(
+    conn: Any,
+    model_version: str,
+    prediction_date: date,
+    rebalance_freq: str,
+) -> tuple[bool, str]:
+    """Return whether production prediction already wrote signals for this rebalance period."""
+    freq = str(rebalance_freq or "daily").lower()
+    period_expr = _rebalance_period_expr(freq)
+    if not period_expr:
+        return False, ""
+    period = _rebalance_period_value(prediction_date, freq)
+    existing = conn.execute(f"""
+        SELECT COUNT(*), MAX(signal_ts)
+        FROM signals
+        WHERE model_name = ?
+          AND model_version = ?
+          AND {period_expr} = ?
+    """, [MODEL_NAME, model_version, period]).fetchone()
+    count = int(existing[0] or 0) if existing else 0
+    if count <= 0:
+        return False, ""
+    return True, f"{freq} rebalance period {period} already has {count} production signals; latest={existing[1]}"
+
+
+def _production_inference_segments(
+    mode: str,
+    base_segments: dict[str, Any],
+    latest_data: date,
+) -> dict[str, str]:
+    latest = pd.Timestamp(latest_data)
+    if mode == "walk_forward":
+        year = latest.year
+        return {
+            "train_start": str(base_segments.get("train_start") or "2019-01-01"),
+            "train_end": f"{year - 2}-12-31",
+            "valid_start": f"{year - 1}-01-01",
+            "valid_end": f"{year - 1}-12-31",
+            "test_start": f"{year}-01-01",
+            "test_end": latest.strftime("%Y-%m-%d"),
+        }
+    return {
+        "train_start": str(base_segments.get("train_start") or "2019-01-01"),
+        "train_end": str(base_segments.get("train_end") or "2022-12-31"),
+        "valid_start": str(base_segments.get("valid_start") or "2023-01-01"),
+        "valid_end": str(base_segments.get("valid_end") or "2023-12-31"),
+        "test_start": str(base_segments.get("test_start") or "2024-01-01"),
+        "test_end": latest.strftime("%Y-%m-%d"),
+    }
+
+
+def _safe_json_dict(value: Any) -> dict[str, Any]:
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(str(value))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _production_artifact_paths(model_version: str) -> dict[str, Path]:
+    root = PROJECT_ROOT / "models" / "qlib" / "production"
+    return {
+        "model": root / f"{model_version}-latest.pkl",
+        "manifest": root / f"{model_version}-manifest.json",
+    }
+
+
+def _write_production_manifest(
+    model_version: str,
+    payload: dict[str, Any],
+) -> str:
+    paths = _production_artifact_paths(model_version)
+    paths["manifest"].parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "model_version": model_version,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        **payload,
+    }
+    paths["manifest"].write_text(
+        json.dumps(data, ensure_ascii=False, default=str, indent=2),
+        encoding="utf-8",
+    )
+    return str(paths["manifest"])
+
+
+def _qlib_calendar_latest_date(market: str = "cn") -> Optional[date]:
+    calendar = PROJECT_ROOT / "qlib_data" / f"{market}_data" / "calendars" / "day.txt"
+    if not calendar.exists():
+        return None
+    lines = [line.strip() for line in calendar.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not lines:
+        return None
+    try:
+        return pd.Timestamp(lines[-1]).date()
+    except Exception:
+        return None
+
+
+def _ensure_qlib_data_covers(latest_data: date) -> None:
+    qlib_latest = _qlib_calendar_latest_date("cn")
+    if qlib_latest is not None and qlib_latest >= latest_data:
+        return
+    rc = prepare_data("cn")
+    if rc != 0:
+        raise RuntimeError(f"Qlib 数据准备失败，exit={rc}")
+
+
+def refresh_production_predictions(force: bool = False, min_coverage: float = 0.80) -> dict[str, Any]:
+    """Refresh production predictions to the latest coverage-qualified CN date."""
+    from src.data_pipeline.loader import get_connection, init_db
+
+    conn = get_connection()
+    try:
+        init_db(conn)
+        row = conn.execute("""
+            SELECT r.model_version, r.experiment_id, r.model_path,
+                   e.mode, e.train_start, e.train_end, e.valid_start, e.valid_end,
+                   e.test_start, e.test_end, e.config_snapshot,
+                   c.params_json, c.best_top_n
+            FROM qlib_model_registry r
+            LEFT JOIN qlib_experiments e ON e.experiment_id = r.experiment_id
+            LEFT JOIN qlib_candidate_results c
+              ON c.experiment_id = r.experiment_id
+             AND c.status = 'SUCCEEDED'
+            WHERE r.model_name = ? AND r.status = 'production'
+            ORDER BY r.published_at DESC NULLS LAST, r.created_at DESC, c.ended_at DESC NULLS LAST
+            LIMIT 1
+        """, [MODEL_NAME]).fetchone()
+        if not row:
+            return {"status": "SKIPPED", "reason": "没有 production Qlib 模型"}
+        latest_data = _latest_covered_cn_data_date(conn, min_coverage=min_coverage)
+        latest_pred = conn.execute("""
+            SELECT MAX(prediction_date)
+            FROM qlib_predictions
+            WHERE experiment_id = ?
+              AND prediction_date <= ?
+        """, [row[1], latest_data]).fetchone()[0] if latest_data is not None else None
+    finally:
+        conn.close()
+
+    if latest_data is None:
+        return {"status": "SKIPPED", "reason": "没有覆盖率达标的 A股行情截面"}
+    if latest_pred is not None and latest_pred >= latest_data and not force:
+        return {
+            "status": "SKIPPED",
+            "reason": "production 预测已是最新",
+            "prediction_date": latest_pred,
+            "latest_data": latest_data,
+        }
+
+    model_version = row[0]
+    experiment_id = row[1]
+    mode = row[3] or "walk_forward"
+    base_segments = {
+        "train_start": row[4],
+        "train_end": row[5],
+        "valid_start": row[6],
+        "valid_end": row[7],
+        "test_start": row[8],
+        "test_end": row[9],
+    }
+    config_snapshot = _safe_json_dict(row[10])
+    lgb_params = _safe_json_dict(row[11]) or _safe_json_dict(config_snapshot.get("lgb"))
+    top_n = int(row[12] or DEFAULT_TOP_N)
+    segments = _production_inference_segments(mode, base_segments, latest_data)
+    paths = _production_artifact_paths(model_version)
+    paths["model"].parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        _ensure_qlib_data_covers(latest_data)
+        pred, saved_model = train_alpha158(
+            **segments,
+            model_output_path=paths["model"],
+            lgb_params=lgb_params,
+        )
+    except Exception as exc:
+        logger.exception("Production Qlib inference failed")
+        return {
+            "status": "FAILED",
+            "reason": f"{type(exc).__name__}: {exc}",
+            "latest_data": latest_data,
+            "experiment_id": experiment_id,
+            "model_version": model_version,
+        }
+    if pred.empty:
+        return {"status": "SKIPPED", "reason": "production 推理未产生预测结果"}
+    pred = pred[pd.to_datetime(pred["datetime"]).dt.date <= latest_data].copy()
+    if pred.empty:
+        return {"status": "SKIPPED", "reason": f"production 推理未覆盖 {latest_data}"}
+
+    conn = get_connection()
+    try:
+        init_db(conn)
+        written = _persist_prediction_frame(
+            conn,
+            experiment_id=experiment_id,
+            model_version=model_version,
+            mode="production_inference",
+            pred=pred,
+            top_n=top_n,
+        )
+        conn.execute("""
+            UPDATE qlib_model_registry
+            SET model_path = ?
+            WHERE model_name = ? AND model_version = ?
+        """, [saved_model, MODEL_NAME, model_version])
+    finally:
+        conn.close()
+
+    manifest_path = _write_production_manifest(
+        model_version,
+        {
+            "experiment_id": experiment_id,
+            "mode": mode,
+            "segments": segments,
+            "params": lgb_params,
+            "model_path": saved_model,
+            "latest_data": latest_data,
+            "prediction_min": pred["datetime"].min(),
+            "prediction_max": pred["datetime"].max(),
+            "prediction_rows": written,
+        },
+    )
+    return {
+        "status": "SUCCEEDED",
+        "model_version": model_version,
+        "experiment_id": experiment_id,
+        "latest_data": latest_data,
+        "prediction_rows": written,
+        "model_path": saved_model,
+        "manifest_path": manifest_path,
+    }
 
 
 def run_experiment(
@@ -1136,6 +1829,11 @@ def _candidate_result_row(
         "best_holding_days": best.get("holding_days"),
         "best_rebalance_freq": best.get("rebalance_freq"),
         "best_buffer_n": best.get("buffer_n"),
+        "best_constraint_profile": best.get("constraint_profile"),
+        "best_account_capital": best.get("account_capital"),
+        "avg_selected_count": best.get("avg_selected_count"),
+        "avg_cash_drag": best.get("avg_cash_drag"),
+        "max_actual_position_pct": best.get("max_actual_position_pct"),
         "annual_return": best.get("annual_return"),
         "sharpe_ratio": best.get("sharpe_ratio"),
         "max_drawdown": best.get("max_drawdown"),
@@ -1161,9 +1859,13 @@ def run_candidate_batch(
     holding_days: Optional[list[int]] = None,
     rebalance_freqs: Optional[list[str]] = None,
     buffer_mult: float = 1.5,
+    turnover_profile: str = "low",
+    account_profiles: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     if mode not in {"fixed", "walk_forward"}:
         raise ValueError("mode must be fixed or walk_forward")
+    if turnover_profile not in {"low", "medium"}:
+        raise ValueError("turnover_profile must be low or medium")
     batch_id = batch_id or _batch_id()
     top_ns = top_ns or [20, 50, 100]
     holding_days = holding_days or list(range(1, 11))
@@ -1173,8 +1875,15 @@ def run_candidate_batch(
         "holding_days": holding_days,
         "rebalance_freqs": rebalance_freqs,
         "buffer_mult": buffer_mult,
+        "account_profiles": account_profiles or [],
         "selection_benchmark": "MIXED_EQUAL",
-        "score": "excess + 0.05*sharpe - 0.20*abs(max_drawdown) - 0.002*turnover + monthly_bonus",
+        "turnover_profile": turnover_profile,
+        "target_turnover": "30-50" if turnover_profile == "medium" else "lower_is_better",
+        "score": (
+            "medium: excess + 0.05*sharpe - 0.20*abs(max_drawdown) + in_band_bonus - distance_penalty"
+            if turnover_profile == "medium"
+            else "low: excess + 0.05*sharpe - 0.20*abs(max_drawdown) - 0.002*turnover + monthly_bonus"
+        ),
     }
     candidates = _filter_candidates(candidate_ids)
     output: dict[str, Any] = {
@@ -1242,8 +1951,13 @@ def run_candidate_batch(
                 holding_days=holding_days,
                 rebalance_freqs=rebalance_freqs,
                 buffer_mult=buffer_mult,
+                account_profiles=account_profiles,
             )
-            best = select_best_candidate_grid(grid, benchmark_name="MIXED_EQUAL")
+            best = select_best_candidate_grid(
+                grid,
+                benchmark_name="MIXED_EQUAL",
+                turnover_profile=turnover_profile,
+            )
             grid_config_with_rows = {**grid_config, "rows_written": len(grid)}
             row = _candidate_result_row(
                 spec,
@@ -1293,11 +2007,17 @@ def publish_model(experiment_id: str, force: bool = False) -> dict[str, Any]:
     try:
         init_db(conn)
         row = conn.execute("""
-            SELECT e.experiment_id, e.model_version, e.status, e.metrics_json, r.model_path
+            SELECT e.experiment_id, e.model_version, e.status, e.metrics_json, r.model_path,
+                   e.mode, e.train_start, e.train_end, e.valid_start, e.valid_end,
+                   e.test_start, e.test_end, e.config_snapshot, c.params_json,
+                   c.best_top_n, c.best_holding_days, c.best_rebalance_freq
             FROM qlib_experiments e
             LEFT JOIN qlib_model_registry r ON e.experiment_id = r.experiment_id
+            LEFT JOIN qlib_candidate_results c
+              ON c.experiment_id = e.experiment_id
+             AND c.status = 'SUCCEEDED'
             WHERE e.experiment_id = ?
-            ORDER BY r.created_at DESC NULLS LAST
+            ORDER BY r.created_at DESC NULLS LAST, c.ended_at DESC NULLS LAST
             LIMIT 1
         """, [experiment_id]).fetchone()
         if not row:
@@ -1310,6 +2030,29 @@ def publish_model(experiment_id: str, force: bool = False) -> dict[str, Any]:
         if not ok and not force:
             raise ValueError(f"未通过发布门槛: {reason}")
 
+        manifest_path = _write_production_manifest(
+            model_version,
+            {
+                "experiment_id": experiment_id,
+                "mode": row[5],
+                "segments": {
+                    "train_start": row[6],
+                    "train_end": row[7],
+                    "valid_start": row[8],
+                    "valid_end": row[9],
+                    "test_start": row[10],
+                    "test_end": row[11],
+                },
+                "params": _safe_json_dict(row[13]) or _safe_json_dict(_safe_json_dict(row[12]).get("lgb")),
+                "model_path": row[4],
+                "best_top_n": row[14],
+                "best_holding_days": row[15],
+                "best_rebalance_freq": row[16],
+                "metrics": metrics,
+            },
+        )
+        production_path = row[4] or manifest_path
+
         conn.execute("""
             UPDATE qlib_model_registry
             SET status = 'archived', archived_at = CURRENT_TIMESTAMP
@@ -1320,13 +2063,20 @@ def publish_model(experiment_id: str, force: bool = False) -> dict[str, Any]:
                 model_version, experiment_id, model_name, status, market, model_path, metrics_json, published_at
             )
             VALUES (?, ?, ?, 'production', 'CN', ?, ?, CURRENT_TIMESTAMP)
-        """, [model_version, experiment_id, MODEL_NAME, row[4], _json(metrics)])
-        return {"model_version": model_version, "experiment_id": experiment_id, "status": "production", "forced": force}
+        """, [model_version, experiment_id, MODEL_NAME, production_path, _json(metrics)])
+        return {
+            "model_version": model_version,
+            "experiment_id": experiment_id,
+            "status": "production",
+            "forced": force,
+            "artifact_path": production_path,
+            "manifest_path": manifest_path,
+        }
     finally:
         conn.close()
 
 
-def predict_latest(model: str = "production", top_n: int = DEFAULT_TOP_N) -> dict[str, Any]:
+def predict_latest(model: str = "production", top_n: Optional[int] = None) -> dict[str, Any]:
     from src.data_pipeline.loader import get_connection, init_db
     from src.research.strategies.alpha158_baseline import generate_signals
     from src.signals.generator import save_to_csv, save_to_db
@@ -1334,33 +2084,80 @@ def predict_latest(model: str = "production", top_n: int = DEFAULT_TOP_N) -> dic
     if model != "production":
         raise ValueError("目前只支持 model=production")
 
+    refresh_result: Optional[dict[str, Any]] = None
+    prod = None
+    latest_pred = None
+    resolved_top_n = DEFAULT_TOP_N
+    expected_holding_days = 5
+    rebalance_freq = "daily"
+
+    for attempt in range(2):
+        conn = get_connection()
+        try:
+            init_db(conn)
+            prod = conn.execute("""
+                SELECT r.model_version, r.experiment_id, c.best_top_n, c.best_holding_days,
+                       c.best_rebalance_freq
+                FROM qlib_model_registry r
+                LEFT JOIN qlib_candidate_results c
+                  ON c.experiment_id = r.experiment_id
+                 AND c.status = 'SUCCEEDED'
+                WHERE r.model_name = ? AND r.status = 'production'
+                ORDER BY r.published_at DESC NULLS LAST, r.created_at DESC, c.ended_at DESC NULLS LAST
+                LIMIT 1
+            """, [MODEL_NAME]).fetchone()
+            if not prod:
+                return {"status": "SKIPPED", "reason": "没有 production Qlib 模型"}
+            resolved_top_n = int(top_n or prod[2] or DEFAULT_TOP_N)
+            expected_holding_days = int(prod[3] or 5)
+            latest_data = _latest_covered_cn_data_date(conn)
+            latest_pred = conn.execute("""
+                SELECT MAX(prediction_date)
+                FROM qlib_predictions
+                WHERE experiment_id = ?
+                  AND prediction_date <= ?
+            """, [prod[1], latest_data]).fetchone()[0] if latest_data is not None else None
+        finally:
+            conn.close()
+
+        if latest_data is None:
+            return {"status": "SKIPPED", "reason": "没有覆盖率达标的 A股行情截面"}
+        if latest_pred is None or latest_pred < latest_data:
+            if attempt > 0:
+                return {
+                    "status": "SKIPPED",
+                    "reason": f"production 预测日期 {latest_pred} 仍早于覆盖率达标行情 {latest_data}",
+                    "refresh_result": refresh_result,
+                }
+            refresh_result = refresh_production_predictions()
+            if refresh_result.get("status") != "SUCCEEDED":
+                return refresh_result
+            continue
+        break
+
+    if prod is None or latest_pred is None:
+        return {"status": "SKIPPED", "reason": "production 实验没有预测截面"}
+
     conn = get_connection()
     try:
         init_db(conn)
-        prod = conn.execute("""
-            SELECT model_version, experiment_id
-            FROM qlib_model_registry
-            WHERE model_name = ? AND status = 'production'
-            ORDER BY published_at DESC NULLS LAST, created_at DESC
-            LIMIT 1
-        """, [MODEL_NAME]).fetchone()
-        if not prod:
-            return {"status": "SKIPPED", "reason": "没有 production Qlib 模型"}
-        latest_data = conn.execute("""
-            SELECT MAX(trade_date) FROM daily_price
-            WHERE symbol IN (SELECT symbol FROM stock_info WHERE country='CN')
-        """).fetchone()[0]
-        latest_pred = conn.execute("""
-            SELECT MAX(prediction_date)
-            FROM qlib_predictions
-            WHERE experiment_id = ?
-        """, [prod[1]]).fetchone()[0]
-        if latest_pred is None:
-            return {"status": "SKIPPED", "reason": "production 实验没有预测截面"}
-        if latest_data is not None and latest_pred < latest_data:
+        rebalance_freq = str(prod[4] or "daily").lower()
+        skip_rebalance, skip_reason = _should_skip_rebalance_signal_write(
+            conn,
+            model_version=prod[0],
+            prediction_date=latest_pred,
+            rebalance_freq=rebalance_freq,
+        )
+        if skip_rebalance:
             return {
                 "status": "SKIPPED",
-                "reason": f"production 预测日期 {latest_pred} 早于最新行情 {latest_data}",
+                "reason": skip_reason,
+                "prediction_date": latest_pred,
+                "model_version": prod[0],
+                "top_n": resolved_top_n,
+                "expected_holding_days": expected_holding_days,
+                "rebalance_freq": rebalance_freq,
+                "refresh_result": refresh_result,
             }
         pred = conn.execute("""
             SELECT prediction_date AS datetime, symbol AS instrument, score
@@ -1368,16 +2165,46 @@ def predict_latest(model: str = "production", top_n: int = DEFAULT_TOP_N) -> dic
             WHERE experiment_id = ? AND prediction_date = ?
             ORDER BY score DESC
         """, [prod[1], latest_pred]).fetchdf()
+        holdings = conn.execute("""
+            WITH latest_pos AS (
+                SELECT symbol, quantity,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY symbol ORDER BY trade_date DESC
+                       ) AS rn
+                FROM paper_positions
+                WHERE strategy_name = ?
+            )
+            SELECT symbol, quantity
+            FROM latest_pos
+            WHERE rn = 1 AND COALESCE(quantity, 0) > 0
+        """, [MODEL_NAME]).fetchdf()
     finally:
         conn.close()
 
-    signals = generate_signals(pred, top_n=top_n)
+    signals = generate_signals(
+        pred,
+        top_n=resolved_top_n,
+        current_holdings=holdings,
+        exit_rank_multiplier=2.0,
+        expected_holding_days=expected_holding_days,
+    )
     if signals.empty:
         return {"status": "SKIPPED", "reason": "未生成 Alpha158 信号"}
     signals["model_version"] = prod[0]
     written = save_to_db(signals)
     save_to_csv(signals)
-    return {"status": "SUCCEEDED", "signals_written": written, "prediction_date": latest_pred, "model_version": prod[0]}
+    return {
+        "status": "SUCCEEDED",
+        "signals_written": written,
+        "prediction_date": latest_pred,
+        "model_version": prod[0],
+        "top_n": resolved_top_n,
+        "expected_holding_days": expected_holding_days,
+        "rebalance_freq": rebalance_freq,
+        "refresh_result": refresh_result,
+        "buy_signals": int((signals["side"] == "BUY").sum()),
+        "sell_signals": int((signals["side"] == "SELL").sum()),
+    }
 
 
 def prepare_data(market: str = "cn") -> int:
@@ -1417,13 +2244,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_publish.add_argument("--force", action="store_true")
     p_predict = sub.add_parser("predict-latest", help="使用 production 模型写入最新 Alpha158 信号")
     p_predict.add_argument("--model", default="production")
-    p_predict.add_argument("--top-n", type=int, default=DEFAULT_TOP_N)
+    p_predict.add_argument("--top-n", type=int, default=None, help="默认使用 production 候选批跑胜出 Top-N")
+    p_refresh = sub.add_parser("refresh-production", help="刷新 production 模型最新预测截面并保存模型 artifact")
+    p_refresh.add_argument("--force", action="store_true", help="即使预测已是最新，也重训最新 production 折模型")
+    p_refresh.add_argument("--min-coverage", type=float, default=0.80, help="A股截面最低覆盖率，默认 0.80")
     p_grid = sub.add_parser("evaluate-grid", help="复用已有预测截面评估 Top-N/持仓周期/调仓频率网格")
     p_grid.add_argument("--experiment-id", default="latest", help="实验ID，或 latest")
     p_grid.add_argument("--top-n", default="20,50,100")
     p_grid.add_argument("--holding-days", default="1-10")
     p_grid.add_argument("--rebalance", default="daily,monthly")
     p_grid.add_argument("--buffer-mult", type=float, default=1.5)
+    p_grid.add_argument("--small-account", action=argparse.BooleanOptionalAction, default=True)
+    p_grid.add_argument("--small-account-capitals", default="300000,500000")
+    p_grid.add_argument("--small-account-max-pe", type=float, default=120.0)
+    p_grid.add_argument("--small-account-max-pb", type=float, default=None)
     p_candidates = sub.add_parser("run-candidates", help="批量运行 Qlib 模型/参数候选并记录最优组合")
     p_candidates.add_argument("--mode", choices=["fixed", "walk_forward"], default="walk_forward")
     p_candidates.add_argument("--batch-id", default=None)
@@ -1432,6 +2266,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_candidates.add_argument("--holding-days", default="1-10")
     p_candidates.add_argument("--rebalance", default="daily,monthly")
     p_candidates.add_argument("--buffer-mult", type=float, default=1.5)
+    p_candidates.add_argument("--small-account", action=argparse.BooleanOptionalAction, default=True)
+    p_candidates.add_argument("--small-account-capitals", default="300000,500000")
+    p_candidates.add_argument("--small-account-max-pe", type=float, default=120.0)
+    p_candidates.add_argument("--small-account-max-pb", type=float, default=None)
+    p_candidates.add_argument(
+        "--turnover-profile",
+        choices=["low", "medium"],
+        default="low",
+        help="low 偏低换手；medium 目标年化换手 30-50，用于今晚这类兼顾超额与风险的批跑",
+    )
     p_candidates.add_argument(
         "--preset",
         choices=["nightly", "quick"],
@@ -1455,6 +2299,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.command == "predict-latest":
         _print_json(predict_latest(args.model, top_n=args.top_n))
         return 0
+    if args.command == "refresh-production":
+        result = refresh_production_predictions(force=args.force, min_coverage=args.min_coverage)
+        _print_json(result)
+        return 0 if result.get("status") != "FAILED" else 1
     if args.command == "evaluate-grid":
         experiment_id = args.experiment_id
         if experiment_id == "latest":
@@ -1480,16 +2328,31 @@ def main(argv: Optional[list[str]] = None) -> int:
             holding_days=_parse_int_grid(args.holding_days),
             rebalance_freqs=[x.strip() for x in args.rebalance.split(",") if x.strip()],
             buffer_mult=args.buffer_mult,
+            account_profiles=small_account_profiles(
+                _parse_float_grid(args.small_account_capitals),
+                max_pe_ttm=args.small_account_max_pe,
+                max_pb=args.small_account_max_pb,
+            ) if args.small_account else None,
         )
-        best = result[result["benchmark_name"] == "MIXED_EQUAL"].sort_values(
-            ["excess_return", "sharpe_ratio"], ascending=[False, False]
+        best = result[result["benchmark_name"] == "MIXED_EQUAL"].copy()
+        if "constraint_profile" in best.columns:
+            constrained = best[
+                best["constraint_profile"].fillna("").astype(str).str.startswith("small_account")
+            ].copy()
+            if not constrained.empty:
+                best = constrained
+        best["selection_score"] = best.apply(score_candidate_grid_row, axis=1)
+        best = best.sort_values(
+            ["selection_score", "excess_return", "sharpe_ratio"], ascending=[False, False, False]
         ).head(10)
         _print_json({
             "source_experiment_id": experiment_id,
             "rows_written": len(result),
             "best_mixed_equal": best[[
                 "top_n", "holding_days", "rebalance_freq", "buffer_n",
-                "annual_return", "sharpe_ratio", "max_drawdown",
+                "constraint_profile", "account_capital", "avg_selected_count",
+                "avg_cash_drag", "max_actual_position_pct",
+                "selection_score", "annual_return", "sharpe_ratio", "max_drawdown",
                 "turnover", "benchmark_return", "excess_return",
             ]].to_dict("records"),
         })
@@ -1513,6 +2376,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             holding_days=holding_days,
             rebalance_freqs=rebalance_freqs,
             buffer_mult=args.buffer_mult,
+            turnover_profile=args.turnover_profile,
+            account_profiles=small_account_profiles(
+                _parse_float_grid(args.small_account_capitals),
+                max_pe_ttm=args.small_account_max_pe,
+                max_pb=args.small_account_max_pb,
+            ) if args.small_account else None,
         )
         _print_json({
             "batch_id": result["batch_id"],

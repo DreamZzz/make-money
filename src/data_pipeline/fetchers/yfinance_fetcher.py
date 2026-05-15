@@ -62,6 +62,29 @@ def _fix_end_date(end_date: str) -> str:
     return dt.strftime("%Y-%m-%d")
 
 
+def _normalize_history_frame(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    if df.empty:
+        return _with_status(pd.DataFrame(), STATUS_EMPTY)
+    out = df.reset_index()
+    date_col = "Date" if "Date" in out.columns else ("Datetime" if "Datetime" in out.columns else out.columns[0])
+    out = out.rename(columns={
+        date_col: "trade_date",
+        "Open": "open",
+        "High": "high",
+        "Low": "low",
+        "Close": "close",
+        "Volume": "volume",
+    })
+    required = ["trade_date", "open", "high", "low", "close", "volume"]
+    existing = [col for col in required if col in out.columns]
+    if len(existing) < len(required):
+        return _with_status(pd.DataFrame(), STATUS_EMPTY)
+    out = out[required].copy()
+    out["trade_date"] = pd.to_datetime(out["trade_date"]).dt.tz_localize(None)
+    out["symbol"] = symbol
+    return _with_status(out, STATUS_OK)
+
+
 def fetch_cn_daily(symbol: str, start_date: str, end_date: str, log_empty: bool = True) -> pd.DataFrame:
     """拉取A股日线（通过 yfinance）"""
     try:
@@ -72,17 +95,75 @@ def fetch_cn_daily(symbol: str, start_date: str, end_date: str, log_empty: bool 
             if log_empty:
                 logger.warning(f"yfinance CN daily empty: {ticker_str}")
             return _with_status(pd.DataFrame(), STATUS_EMPTY)
-        df = df.reset_index()
-        df = df.rename(columns={
-            "Date": "trade_date", "Open": "open", "High": "high",
-            "Low": "low", "Close": "close", "Volume": "volume",
-        })
-        df["trade_date"] = df["trade_date"].dt.tz_localize(None)
-        df["symbol"] = symbol
-        return _with_status(df, STATUS_OK)
+        return _normalize_history_frame(df, symbol)
     except Exception as e:
         logger.warning(f"yfinance fetch CN daily skipped for {symbol}: {e}")
         return _with_status(pd.DataFrame(), _classify_exception(e), str(e))
+
+
+def fetch_cn_daily_batch(
+    symbols: list[str],
+    start_date: str,
+    end_date: str,
+    log_empty: bool = True,
+    timeout: int = 20,
+) -> dict[str, pd.DataFrame]:
+    """批量拉取 A 股日线，用于 AkShare 熔断后的降级备源。"""
+    clean_symbols = [str(symbol).strip() for symbol in symbols if str(symbol).strip()]
+    if not clean_symbols:
+        return {}
+    ticker_to_symbol = {_cn_symbol_to_yfinance(symbol): symbol for symbol in clean_symbols}
+    try:
+        tickers = list(ticker_to_symbol.keys())
+        try:
+            raw = yf.download(
+                tickers=tickers,
+                start=start_date,
+                end=_fix_end_date(end_date),
+                group_by="ticker",
+                auto_adjust=False,
+                progress=False,
+                threads=True,
+                timeout=timeout,
+            )
+        except TypeError:
+            raw = yf.download(
+                tickers=tickers,
+                start=start_date,
+                end=_fix_end_date(end_date),
+                group_by="ticker",
+                auto_adjust=False,
+                progress=False,
+                threads=True,
+            )
+        result: dict[str, pd.DataFrame] = {}
+        if raw.empty:
+            if log_empty:
+                logger.warning(f"yfinance CN daily batch empty: {len(clean_symbols)} symbols")
+            return {symbol: _with_status(pd.DataFrame(), STATUS_EMPTY) for symbol in clean_symbols}
+
+        if isinstance(raw.columns, pd.MultiIndex):
+            level0 = set(raw.columns.get_level_values(0))
+            level1 = set(raw.columns.get_level_values(1))
+            for ticker, symbol in ticker_to_symbol.items():
+                if ticker in level0:
+                    sub = raw[ticker].dropna(how="all")
+                elif ticker in level1:
+                    sub = raw.xs(ticker, axis=1, level=1).dropna(how="all")
+                else:
+                    sub = pd.DataFrame()
+                result[symbol] = _normalize_history_frame(sub, symbol)
+        else:
+            symbol = clean_symbols[0]
+            result[symbol] = _normalize_history_frame(raw.dropna(how="all"), symbol)
+
+        for symbol in clean_symbols:
+            result.setdefault(symbol, _with_status(pd.DataFrame(), STATUS_EMPTY))
+        return result
+    except Exception as e:
+        logger.warning(f"yfinance fetch CN daily batch skipped ({len(clean_symbols)} symbols): {e}")
+        status = _classify_exception(e)
+        return {symbol: _with_status(pd.DataFrame(), status, str(e)) for symbol in clean_symbols}
 
 
 def fetch_hk_daily(symbol: str, start_date: str, end_date: str, log_empty: bool = True) -> pd.DataFrame:

@@ -59,6 +59,25 @@ def test_job_manager_workflow_stops_after_failed_step(monkeypatch, tmp_path):
     assert "after" not in log_text
 
 
+def test_job_manager_degraded_step_continues_and_marks_workflow(monkeypatch, tmp_path):
+    jobs = {
+        "flow": _job("flow", [
+            jm.JobStep("warn", "warn", [sys.executable, "-c", "import sys; print('warn'); sys.exit(2)"], degraded_exit_codes=(2,)),
+            jm.JobStep("after", "after", [sys.executable, "-c", "print('after')"]),
+        ], kind="workflow")
+    }
+    _install_jobs(monkeypatch, tmp_path, jobs)
+
+    run = jm.run_job("flow")
+
+    assert run.status == jm.DEGRADED
+    assert run.exit_code == 0
+    assert [step["status"] for step in run.steps] == [jm.DEGRADED, jm.SUCCEEDED]
+    log_text = jm.tail_log(run.run_id, lines=40)
+    assert "warn" in log_text
+    assert "after" in log_text
+
+
 def test_job_manager_tail_log_limits_lines(monkeypatch, tmp_path):
     jobs = {
         "lines": _job("lines", [

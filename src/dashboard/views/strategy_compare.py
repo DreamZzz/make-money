@@ -393,7 +393,7 @@ def show_performance_tracking():
 
     # 基准选择
     benchmark_choice = st.selectbox("对比基准", ["沪深300", "中证500", "恒生指数", "无"], index=0, key="perf_benchmark")
-    bench_map = {"沪深300": "000300", "中证500": "000905", "恒生指数": "^HSI"}
+    bench_map = {"沪深300": "000300", "中证500": "000905", "恒生指数": "HSI"}
 
     fig = go.Figure()
     for s in strategies:

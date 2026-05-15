@@ -20,8 +20,8 @@ MARKET_META = {
 INDEX_DEFS = [
     {"index_code": "000300", "name": "沪深300", "market": "CN"},
     {"index_code": "000905", "name": "中证500", "market": "CN"},
-    {"index_code": "^HSI", "name": "恒生指数", "market": "HK"},
-    {"index_code": "3032.HK", "name": "恒生科技", "market": "HK"},
+    {"index_code": "HSI", "name": "恒生指数", "market": "HK"},
+    {"index_code": "HSTECH", "name": "恒生科技", "market": "HK"},
 ]
 
 DISTRIBUTION_BUCKETS = [
@@ -536,3 +536,33 @@ def load_data_quality_status(conn=None) -> pd.DataFrame:
         FROM data_quality_status
         ORDER BY check_ts DESC, metric
     """)
+
+
+def load_data_source_health(conn=None, limit: int = 50) -> pd.DataFrame:
+    """Load recent data-source health rows with a simple success score."""
+    columns = [
+        "run_id", "source", "market", "operation", "started_at", "ended_at", "status",
+        "attempted", "updated", "no_data", "source_error", "rate_limited", "circuit_skip",
+        "failed", "message", "stats_json", "health_score",
+    ]
+    if not _table_exists(conn, "data_source_health"):
+        return pd.DataFrame(columns=columns)
+    df = _execute_df(conn, """
+        SELECT
+            run_id, source, market, operation, started_at, ended_at, status,
+            attempted, updated, no_data, source_error, rate_limited, circuit_skip,
+            failed, message, stats_json
+        FROM data_source_health
+        ORDER BY COALESCE(ended_at, started_at) DESC, source, market
+        LIMIT ?
+    """, [int(limit)])
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+    df = df.copy()
+    for col in ["attempted", "updated", "no_data", "source_error", "rate_limited", "circuit_skip", "failed"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    df["health_score"] = df.apply(
+        lambda row: float(row["updated"]) / float(row["attempted"]) if float(row["attempted"]) > 0 else None,
+        axis=1,
+    )
+    return df

@@ -18,14 +18,14 @@ SUPERSEDED = "SUPERSEDED"
 def expire_stale_signals(
     conn: duckdb.DuckDBPyConnection,
     as_of: date | None = None,
-    valid_trading_days: int = 2,
+    valid_trading_days: int = 1,
 ) -> int:
     """
     Mark stale pending signals as expired.
 
     A signal is actionable for the first ``valid_trading_days`` market sessions
-    after its signal date. With the default value, that means T+1 and T+2 are
-    allowed; once T+3 market data exists, the unexecuted signal expires.
+    after its signal date. With the default value, that means only T+1 is
+    allowed; once T+2 market data exists, the unexecuted signal expires.
     """
     if valid_trading_days < 1:
         valid_trading_days = 1
@@ -74,7 +74,7 @@ def expire_stale_signals(
         UPDATE signals
         SET executed = TRUE,
             status = 'EXPIRED',
-            status_reason = '超过T+2有效期未执行',
+            status_reason = '超过T+1有效期未执行',
             execution_date = ?,
             updated_at = CURRENT_TIMESTAMP
         WHERE signal_id IN (SELECT signal_id FROM stale)

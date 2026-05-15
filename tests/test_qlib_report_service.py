@@ -1,6 +1,7 @@
 import json
 
 import duckdb
+import pytest
 
 from src.dashboard.qlib_report_service import (
     get_metric_glossary,
@@ -99,6 +100,43 @@ def test_qlib_report_selects_production_friendly_grid_best():
     conn.close()
 
 
+def test_qlib_report_prefers_small_account_grid_best_when_available():
+    conn = _conn()
+    conn.execute(
+        """
+        INSERT INTO qlib_experiments (experiment_id, model_name, mode, status, metrics_json)
+        VALUES ('E1', 'alpha158', 'walk_forward', 'SUCCEEDED', '{}')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO qlib_grid_results (
+            grid_id, source_experiment_id, model_name, mode, top_n, holding_days,
+            rebalance_freq, buffer_n, benchmark_name, constraint_profile,
+            account_capital, avg_selected_count, avg_cash_drag, max_actual_position_pct,
+            annual_return, sharpe_ratio, max_drawdown, turnover, benchmark_return, excess_return
+        )
+        VALUES
+          ('G_THEORY', 'E1', 'alpha158', 'walk_forward', 100, 10,
+           'monthly', 150, 'MIXED_EQUAL', 'theoretical_equal_weight',
+           NULL, NULL, NULL, NULL, 0.30, 0.90, -0.24, 8, 0.05, 0.25),
+          ('G_300K', 'E1', 'alpha158', 'walk_forward', 50, 10,
+           'monthly', 75, 'MIXED_EQUAL', 'small_account_300k',
+           300000, 31.5, 0.09, 0.058, 0.16, 0.62, -0.18, 10, 0.05, 0.11)
+        """
+    )
+
+    report = load_experiment_report(conn)
+    grid_best = report["grid_best"]
+
+    assert len(grid_best) == 1
+    row = grid_best.iloc[0]
+    assert row["constraint_profile"] == "small_account_300k"
+    assert row["account_capital"] == 300000
+    assert row["avg_selected_count"] == pytest.approx(31.5)
+    conn.close()
+
+
 def test_qlib_report_handles_empty_data():
     conn = _conn()
     report = load_experiment_report(conn)
@@ -169,6 +207,52 @@ def test_qlib_report_marks_final_selected_and_metric_winners():
     assert "年化收益" in experiments.loc["E2", "winning_metrics"]
     assert "低换手" in experiments.loc["E2", "winning_metrics"]
     assert "最终选出" in experiments.loc["E1", "highlight_reason"]
+    conn.close()
+
+
+def test_qlib_report_marks_candidate_batch_selected_experiment():
+    conn = _conn()
+    metrics = {
+        "annual_return": 0.13,
+        "sharpe_ratio": 0.3,
+        "max_drawdown": -0.4,
+        "turnover": 190,
+        "primary_benchmark": "MIXED_EQUAL",
+        "excess_return": -0.09,
+        "icir": 0.2,
+    }
+    config = {"candidate": {"batch_id": "B1", "candidate_id": "lgb_deep", "model_variant": "deep"}}
+    conn.execute(
+        """
+        INSERT INTO qlib_experiments (
+            experiment_id, model_name, model_version, mode, status, metrics_json, config_snapshot
+        )
+        VALUES ('E_DEEP', 'alpha158', 'v-deep', 'walk_forward', 'SUCCEEDED', ?, ?)
+        """,
+        [json.dumps(metrics), json.dumps(config)],
+    )
+    conn.execute(
+        """
+        INSERT INTO qlib_candidate_results (
+            candidate_id, batch_id, experiment_id, model_name, model_family,
+            model_variant, status, mode, best_benchmark, best_top_n,
+            best_holding_days, best_rebalance_freq, turnover, excess_return,
+            score
+        )
+        VALUES (
+            'lgb_deep', 'B1', 'E_DEEP', 'alpha158', 'lgbm',
+            'deep', 'SUCCEEDED', 'walk_forward', 'MIXED_EQUAL', 20,
+            5, 'weekly', 44.5, 0.46, 0.52
+        )
+        """
+    )
+
+    report = load_experiment_report(conn)
+    row = report["experiments"].set_index("experiment_id").loc["E_DEEP"]
+
+    assert bool(row["is_candidate_selected"])
+    assert "候选批跑最终选出" in row["highlight_reason"]
+    assert report["summary"]["best_candidate"]["experiment_id"] == "E_DEEP"
     conn.close()
 
 

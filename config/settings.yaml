@@ -14,7 +14,7 @@ index_funds:
     - fund_code: "013308"
       name: "易方达恒生科技ETF联接(QDII)A"
       fund_type: "OPEN"
-      tracking_index: "3032.HK"
+      tracking_index: "HSTECH"
       tracking_index_name: "恒生科技"
       market: "CN"
       currency: "CNY"

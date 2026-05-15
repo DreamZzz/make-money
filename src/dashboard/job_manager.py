@@ -67,9 +67,10 @@ QLIB_PYTHON = _resolve_qlib_python(PYTHON)
 PENDING = "PENDING"
 RUNNING = "RUNNING"
 SUCCEEDED = "SUCCEEDED"
+DEGRADED = "DEGRADED"
 FAILED = "FAILED"
 SKIPPED = "SKIPPED"
-TERMINAL_STATUSES = {SUCCEEDED, FAILED}
+TERMINAL_STATUSES = {SUCCEEDED, DEGRADED, FAILED}
 ACTIVE_STATUSES = {PENDING, RUNNING}
 
 
@@ -80,6 +81,7 @@ class JobStep:
     cmd: list[str]
     desc: str = ""
     allow_failure: bool = False
+    degraded_exit_codes: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -125,8 +127,22 @@ class JobRun:
         return self.status in ACTIVE_STATUSES
 
 
-def _step(key: str, label: str, cmd: list[str], desc: str = "", allow_failure: bool = False) -> JobStep:
-    return JobStep(key=key, label=label, cmd=cmd, desc=desc, allow_failure=allow_failure)
+def _step(
+    key: str,
+    label: str,
+    cmd: list[str],
+    desc: str = "",
+    allow_failure: bool = False,
+    degraded_exit_codes: tuple[int, ...] = (),
+) -> JobStep:
+    return JobStep(
+        key=key,
+        label=label,
+        cmd=cmd,
+        desc=desc,
+        allow_failure=allow_failure,
+        degraded_exit_codes=degraded_exit_codes,
+    )
 
 
 SINGLE_STEPS: dict[str, JobStep] = {
@@ -138,6 +154,11 @@ SINGLE_STEPS: dict[str, JobStep] = {
         "qlib_predict",
         "Qlib production 日常预测",
         [QLIB_PYTHON, "-m", "src.backtest.qlib_runner", "predict-latest", "--model", "production"],
+    ),
+    "qlib_rule_pk_ab": _step(
+        "qlib_rule_pk_ab",
+        "记录规则/Qlib A-B影子样本",
+        [PYTHON, "-m", "src.dashboard.qlib_rule_pk_service", "record-ab"],
     ),
     "paper_trade": _step("paper_trade", "执行股票纸交易", [PYTHON, "-m", "src.portfolio.paper_engine"]),
     "recalculate_nav": _step("recalculate_nav", "重算资金净值", [PYTHON, "-m", "src.portfolio.nav_calculator"]),
@@ -172,15 +193,16 @@ SINGLE_STEPS: dict[str, JobStep] = {
     ),
     "qlib_candidates": _step(
         "qlib_candidates",
-        "Qlib 候选批跑",
+        "Qlib 中换手候选批跑",
         [
             QLIB_PYTHON, "-m", "src.backtest.qlib_runner", "run-candidates",
             "--mode", "walk_forward",
             "--preset", "nightly",
-            "--top-n", "20,50,100",
-            "--holding-days", "1-10",
-            "--rebalance", "daily,monthly",
+            "--top-n", "20,30,50,80,100",
+            "--holding-days", "2-10",
+            "--rebalance", "daily,weekly,monthly",
             "--buffer-mult", "1.5",
+            "--turnover-profile", "medium",
         ],
     ),
     "open_target_update": _step(
@@ -194,6 +216,7 @@ SINGLE_STEPS: dict[str, JobStep] = {
                 "_prepare_env(); raise SystemExit(_update_target_symbols())"
             ),
         ],
+        degraded_exit_codes=(2,),
     ),
 }
 
@@ -211,6 +234,7 @@ JOB_DEFINITIONS: dict[str, JobDefinition] = {
             SINGLE_STEPS["index_funds_signals"],
             SINGLE_STEPS["generate_signals"],
             SINGLE_STEPS["qlib_predict"],
+            SINGLE_STEPS["qlib_rule_pk_ab"],
             SINGLE_STEPS["paper_trade"],
             SINGLE_STEPS["recalculate_nav"],
             SINGLE_STEPS["performance_review"],
@@ -244,8 +268,8 @@ JOB_DEFINITIONS: dict[str, JobDefinition] = {
     ),
     "qlib_candidate_workflow": JobDefinition(
         key="qlib_candidate_workflow",
-        label="Qlib 候选批跑",
-        desc="准备数据后批量运行模型/参数候选，落库记录最佳 Top-N、持仓周期和调仓频率组合。",
+        label="Qlib 中换手候选批跑",
+        desc="准备数据后批量运行模型/参数候选，按 30-50 年化换手目标落库记录最佳组合。",
         kind="workflow",
         category="scenario",
         steps=(
@@ -316,6 +340,7 @@ def run_job(job_key: str, run_id: str | None = None) -> JobRun:
     _append_log(run_id, f"=== {_now()} START {job.label} ({job.key}) ===\n")
 
     exit_code = 0
+    degraded = False
     for index, step in enumerate(job.steps):
         data = _read_run_data(run_id) or data
         _mark_step(data, step.key, RUNNING, started_at=_now())
@@ -325,14 +350,20 @@ def run_job(job_key: str, run_id: str | None = None) -> JobRun:
         _append_log(run_id, f"$ {' '.join(step.cmd)}\n")
 
         retcode = _run_step(run_id, step)
-        status = SUCCEEDED if retcode == 0 or step.allow_failure else FAILED
+        if retcode in step.degraded_exit_codes:
+            status = DEGRADED
+            degraded = True
+        elif retcode == 0 or step.allow_failure:
+            status = SUCCEEDED
+        else:
+            status = FAILED
         _append_log(run_id, f"--- {step.label} exit={retcode} ---\n")
 
         data = _read_run_data(run_id) or data
         _mark_step(data, step.key, status, ended_at=_now(), exit_code=retcode)
         _write_run_data(run_id, data)
 
-        if retcode != 0 and not step.allow_failure:
+        if retcode != 0 and status != DEGRADED and not step.allow_failure:
             exit_code = retcode
             data = _read_run_data(run_id) or data
             for remaining in job.steps[index + 1:]:
@@ -349,13 +380,14 @@ def run_job(job_key: str, run_id: str | None = None) -> JobRun:
 
     data = _read_run_data(run_id) or data
     data.update({
-        "status": SUCCEEDED,
+        "status": DEGRADED if degraded else SUCCEEDED,
         "exit_code": exit_code,
         "ended_at": _now(),
         "current_step": None,
     })
     _write_run_data(run_id, data)
-    _append_log(run_id, f"=== {_now()} SUCCEEDED {job.label} ===\n")
+    final_label = DEGRADED if degraded else SUCCEEDED
+    _append_log(run_id, f"=== {_now()} {final_label} {job.label} ===\n")
     return JobRun(data)
 
 
