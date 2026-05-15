@@ -52,9 +52,9 @@ This file is the durable project backlog. Keep it small enough to review every w
 | ID | Item | Status | Owner | Next Action | Acceptance |
 |---|---|---|---|---|---|
 | P1-01 | Core-satellite allocator for index funds and stock strategies | Done | Codex | Monitor daily close output for one week | One account-level budget governs stock strategy BUY orders; index-fund core execution remains advisory |
-| P1-02 | Portfolio exposure monitor | Proposed | Codex | Write design after allocator data model is known | Dashboard shows industry, size, valuation, and benchmark-relative concentration |
-| P1-03 | Enforce daily turnover cap in executable rebalance plan | Proposed | Codex | Decide whether turnover cap applies to gross or one-way notional | Orders above cap are dropped by confidence/rank priority |
-| P1-04 | Persist signal outcomes | Proposed | Codex | Reconcile with existing rule/Qlib A-B tracking | T+1/T+5/T+20 outcomes are stored by signal and model version |
+| P1-02 | Portfolio exposure monitor | Done | Codex | Monitor exposure values during the next paper-trade cycle | Dashboard shows industry, size, valuation, and benchmark-relative concentration |
+| P1-03 | Enforce daily turnover cap in executable rebalance plan | Done | Codex | Monitor skipped_turnover after the next close run | BUY orders above the daily cap are deferred by confidence/rank priority; SELL remains executable |
+| P1-04 | Persist signal outcomes | Done | Codex | Review outcome coverage after next filled paper orders | T+1/T+5/T+20 outcomes are stored by signal and model version |
 
 ## P2 Candidates
 
@@ -106,3 +106,26 @@ Copy this block below the previous weekly entry.
 - Landed: Portfolio Dashboard shows the latest unified wallet split, sleeve budgets, sleeve actions, and core fund execution plan.
 - Current live plan: `ALLOC-DEFAULT-20260515` recommends core budget around 95k and satellite budget around 28k from current cash.
 - Remaining: decide whether core fund execution should remain advisory or get a separate snapshot/order executor in a later P1/P2 iteration.
+
+### 2026-05-15 P1 Exposure Monitor
+
+- Landed: `src.portfolio.exposure_monitor` computes symbol, industry, size bucket, valuation, concentration, and benchmark-relative exposure snapshots.
+- Landed: Portfolio Dashboard `持仓暴露` section with summary metrics, industry tilt, market-cap buckets, and position drill-down.
+- Benchmark: defaults to `000300`, using market-cap weights when available and equal weight fallback.
+- Verification evidence: `pytest tests/test_exposure_monitor.py tests/test_dashboard_runtime_scripts.py -q` passed with 6 tests.
+
+### 2026-05-15 P1 Buy Turnover Cap
+
+- Landed: `paper_engine` enforces `portfolio.max_daily_turnover_pct` as a one-way daily BUY turnover cap.
+- Landed: BUY execution priority now keeps higher-confidence/higher-score signals first after SELL/SHORT orders.
+- Landed: SELL/SHORT orders remain exempt from the BUY turnover cap so exits are not blocked.
+- Landed: result stats include `skipped_turnover`.
+- Verification evidence: focused turnover tests passed; latest `scripts/quality_check.sh` passed with 157 tests.
+
+### 2026-05-15 P1 Signal Outcomes
+
+- Landed: `signal_outcomes` table keyed by `(signal_id, horizon_days)`.
+- Landed: `src.signals.outcome_tracker` computes BUY and SELL/SHORT forward returns for T+1/T+5/T+20 horizons.
+- Landed: daily close script and Dashboard job workflow update signal outcomes after paper trading, NAV, and performance review.
+- Current local run: `python3 -m src.signals.outcome_tracker update` returned `updated=0`, meaning no eligible filled signals currently require outcome rows.
+- Verification evidence: focused signal outcome and Dashboard workflow tests passed; latest `scripts/quality_check.sh` passed with 157 tests.

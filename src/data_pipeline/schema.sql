@@ -153,6 +153,28 @@ CREATE TABLE IF NOT EXISTS signals (
 );
 
 -- ============================================
+-- 5b. 信号实际收益跟踪表
+-- ============================================
+CREATE TABLE IF NOT EXISTS signal_outcomes (
+    signal_id        VARCHAR NOT NULL,
+    horizon_days     INTEGER NOT NULL,
+    model_name       VARCHAR,
+    model_version    VARCHAR,
+    symbol           VARCHAR NOT NULL,
+    side             VARCHAR,
+    signal_date      DATE,
+    execution_date   DATE,
+    execution_price  DOUBLE,
+    outcome_date     DATE,
+    outcome_price    DOUBLE,
+    return_pct       DOUBLE,
+    status           VARCHAR DEFAULT 'PENDING', -- READY / PENDING
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (signal_id, horizon_days)
+);
+
+-- ============================================
 -- 8. 纸交易持仓表
 -- ============================================
 CREATE TABLE IF NOT EXISTS paper_positions (

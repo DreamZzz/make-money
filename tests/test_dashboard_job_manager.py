@@ -142,3 +142,17 @@ def test_daily_close_workflow_plans_allocation_before_paper_trade():
     assert step_keys.index("qlib_rule_pk_ab") < step_keys.index("allocation_plan")
     assert step_keys.index("allocation_plan") < step_keys.index("paper_trade")
     assert jm.SINGLE_STEPS["allocation_plan"].cmd[:3] == [jm.PYTHON, "-m", "src.portfolio.allocator"]
+
+
+def test_daily_close_workflow_updates_signal_outcomes_after_nav_and_performance():
+    step_keys = [step.key for step in jm.JOB_DEFINITIONS["daily_close_workflow"].steps]
+
+    assert "signal_outcomes" in step_keys
+    assert step_keys.index("recalculate_nav") < step_keys.index("signal_outcomes")
+    assert step_keys.index("performance_review") < step_keys.index("signal_outcomes")
+    assert jm.SINGLE_STEPS["signal_outcomes"].cmd == [
+        jm.PYTHON,
+        "-m",
+        "src.signals.outcome_tracker",
+        "update",
+    ]

@@ -32,6 +32,7 @@ index_funds:
       enabled: true
 
 portfolio:
+  max_daily_turnover_pct: 0.30
   allocation:
     enabled: true
     core_target_pct: 0.60
@@ -39,3 +40,8 @@ portfolio:
     rebalance_tolerance_pct: 0.05
     min_trade_amount: 1000
     core_cash_priority: true
+  exposure:
+    enabled: true
+    benchmark_index: "000300"
+    max_industry_weight_warn: 0.30
+    max_position_weight_warn: 0.15

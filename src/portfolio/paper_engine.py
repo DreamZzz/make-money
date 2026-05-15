@@ -103,8 +103,8 @@ def _prioritize_signals(signals: pd.DataFrame) -> pd.DataFrame:
     ordered["_side_priority"] = ordered["side"].map(_side_priority)
     ordered["_confidence"] = pd.to_numeric(ordered.get("confidence", 0), errors="coerce").fillna(0.0)
     ordered["_score"] = pd.to_numeric(ordered.get("score", 0), errors="coerce").fillna(0.0)
-    sort_cols = ["_side_priority", "signal_date", "_confidence", "_score"]
-    ascending = [True, True, False, False]
+    sort_cols = ["_side_priority", "_confidence", "_score", "signal_date"]
+    ascending = [True, False, False, True]
     if "model_name" in ordered.columns:
         sort_cols.append("model_name")
         ascending.append(True)
@@ -204,6 +204,7 @@ def _new_result(total: int = 0) -> dict:
         "skipped_lot": 0,
         "skipped_untradeable": 0,
         "skipped_budget": 0,
+        "skipped_turnover": 0,
     }
 
 
@@ -252,6 +253,9 @@ def _run_signal_batch(
 
         satellite_budget = _load_latest_satellite_budget(conn)
         satellite_budget_remaining = satellite_budget
+        max_daily_turnover_pct = float(portfolio_cfg.get("max_daily_turnover_pct", 0.30) or 0.0)
+        buy_turnover_cap = max(current_total * max_daily_turnover_pct, 0.0)
+        buy_turnover_remaining_by_date: dict[date, float] = {}
         results: dict[str, dict] = {}
         position_cache: dict[tuple[str, str], float] = {}
 
@@ -392,6 +396,14 @@ def _run_signal_batch(
             cash_before = session_cash
             if order_side == "BUY":
                 required = execution_value + execution_cost
+                remaining_turnover = buy_turnover_remaining_by_date.setdefault(next_day, buy_turnover_cap)
+                if max_daily_turnover_pct > 0 and required > remaining_turnover + 1e-9:
+                    stats["skipped_turnover"] += 1
+                    logger.warning(
+                        f"  跳过 {sym} BUY：日内换手预算不足 "
+                        f"(剩余 {remaining_turnover:,.0f} < 需要 {required:,.0f})"
+                    )
+                    continue
                 if satellite_budget_remaining is not None and required > satellite_budget_remaining + 1e-9:
                     stats["skipped_budget"] += 1
                     logger.warning(
@@ -406,6 +418,7 @@ def _run_signal_batch(
                 session_cash -= required
                 if satellite_budget_remaining is not None:
                     satellite_budget_remaining -= required
+                buy_turnover_remaining_by_date[next_day] = remaining_turnover - required
             else:
                 session_cash += execution_value - execution_cost
                 position_cache[(strategy, sym)] = 0.0
@@ -436,7 +449,7 @@ def _run_signal_batch(
                 f"Paper engine: {name} executed {result['executed']}/{result['total']} signals "
                 f"(handled_without_order={result['handled_without_order']}, "
                 f"no_price={result['skipped_no_price']}, cash={result['skipped_cash']}, "
-                f"budget={result['skipped_budget']})"
+                f"budget={result['skipped_budget']}, turnover={result['skipped_turnover']})"
             )
         return results
     except Exception:

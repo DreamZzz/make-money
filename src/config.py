@@ -77,6 +77,7 @@ DEFAULT_CONFIG = {
         "min_rebalance_buy_confidence": 0.75,
         "min_rebalance_buy_rank_score": 0.50,
         "estimated_trade_fee_rate": 0.0015,
+        "max_daily_turnover_pct": 0.30,
         "max_drawdown_limit": 0.20,
         "rebalance": {"frequency": "weekly", "weekday": 5},
         "benchmark_weights": {"000300.SH": 0.35, "000905.SH": 0.15, "HSI": 0.35, "HSTECH": 0.15},
@@ -87,6 +88,12 @@ DEFAULT_CONFIG = {
             "rebalance_tolerance_pct": 0.05,
             "min_trade_amount": 1000,
             "core_cash_priority": True,
+        },
+        "exposure": {
+            "enabled": True,
+            "benchmark_index": "000300",
+            "max_industry_weight_warn": 0.30,
+            "max_position_weight_warn": 0.15,
         },
     },
     "signals": {

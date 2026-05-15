@@ -167,6 +167,7 @@ SINGLE_STEPS: dict[str, JobStep] = {
     "paper_trade": _step("paper_trade", "执行股票纸交易", [PYTHON, "-m", "src.portfolio.paper_engine"]),
     "recalculate_nav": _step("recalculate_nav", "重算资金净值", [PYTHON, "-m", "src.portfolio.nav_calculator"]),
     "performance_review": _step("performance_review", "生成阶段评估", [PYTHON, "-m", "src.portfolio.performance"]),
+    "signal_outcomes": _step("signal_outcomes", "更新信号收益跟踪", [PYTHON, "-m", "src.signals.outcome_tracker", "update"]),
     "qlib_status": _step("qlib_status", "Qlib 状态检查", [QLIB_PYTHON, "-m", "src.backtest.qlib_runner", "status"]),
     "qlib_prepare": _step(
         "qlib_prepare",
@@ -243,6 +244,7 @@ JOB_DEFINITIONS: dict[str, JobDefinition] = {
             SINGLE_STEPS["paper_trade"],
             SINGLE_STEPS["recalculate_nav"],
             SINGLE_STEPS["performance_review"],
+            SINGLE_STEPS["signal_outcomes"],
         ),
     ),
     "open_trade_workflow": JobDefinition(

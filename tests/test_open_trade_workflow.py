@@ -18,11 +18,13 @@ def _empty_status(status: str) -> pd.DataFrame:
     return df
 
 
-def _patch_temp_db(monkeypatch, tmp_path) -> str:
+def _patch_temp_db(monkeypatch, tmp_path, portfolio_overrides: dict | None = None) -> str:
     cfg = deepcopy(DEFAULT_CONFIG)
     db_path = tmp_path / "market.db"
     cfg["data"]["duckdb_path"] = str(db_path)
     cfg["portfolio"]["initial_capital_cn"] = 100000
+    if portfolio_overrides:
+        cfg["portfolio"].update(portfolio_overrides)
 
     from src.data_pipeline import loader
     from src.portfolio import cashbook
@@ -339,6 +341,101 @@ def test_paper_engine_allows_sells_when_satellite_budget_is_zero(monkeypatch, tm
         conn.close()
 
     assert order == ("sell_with_zero_budget", "SELL", 10000.0)
+
+
+def test_paper_engine_caps_buys_by_daily_turnover_and_keeps_high_confidence(monkeypatch, tmp_path):
+    db_path = _patch_temp_db(monkeypatch, tmp_path, {"max_daily_turnover_pct": 0.15})
+    conn = duckdb.connect(db_path)
+    init_db(conn)
+    conn.execute("""
+        INSERT INTO stock_info (symbol, country, name)
+        VALUES ('000001', 'CN', '低分'), ('000002', 'CN', '高分')
+    """)
+    conn.execute("""
+        INSERT INTO daily_price (symbol, trade_date, open, high, low, close, pre_close, volume)
+        VALUES
+          ('000001', DATE '2024-01-03', 10, 10, 10, 10, 10, 1000),
+          ('000002', DATE '2024-01-03', 10, 10, 10, 10, 10, 1000)
+    """)
+    conn.execute("""
+        INSERT INTO account_daily (
+            account_id, trade_date, cash, position_value, total_value,
+            net_contribution, nav, daily_return, drawdown
+        )
+        VALUES ('default', DATE '2024-01-02', 100000, 0, 100000, 100000, 1, 0, 0)
+    """)
+    conn.execute("""
+        INSERT INTO signals (
+            signal_id, model_name, model_version, symbol, signal_ts,
+            side, score, confidence, max_position_pct, executed, status
+        )
+        VALUES
+          ('low_conf_older', 'alpha158', '1.0', '000001',
+           TIMESTAMP '2024-01-02 15:00:00', 'BUY', 1, 0.80, 0.10, FALSE, 'ACTIVE'),
+          ('high_conf_newer', 'alpha158', '1.0', '000002',
+           TIMESTAMP '2024-01-02 15:01:00', 'BUY', 1, 0.99, 0.10, FALSE, 'ACTIVE')
+    """)
+    conn.close()
+
+    result = pe.run("alpha158", market="CN")
+
+    assert result["executed"] == 1
+    assert result["skipped_turnover"] == 1
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        orders = conn.execute("""
+            SELECT signal_id, side, order_value
+            FROM paper_orders
+            ORDER BY order_ts
+        """).fetchall()
+        statuses = dict(conn.execute("""
+            SELECT signal_id, status
+            FROM signals
+            ORDER BY signal_id
+        """).fetchall())
+    finally:
+        conn.close()
+
+    assert orders == [("high_conf_newer", "BUY", 10000.0)]
+    assert statuses == {"high_conf_newer": "FILLED", "low_conf_older": "ACTIVE"}
+
+
+def test_paper_engine_allows_sells_when_buy_turnover_cap_is_low(monkeypatch, tmp_path):
+    db_path = _patch_temp_db(monkeypatch, tmp_path, {"max_daily_turnover_pct": 0.01})
+    conn = duckdb.connect(db_path)
+    init_db(conn)
+    conn.execute("INSERT INTO stock_info (symbol, country, name) VALUES ('000001', 'CN', '持仓股')")
+    conn.execute("""
+        INSERT INTO daily_price (symbol, trade_date, open, high, low, close, pre_close, volume)
+        VALUES ('000001', DATE '2024-01-03', 10, 10, 10, 10, 10, 1000)
+    """)
+    conn.execute("""
+        INSERT INTO account_daily (
+            account_id, trade_date, cash, position_value, total_value,
+            net_contribution, nav, daily_return, drawdown
+        )
+        VALUES ('default', DATE '2024-01-02', 0, 10000, 10000, 10000, 1, 0, 0)
+    """)
+    conn.execute("""
+        INSERT INTO paper_positions (
+            strategy_name, trade_date, symbol, quantity, avg_cost, current_price, market_value
+        )
+        VALUES ('alpha158', DATE '2024-01-02', '000001', 1000, 10, 10, 10000)
+    """)
+    conn.execute("""
+        INSERT INTO signals (
+            signal_id, model_name, model_version, symbol, signal_ts,
+            side, score, confidence, max_position_pct, executed, status
+        )
+        VALUES ('sell_low_turnover_cap', 'alpha158', '1.0', '000001',
+                TIMESTAMP '2024-01-02 15:00:00', 'SELL', 1, 1, 0, FALSE, 'ACTIVE')
+    """)
+    conn.close()
+
+    result = pe.run("alpha158", market="CN")
+
+    assert result["executed"] == 1
+    assert result["skipped_turnover"] == 0
 
 
 def test_prioritize_signals_releases_cash_before_older_buys():

@@ -10,7 +10,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from src.dashboard.db import DuckDBError, db_error_widget, query_df
+from src.config import load_config
+from src.dashboard.db import DuckDBError, db_error_widget, get_conn, query_df
+from src.portfolio.exposure_monitor import DEFAULT_BENCHMARK_INDEX, load_exposure_snapshot
 
 ACTION_LABELS = {
     "BUY": "买入",
@@ -165,6 +167,109 @@ def show_allocation_plan():
             "计划金额": st.column_config.NumberColumn(format="%.0f"),
         },
     )
+
+
+@st.cache_data(ttl=300)
+def _load_portfolio_exposure() -> dict[str, pd.DataFrame]:
+    exposure_cfg = load_config().get("portfolio", {}).get("exposure", {})
+    benchmark_index = str(exposure_cfg.get("benchmark_index") or DEFAULT_BENCHMARK_INDEX)
+    conn = get_conn()
+    try:
+        return load_exposure_snapshot(conn, benchmark_index=benchmark_index)
+    finally:
+        conn.close()
+
+
+def show_exposure_monitor():
+    st.subheader("持仓暴露")
+    exposure_cfg = load_config().get("portfolio", {}).get("exposure", {})
+    if exposure_cfg and not bool(exposure_cfg.get("enabled", True)):
+        st.caption("持仓暴露监控未启用")
+        return
+
+    snapshot = _load_portfolio_exposure()
+    summary = snapshot["summary"].iloc[0]
+    if int(summary.get("position_count") or 0) == 0:
+        st.info("暂无可计算的股票持仓暴露。")
+        return
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("持仓数", f"{int(summary['position_count'])}")
+    c2.metric("最大单票", f"{float(summary['top1_weight']):.1%}")
+    c3.metric("Top5集中度", f"{float(summary['top5_weight']):.1%}")
+    c4.metric("最大行业", f"{float(summary['max_industry_weight']):.1%}")
+    pe_text = "—" if float(summary["pe_coverage"]) <= 0 else f"{float(summary['weighted_pe_ttm']):.1f}"
+    pb_text = "—" if float(summary["pb_coverage"]) <= 0 else f"{float(summary['weighted_pb']):.2f}"
+    c5.metric("PE / PB", f"{pe_text} / {pb_text}")
+
+    industry = snapshot["industry"].copy()
+    size = snapshot["size"].copy()
+    positions = snapshot["positions"].copy()
+
+    tab_industry, tab_size, tab_positions = st.tabs(["行业", "市值", "明细"])
+    with tab_industry:
+        display = industry.rename(columns={
+            "industry": "行业",
+            "market_value": "市值",
+            "weight": "组合权重",
+            "benchmark_weight": "基准权重",
+            "relative_weight": "相对偏离",
+            "position_count": "持仓数",
+        })
+        st.dataframe(
+            display[["行业", "市值", "组合权重", "基准权重", "相对偏离", "持仓数"]],
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "市值": st.column_config.NumberColumn(format="%.0f"),
+                "组合权重": st.column_config.NumberColumn(format="%.1%"),
+                "基准权重": st.column_config.NumberColumn(format="%.1%"),
+                "相对偏离": st.column_config.NumberColumn(format="%+.1%"),
+            },
+        )
+
+    with tab_size:
+        display = size.rename(columns={
+            "size_bucket": "市值分层",
+            "market_value": "市值",
+            "weight": "组合权重",
+            "position_count": "持仓数",
+        })
+        st.dataframe(
+            display[["市值分层", "市值", "组合权重", "持仓数"]],
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "市值": st.column_config.NumberColumn(format="%.0f"),
+                "组合权重": st.column_config.NumberColumn(format="%.1%"),
+            },
+        )
+
+    with tab_positions:
+        display = positions.rename(columns={
+            "symbol": "代码",
+            "name": "名称",
+            "industry": "行业",
+            "size_bucket": "市值分层",
+            "market_value": "市值",
+            "weight": "权重",
+            "market_cap": "总市值",
+            "pe_ttm": "PE",
+            "pb": "PB",
+            "strategies": "策略",
+        })
+        st.dataframe(
+            display[["代码", "名称", "行业", "市值分层", "市值", "权重", "总市值", "PE", "PB", "策略"]],
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "市值": st.column_config.NumberColumn(format="%.0f"),
+                "权重": st.column_config.NumberColumn(format="%.1%"),
+                "总市值": st.column_config.NumberColumn(format="%.0f"),
+                "PE": st.column_config.NumberColumn(format="%.1f"),
+                "PB": st.column_config.NumberColumn(format="%.2f"),
+            },
+        )
 
 
 def show_portfolio_summary():
@@ -346,6 +451,8 @@ try:
     show_cash_account()
     st.divider()
     show_allocation_plan()
+    st.divider()
+    show_exposure_monitor()
     st.divider()
     show_portfolio_summary()
     st.divider()
