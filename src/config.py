@@ -52,6 +52,7 @@ DEFAULT_CONFIG = {
         "cn_backup_after_akshare_circuit": True,
         "cn_backup_batch_size": 80,
         "cn_backup_max_symbols_after_circuit": 800,
+        "sync_index_membership_on_update": True,
     },
     "qlib": {
         "cn_data_path": "qlib_data/cn_data",

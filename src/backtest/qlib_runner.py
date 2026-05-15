@@ -25,6 +25,7 @@ from loguru import logger
 
 from src.backtest.results import compute_metrics, load_benchmark_returns, save_backtest_result
 from src.config import PROJECT_ROOT, load_config
+from src.portfolio.execution_guards import check_open_tradeable
 
 
 MODEL_NAME = "alpha158"
@@ -270,7 +271,7 @@ def train_alpha158(
     valid_end: str = "2023-12-31",
     test_start: str = "2024-01-01",
     test_end: Optional[str] = None,
-    market: str = "csi300",
+    market: str = "csi800",
     model_output_path: Optional[Path] = None,
     lgb_params: Optional[dict[str, Any]] = None,
 ) -> tuple[pd.DataFrame, Optional[str]]:
@@ -334,7 +335,7 @@ def _load_price_frame(symbols: list[str], start: str, end: str) -> pd.DataFrame:
     conn = get_connection(read_only=True)
     try:
         prices = conn.execute(f"""
-            SELECT symbol, trade_date, open, close, pe_ttm, pb
+            SELECT symbol, trade_date, open, close, pre_close, pe_ttm, pb, is_st, is_suspended
             FROM daily_price
             WHERE symbol IN ({ph})
               AND trade_date >= ?
@@ -381,18 +382,54 @@ def compute_daily_ic(pred: pd.DataFrame, prices: pd.DataFrame, horizon: int = 5)
     return pd.DataFrame(rows)
 
 
+def _open_tradeable_mask(prices: pd.DataFrame, market: str = "CN") -> pd.DataFrame:
+    if prices.empty:
+        return pd.DataFrame()
+    df = prices.copy()
+    df["trade_date"] = pd.to_datetime(df["trade_date"])
+    df["symbol"] = df["symbol"].astype(str)
+    for col, default in {"pre_close": None, "is_st": False, "is_suspended": False}.items():
+        if col not in df.columns:
+            df[col] = default
+    df["_open_tradeable"] = df.apply(
+        lambda row: check_open_tradeable(
+            row.get("open"),
+            row.get("pre_close"),
+            market=market,
+            is_st=bool(row.get("is_st") or False),
+            is_suspended=bool(row.get("is_suspended") or False),
+        ).tradeable,
+        axis=1,
+    )
+    return (
+        df.pivot_table(index="trade_date", columns="symbol", values="_open_tradeable", aggfunc="last")
+        .sort_index()
+        .fillna(False)
+        .astype(bool)
+    )
+
+
+def _round_trip_tradeable(prices: pd.DataFrame, holding_days: int, market: str = "CN") -> pd.DataFrame:
+    tradeable = _open_tradeable_mask(prices, market=market)
+    if tradeable.empty:
+        return pd.DataFrame()
+    return (tradeable.shift(-1).fillna(False) & tradeable.shift(-(holding_days + 1)).fillna(False)).astype(bool)
+
+
 def simulate_topn_t1_open(
     pred: pd.DataFrame,
     prices: pd.DataFrame,
     top_n: int = DEFAULT_TOP_N,
     commission_rate: float = 0.00025,
     stamp_duty_rate: float = 0.001,
+    market: str = "CN",
 ) -> pd.Series:
     """T signal -> T+1 open entry -> T+2 open exit, equal-weight Top-N."""
     if pred.empty or prices.empty:
         return pd.Series(dtype=float)
     open_px = prices.pivot(index="trade_date", columns="symbol", values="open").sort_index()
     open_returns = open_px.pct_change().shift(-2)
+    tradeable = _round_trip_tradeable(prices, holding_days=1, market=market)
 
     daily_returns = []
     prev_holdings: set[str] = set()
@@ -403,7 +440,14 @@ def simulate_topn_t1_open(
         if dt not in open_returns.index:
             continue
         symbols = group.nlargest(top_n, "score")["instrument"].astype(str).tolist()
-        available = [s for s in symbols if s in open_returns.columns and pd.notna(open_returns.loc[dt, s])]
+        available = [
+            s for s in symbols
+            if s in open_returns.columns
+            and pd.notna(open_returns.loc[dt, s])
+            and s in tradeable.columns
+            and dt in tradeable.index
+            and bool(tradeable.loc[dt, s])
+        ]
         if not available:
             continue
         gross = float(open_returns.loc[dt, available].mean())
@@ -428,6 +472,7 @@ def simulate_topn_open(
     buffer_n: Optional[int] = None,
     commission_rate: float = 0.00025,
     stamp_duty_rate: float = 0.001,
+    market: str = "CN",
 ) -> pd.Series:
     """T signal -> T+1 open entry, hold N trading days, equal-weight with optional turnover buffer."""
     if pred.empty or prices.empty:
@@ -439,6 +484,7 @@ def simulate_topn_open(
     pred["datetime"] = pd.to_datetime(pred["datetime"])
     open_px = prices.pivot(index="trade_date", columns="symbol", values="open").sort_index()
     forward_returns = open_px.shift(-(holding_days + 1)) / open_px.shift(-1) - 1
+    tradeable = _round_trip_tradeable(prices, holding_days=holding_days, market=market)
 
     groups = []
     for dt, group in pred.groupby("datetime"):
@@ -462,7 +508,14 @@ def simulate_topn_open(
         if dt not in forward_returns.index:
             continue
         ranked = group.sort_values("score", ascending=False)["instrument"].astype(str).tolist()
-        ranked = [s for s in ranked if s in forward_returns.columns and pd.notna(forward_returns.loc[dt, s])]
+        ranked = [
+            s for s in ranked
+            if s in forward_returns.columns
+            and pd.notna(forward_returns.loc[dt, s])
+            and s in tradeable.columns
+            and dt in tradeable.index
+            and bool(tradeable.loc[dt, s])
+        ]
         if not ranked:
             continue
         keep_pool = set(ranked[:buffer_n])
@@ -515,6 +568,7 @@ def simulate_topn_open_constrained(
     stamp_duty_rate: float = 0.001,
     max_pe_ttm: Optional[float] = None,
     max_pb: Optional[float] = None,
+    market: str = "CN",
 ) -> pd.Series:
     """T signal -> T+1 open execution with account size, lot and concentration constraints."""
     if pred.empty or prices.empty:
@@ -531,6 +585,7 @@ def simulate_topn_open_constrained(
     open_px = prices.pivot(index="trade_date", columns="symbol", values="open").sort_index()
     forward_returns = open_px.shift(-(holding_days + 1)) / open_px.shift(-1) - 1
     entry_prices = open_px.shift(-1)
+    tradeable = _round_trip_tradeable(prices, holding_days=holding_days, market=market)
     pe_frame = (
         prices.pivot(index="trade_date", columns="symbol", values="pe_ttm").sort_index()
         if "pe_ttm" in prices.columns else pd.DataFrame()
@@ -566,6 +621,7 @@ def simulate_topn_open_constrained(
     skipped_price_caps = []
     skipped_valuations = []
     skipped_budget_counts = []
+    skipped_untradeable_counts = []
 
     for dt, group in groups:
         if dt not in forward_returns.index or dt not in entry_prices.index:
@@ -590,10 +646,18 @@ def simulate_topn_open_constrained(
         skipped_price_cap = 0
         skipped_valuation = 0
         skipped_budget = 0
+        skipped_untradeable = 0
 
         for sym in ordered:
             if len(positions) >= top_n:
                 break
+            if (
+                sym not in tradeable.columns
+                or dt not in tradeable.index
+                or not bool(tradeable.loc[dt, sym])
+            ):
+                skipped_untradeable += 1
+                continue
             price = float(entry_prices.loc[dt, sym])
             if price <= 0 or not np.isfinite(price):
                 continue
@@ -656,6 +720,7 @@ def simulate_topn_open_constrained(
         skipped_price_caps.append(skipped_price_cap)
         skipped_valuations.append(skipped_valuation)
         skipped_budget_counts.append(skipped_budget)
+        skipped_untradeable_counts.append(skipped_untradeable)
         current_holdings = new_holdings
 
     returns = pd.Series([r for _, r in daily_returns], index=pd.to_datetime([dt for dt, _ in daily_returns]))
@@ -675,6 +740,7 @@ def simulate_topn_open_constrained(
     returns.attrs["skipped_price_cap_avg"] = float(np.mean(skipped_price_caps)) if skipped_price_caps else 0.0
     returns.attrs["skipped_valuation_avg"] = float(np.mean(skipped_valuations)) if skipped_valuations else 0.0
     returns.attrs["skipped_budget_avg"] = float(np.mean(skipped_budget_counts)) if skipped_budget_counts else 0.0
+    returns.attrs["skipped_untradeable_avg"] = float(np.mean(skipped_untradeable_counts)) if skipped_untradeable_counts else 0.0
     returns.attrs["max_pe_ttm"] = float(max_pe_ttm) if max_pe_ttm is not None else None
     returns.attrs["max_pb"] = float(max_pb) if max_pb is not None else None
     return returns
@@ -1763,6 +1829,8 @@ def run_experiment(
             "CN",
             metrics,
             {"strategy": MODEL_NAME, "mode": mode, "top_n": top_n, "source": "qlib_experiment"},
+            engine="qlib",
+            decision_scope="decision",
         )
         _register_candidate(experiment_id, model_version, metrics, saved_model)
         _finish_experiment(experiment_id, "SUCCEEDED", metrics, run_id, model_version)

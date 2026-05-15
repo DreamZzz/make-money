@@ -64,6 +64,8 @@ def init_db(conn: duckdb.DuckDBPyConnection) -> None:
         "ALTER TABLE paper_orders ADD COLUMN IF NOT EXISTS cash_before DOUBLE",
         "ALTER TABLE paper_orders ADD COLUMN IF NOT EXISTS cash_after DOUBLE",
         "ALTER TABLE paper_orders ADD COLUMN IF NOT EXISTS status_reason VARCHAR",
+        "ALTER TABLE backtest_results ADD COLUMN IF NOT EXISTS engine VARCHAR DEFAULT 'unknown'",
+        "ALTER TABLE backtest_results ADD COLUMN IF NOT EXISTS decision_scope VARCHAR DEFAULT 'decision'",
         "ALTER TABLE qlib_experiments ADD COLUMN IF NOT EXISTS mode VARCHAR",
         "ALTER TABLE qlib_experiments ADD COLUMN IF NOT EXISTS metrics_json TEXT",
         "ALTER TABLE qlib_experiments ADD COLUMN IF NOT EXISTS error_message VARCHAR",
@@ -101,6 +103,10 @@ def init_db(conn: duckdb.DuckDBPyConnection) -> None:
         "ALTER TABLE qlib_candidate_results ADD COLUMN IF NOT EXISTS rank_ic_positive_rate DOUBLE",
         "ALTER TABLE qlib_candidate_results ADD COLUMN IF NOT EXISTS error_message VARCHAR",
         "ALTER TABLE data_source_health ADD COLUMN IF NOT EXISTS stats_json TEXT",
+        "ALTER TABLE index_member_history ADD COLUMN IF NOT EXISTS end_date DATE",
+        "ALTER TABLE index_member_history ADD COLUMN IF NOT EXISTS source VARCHAR",
+        "ALTER TABLE index_member_history ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE index_member_history ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
     ]:
         try:
             conn.execute(col_ddl)

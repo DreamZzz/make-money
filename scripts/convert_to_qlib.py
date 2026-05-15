@@ -17,6 +17,10 @@ from loguru import logger
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+INSTRUMENT_COLUMNS = ["symbol", "start", "end"]
+OPEN_END_DATE = "2099-12-31"
+CN_INDEX_TO_INSTRUMENT = {"000300": "csi300", "000905": "csi500"}
+
 
 def _dump_bin(csv_file: Path, target_dir: Path, include_fields: str) -> bool:
     """调用 Qlib dump_bin 将 CSV 转为二进制格式"""
@@ -45,6 +49,95 @@ def _write_feature_bin(path: Path, start_idx: int, values: np.ndarray) -> None:
     np.hstack([[float(start_idx)], values.astype(np.float32)]).astype("<f").tofile(path)
 
 
+def build_dynamic_instruments(price_df: pd.DataFrame, membership_df: pd.DataFrame | None = None) -> dict[str, pd.DataFrame]:
+    """Build Qlib instrument ranges from price availability and index membership history."""
+    all_rows = _build_price_instrument_rows(price_df)
+    membership_df = membership_df if membership_df is not None else pd.DataFrame()
+    if membership_df.empty:
+        return {name: all_rows.copy() for name in ("all", "csi300", "csi500", "csi800")}
+
+    instruments = {"all": all_rows}
+    price_ranges = _price_ranges(all_rows)
+    for index_code, instrument_name in CN_INDEX_TO_INSTRUMENT.items():
+        instruments[instrument_name] = _build_membership_instrument_rows(membership_df, index_code, price_ranges)
+
+    csi800_membership = membership_df[membership_df["index_code"].astype(str).isin(CN_INDEX_TO_INSTRUMENT)]
+    if csi800_membership.empty:
+        instruments["csi800"] = _empty_instrument_frame()
+    else:
+        csi800_membership = csi800_membership.copy()
+        csi800_membership["index_code"] = "csi800"
+        from src.data_pipeline.index_membership import merge_membership_ranges
+
+        merged = merge_membership_ranges(csi800_membership)
+        instruments["csi800"] = _build_membership_instrument_rows(merged, "csi800", price_ranges)
+    return instruments
+
+
+def write_instrument_files(instrument_dir: Path, instruments: dict[str, pd.DataFrame]) -> None:
+    instrument_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("all", "csi300", "csi500", "csi800"):
+        df = instruments.get(name, _empty_instrument_frame()).copy()
+        df = df[INSTRUMENT_COLUMNS] if not df.empty else _empty_instrument_frame()
+        df.to_csv(instrument_dir / f"{name}.txt", sep="\t", index=False, header=False)
+
+
+def _build_price_instrument_rows(price_df: pd.DataFrame) -> pd.DataFrame:
+    if price_df.empty:
+        return _empty_instrument_frame()
+    df = price_df.copy()
+    df["date"] = pd.to_datetime(df["date"])
+    df["symbol"] = df["symbol"].astype(str)
+    rows = []
+    for symbol, sub in df.groupby("symbol", sort=True):
+        rows.append((symbol, sub["date"].min().strftime("%Y-%m-%d"), sub["date"].max().strftime("%Y-%m-%d")))
+    return pd.DataFrame(rows, columns=INSTRUMENT_COLUMNS)
+
+
+def _build_membership_instrument_rows(
+    membership_df: pd.DataFrame,
+    index_code: str,
+    price_ranges: dict[str, tuple[pd.Timestamp, pd.Timestamp]],
+) -> pd.DataFrame:
+    if membership_df.empty:
+        return _empty_instrument_frame()
+    df = membership_df.copy()
+    df["index_code"] = df["index_code"].astype(str)
+    df = df[df["index_code"] == str(index_code)]
+    if df.empty:
+        return _empty_instrument_frame()
+
+    rows = []
+    for _, row in df.iterrows():
+        symbol = str(row["symbol"])
+        if symbol not in price_ranges:
+            continue
+        price_start, price_end = price_ranges[symbol]
+        start = pd.to_datetime(row["start_date"])
+        end = pd.to_datetime(row["end_date"], errors="coerce")
+        if pd.notna(end) and end < price_start:
+            continue
+        if start > price_end:
+            continue
+        start = max(start, price_start)
+        end_text = OPEN_END_DATE if pd.isna(end) else end.strftime("%Y-%m-%d")
+        rows.append((symbol, start.strftime("%Y-%m-%d"), end_text))
+    if not rows:
+        return _empty_instrument_frame()
+    return pd.DataFrame(rows, columns=INSTRUMENT_COLUMNS).sort_values(["symbol", "start", "end"]).reset_index(drop=True)
+
+
+def _price_ranges(all_rows: pd.DataFrame) -> dict[str, tuple[pd.Timestamp, pd.Timestamp]]:
+    return {
+        str(row["symbol"]): (pd.to_datetime(row["start"]), pd.to_datetime(row["end"]))
+        for _, row in all_rows.iterrows()
+    }
+
+
+def _empty_instrument_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=INSTRUMENT_COLUMNS)
+
+
 def _manual_dump_bin(df: pd.DataFrame, target_dir: Path, include_fields: str) -> None:
     """Write the minimal Qlib file storage format when dump_bin is not packaged."""
     fields = [field.strip().lower() for field in include_fields.split(",") if field.strip()]
@@ -63,13 +156,8 @@ def _manual_dump_bin(df: pd.DataFrame, target_dir: Path, include_fields: str) ->
 
     pd.Series(calendar.strftime("%Y-%m-%d")).to_csv(calendar_dir / "day.txt", index=False, header=False)
 
-    inst_rows = []
-    for symbol, sub in df.groupby("symbol"):
-        dates = pd.to_datetime(sub["date"])
-        inst_rows.append((symbol, dates.min().strftime("%Y-%m-%d"), dates.max().strftime("%Y-%m-%d")))
-    inst = pd.DataFrame(inst_rows, columns=["symbol", "start", "end"]).sort_values("symbol")
-    for name in ("all", "csi300", "csi500"):
-        inst.to_csv(instrument_dir / f"{name}.txt", sep="\t", index=False, header=False)
+    instruments = build_dynamic_instruments(df, pd.DataFrame())
+    write_instrument_files(instrument_dir, instruments)
 
     for symbol, sub in df.groupby("symbol"):
         sub = sub.sort_values("date")
@@ -84,7 +172,7 @@ def _manual_dump_bin(df: pd.DataFrame, target_dir: Path, include_fields: str) ->
             _write_feature_bin(feature_dir / symbol.lower() / f"{field}.day.bin", start_idx, values)
 
     logger.info(
-        f"Manual Qlib data ready: calendar={len(calendar)}, instruments={len(inst)}, "
+        f"Manual Qlib data ready: calendar={len(calendar)}, instruments={len(instruments['all'])}, "
         f"fields={fields}, dir={target_dir}"
     )
 
@@ -115,6 +203,14 @@ def _convert(market: str, target_dir: Path, include_fields: str):
         WHERE symbol IN (SELECT symbol FROM stock_info WHERE country=?)
         ORDER BY symbol, date
     """, [market]).fetchdf()
+    membership_df = pd.DataFrame()
+    if market == "CN":
+        try:
+            from src.data_pipeline.index_membership import load_index_member_history
+
+            membership_df = load_index_member_history(conn, CN_INDEX_TO_INSTRUMENT)
+        except Exception as exc:
+            logger.warning(f"Index membership history unavailable; using broad instruments: {exc}")
     conn.close()
 
     if df.empty:
@@ -137,11 +233,14 @@ def _convert(market: str, target_dir: Path, include_fields: str):
 
     target_dir.mkdir(parents=True, exist_ok=True)
     ok = _dump_bin(csv_file, target_dir, include_fields)
+    instruments = build_dynamic_instruments(df, membership_df)
     if ok:
+        write_instrument_files(target_dir / "instruments", instruments)
         logger.info(f"Qlib {market} data ready at {target_dir}")
     else:
         logger.warning("Packaged Qlib dump_bin entrypoint is unavailable; using local file-storage writer.")
         _manual_dump_bin(df, target_dir, include_fields)
+        write_instrument_files(target_dir / "instruments", instruments)
 
 
 if __name__ == "__main__":

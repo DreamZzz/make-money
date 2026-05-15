@@ -237,6 +237,21 @@ def fetch_index_components(index_code: str) -> list[str]:
         return []
 
 
+def fetch_index_member_snapshot(index_code: str) -> pd.DataFrame:
+    """Fetch and normalize the dated CSIndex constituent snapshot."""
+    from src.data_pipeline.index_membership import normalize_index_constituent_snapshot
+
+    try:
+        df = ak.index_stock_cons_csindex(index_code)
+        if df.empty:
+            return _with_status(pd.DataFrame(), STATUS_EMPTY)
+        out = normalize_index_constituent_snapshot(index_code, df, source="csindex_snapshot")
+        return _with_status(out, STATUS_OK if not out.empty else STATUS_EMPTY)
+    except Exception as e:
+        logger.warning(f"Fetch CSIndex member snapshot failed for {index_code}: {e}")
+        return _with_status(pd.DataFrame(), STATUS_SOURCE_ERROR, str(e))
+
+
 def fetch_cn_financials(symbol: str) -> pd.DataFrame:
     """获取A股财务数据（资产负债表+利润表主要指标）"""
     try:

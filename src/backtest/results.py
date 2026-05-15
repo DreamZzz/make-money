@@ -90,6 +90,8 @@ def save_backtest_result(
     metrics: dict[str, Any],
     config_snapshot: Optional[dict[str, Any]] = None,
     run_id: Optional[str] = None,
+    engine: str = "unknown",
+    decision_scope: str = "decision",
 ) -> str:
     """Persist one backtest result row and return its run_id."""
     if not metrics:
@@ -103,11 +105,13 @@ def save_backtest_result(
         "run_id": run_id,
         "strategy_name": strategy_name,
         "market": market,
+        "engine": engine,
+        "decision_scope": decision_scope,
         "config_snapshot": snapshot,
         **metrics,
     }
     cols = [
-        "run_id", "strategy_name", "market", "start_date", "end_date",
+        "run_id", "strategy_name", "market", "engine", "decision_scope", "start_date", "end_date",
         "annual_return", "cumulative_return", "annual_volatility",
         "sharpe_ratio", "sortino_ratio", "max_drawdown",
         "max_drawdown_days", "win_rate", "avg_win_loss", "turnover",

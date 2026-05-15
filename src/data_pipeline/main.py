@@ -119,6 +119,65 @@ def _default_dates_yf(config: dict):
     return start_date, end_date
 
 
+def _cn_membership_snapshot_start(conn, fallback_start_date: str):
+    row = conn.execute("""
+        SELECT MIN(dp.trade_date)
+        FROM daily_price dp
+        JOIN stock_info si ON si.symbol = dp.symbol
+        WHERE si.country = 'CN'
+    """).fetchone()
+    if row and row[0]:
+        return row[0]
+    return pd.to_datetime(fallback_start_date).date()
+
+
+def _persist_index_member_snapshots(conn, memberships: dict[str, list[str]], fallback_start_date: str) -> int:
+    """Persist current CN index constituent snapshots as open-ended membership ranges."""
+    from src.data_pipeline.index_membership import reconcile_index_member_snapshot
+
+    snapshot_start = _cn_membership_snapshot_start(conn, fallback_start_date)
+    changed = 0
+    for index_code, symbols in memberships.items():
+        changed += reconcile_index_member_snapshot(
+            conn,
+            index_code,
+            symbols,
+            snapshot_start,
+            initial_start_date=snapshot_start,
+            source="akshare_snapshot",
+        )
+    return changed
+
+
+def _sync_index_member_history(conn, memberships: dict[str, list[str]], fallback_start_date: str) -> int:
+    """Sync CN index membership using dated CSIndex snapshots, with current-list fallback."""
+    from src.data_pipeline.index_membership import reconcile_index_member_snapshot
+
+    initial_start = _cn_membership_snapshot_start(conn, fallback_start_date)
+    changed = 0
+    for index_code, fallback_symbols in memberships.items():
+        snapshot = ak.fetch_index_member_snapshot(index_code)
+        if not snapshot.empty:
+            snapshot["start_date"] = pd.to_datetime(snapshot["start_date"]).dt.date
+            snapshot_date = max(snapshot["start_date"])
+            symbols = snapshot["symbol"].astype(str).tolist()
+            source = str(snapshot["source"].dropna().iloc[0]) if "source" in snapshot and snapshot["source"].notna().any() else "csindex_snapshot"
+        else:
+            snapshot_date = initial_start
+            symbols = fallback_symbols
+            source = "akshare_snapshot"
+
+        changed += reconcile_index_member_snapshot(
+            conn,
+            index_code,
+            symbols,
+            snapshot_date,
+            initial_start_date=initial_start,
+            source=source,
+        )
+    return changed
+
+
 def _chunks(items: list, size: int):
     size = max(int(size), 1)
     for i in range(0, len(items), size):
@@ -296,6 +355,12 @@ def init_all(conn, config: dict):
 
     start_date, end_date = _default_dates(config)
     start_date_yf, end_date_yf = _default_dates_yf(config)
+    member_rows = _sync_index_member_history(
+        conn,
+        {"000300": hs300_symbols, "000905": zz500_symbols},
+        start_date,
+    )
+    logger.info(f"Persisted index member snapshots: {member_rows} rows")
 
     # 5. 拉取 A股日线（yfinance 主通道，沪深300 + 中证500 合并股票池）
     logger.info(f"=== 初始化：拉取 A股日线 ({len(cn_symbols)} 只: 沪深300+中证500) ===")
@@ -391,7 +456,20 @@ def update_all(conn, config: dict):
         "hk_failed": 0,
         "index_updated": 0,
         "index_failed": 0,
+        "index_member_changed": 0,
     }
+    data_cfg = config.get("data", {})
+
+    if bool(data_cfg.get("sync_index_membership_on_update", False)):
+        try:
+            stats["index_member_changed"] = _sync_index_member_history(
+                conn,
+                {code: [] for code in CN_INDEX_AKSHARE},
+                start_date,
+            )
+            logger.info(f"Index member history sync changed {stats['index_member_changed']} rows")
+        except Exception as exc:
+            logger.warning(f"Index member history sync skipped: {exc}")
 
     # 只更新 daily_price 表中已有的股票
     cn_with_data = conn.execute(
@@ -419,7 +497,6 @@ def update_all(conn, config: dict):
     yfinance_cn_circuit_open = False
     akshare_cn_circuit_open = False
     akshare_consecutive_errors = 0
-    data_cfg = config.get("data", {})
     akshare_circuit_threshold = int(data_cfg.get("akshare_cn_error_circuit_threshold", 12))
     cn_backup_after_akshare_circuit = bool(data_cfg.get("cn_backup_after_akshare_circuit", True))
     cn_backup_batch_size = int(data_cfg.get("cn_backup_batch_size", 80))
@@ -571,7 +648,8 @@ def update_all(conn, config: dict):
         f"HK attempted={stats['hk_attempted']} updated={stats['hk_updated']} "
         f"no_data={stats['hk_no_data']} source_error={stats['hk_source_error']} failed={stats['hk_failed']} "
         f"(yf_rate_limited={stats['hk_yfinance_rate_limited']}) | "
-        f"index updated={stats['index_updated']} failed={stats['index_failed']}"
+        f"index updated={stats['index_updated']} failed={stats['index_failed']} "
+        f"members_changed={stats['index_member_changed']}"
     )
     _record_update_source_health(conn, run_id, run_started_at, stats)
     logger.info("=== 增量更新完成 ===")

@@ -84,7 +84,14 @@ def run_momentum_backtest(
             "momentum_topn",
             "CN",
             metrics,
-            {"lookback": lookback, "top_n": top_n, "rebalance_freq": rebalance_freq},
+            {
+                "lookback": lookback,
+                "top_n": top_n,
+                "rebalance_freq": rebalance_freq,
+                "source": "vectorbt_research",
+            },
+            engine="vectorbt",
+            decision_scope="research_only",
         )
     return metrics
 

@@ -20,6 +20,7 @@ from src.backtest.qlib_runner import (
     simulate_topn_open_constrained,
     simulate_topn_open,
     simulate_topn_t1_open,
+    train_alpha158,
 )
 from src.config import PROJECT_ROOT
 from src.data_pipeline.loader import init_db
@@ -855,6 +856,117 @@ def test_simulate_topn_open_supports_weekly_rebalance_frequency():
     assert returns.attrs["turnover"] is not None
 
 
+def test_simulate_topn_open_skips_cn_limit_open_candidate():
+    dates = pd.bdate_range("2024-01-02", periods=4)
+    pred = pd.DataFrame([
+        {"datetime": dates[0], "instrument": "000001", "score": 1.0},
+        {"datetime": dates[0], "instrument": "000002", "score": 0.5},
+    ])
+    prices = pd.DataFrame([
+        {
+            "trade_date": dates[0],
+            "symbol": symbol,
+            "open": 10.0,
+            "close": 10.0,
+            "pre_close": 10.0,
+            "is_st": False,
+            "is_suspended": False,
+        }
+        for symbol in ["000001", "000002"]
+    ] + [
+        {
+            "trade_date": dates[1],
+            "symbol": "000001",
+            "open": 11.0,
+            "close": 11.0,
+            "pre_close": 10.0,
+            "is_st": False,
+            "is_suspended": False,
+        },
+        {
+            "trade_date": dates[1],
+            "symbol": "000002",
+            "open": 10.0,
+            "close": 10.0,
+            "pre_close": 10.0,
+            "is_st": False,
+            "is_suspended": False,
+        },
+        {
+            "trade_date": dates[2],
+            "symbol": "000001",
+            "open": 12.0,
+            "close": 12.0,
+            "pre_close": 11.0,
+            "is_st": False,
+            "is_suspended": False,
+        },
+        {
+            "trade_date": dates[2],
+            "symbol": "000002",
+            "open": 12.0,
+            "close": 12.0,
+            "pre_close": 11.0,
+            "is_st": False,
+            "is_suspended": False,
+        },
+    ])
+
+    returns = simulate_topn_open(
+        pred,
+        prices,
+        top_n=1,
+        holding_days=1,
+        commission_rate=0,
+        stamp_duty_rate=0,
+    )
+
+    assert len(returns) == 1
+    assert returns.iloc[0] == pytest.approx(0.2)
+
+
+def test_simulate_topn_open_constrained_counts_untradeable_candidates():
+    dates = pd.bdate_range("2024-01-02", periods=4)
+    pred = pd.DataFrame([
+        {"datetime": dates[0], "instrument": "000001", "score": 1.0},
+        {"datetime": dates[0], "instrument": "000002", "score": 0.5},
+    ])
+    prices = pd.DataFrame([
+        {
+            "trade_date": dt,
+            "symbol": symbol,
+            "open": open_price,
+            "close": open_price,
+            "pre_close": pre_close,
+            "is_st": False,
+            "is_suspended": False,
+        }
+        for dt, symbol, open_price, pre_close in [
+            (dates[0], "000001", 10.0, 10.0),
+            (dates[0], "000002", 10.0, 10.0),
+            (dates[1], "000001", 11.0, 10.0),
+            (dates[1], "000002", 10.0, 10.0),
+            (dates[2], "000001", 12.0, 11.0),
+            (dates[2], "000002", 12.0, 11.0),
+        ]
+    ])
+
+    returns = simulate_topn_open_constrained(
+        pred,
+        prices,
+        top_n=1,
+        holding_days=1,
+        account_capital=100_000,
+        max_position_pct=0.5,
+        cash_reserve_pct=0,
+        commission_rate=0,
+        stamp_duty_rate=0,
+    )
+
+    assert len(returns) == 1
+    assert returns.attrs["skipped_untradeable_avg"] == pytest.approx(1.0)
+
+
 def test_qlib_grid_skips_overlapping_weekly_holding_windows():
     assert _valid_rebalance_horizon("weekly", 5)
     assert not _valid_rebalance_horizon("weekly", 6)
@@ -984,6 +1096,12 @@ def test_production_walk_forward_inference_uses_latest_year_fold():
         "test_start": "2026-01-01",
         "test_end": "2026-05-14",
     }
+
+
+def test_alpha158_default_universe_is_csi800():
+    import inspect
+
+    assert inspect.signature(train_alpha158).parameters["market"].default == "csi800"
 
 
 def test_persist_prediction_frame_upserts_latest_production_scores():

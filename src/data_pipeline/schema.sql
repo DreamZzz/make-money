@@ -88,6 +88,20 @@ CREATE TABLE IF NOT EXISTS index_daily (
 );
 
 -- ============================================
+-- 3b. 指数历史成分表
+-- ============================================
+CREATE TABLE IF NOT EXISTS index_member_history (
+    index_code      VARCHAR NOT NULL,        -- 指数代码: 000300 / 000905 / HSI / HSTECH
+    symbol          VARCHAR NOT NULL,
+    start_date      DATE NOT NULL,
+    end_date        DATE,
+    source          VARCHAR,                 -- historical / akshare_snapshot 等
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (index_code, symbol, start_date)
+);
+
+-- ============================================
 -- 4. 财务数据表（季度）
 -- ============================================
 CREATE TABLE IF NOT EXISTS financials (
@@ -183,6 +197,8 @@ CREATE TABLE IF NOT EXISTS backtest_results (
     run_id          VARCHAR NOT NULL,        -- 回测运行ID
     strategy_name   VARCHAR NOT NULL,
     market          VARCHAR NOT NULL,        -- CN / HK / combined
+    engine          VARCHAR DEFAULT 'unknown', -- qlib / vectorbt / rule
+    decision_scope  VARCHAR DEFAULT 'decision', -- decision / research_only
     start_date      DATE NOT NULL,
     end_date        DATE NOT NULL,
     annual_return   DOUBLE,                  -- 年化收益率

@@ -18,6 +18,7 @@ from src.dashboard.qlib_rule_pk_service import (
     resolve_champion_experiment,
 )
 from src.dashboard.qlib_report_service import (
+    add_rolling_ic_columns,
     load_experiment_report,
     parse_json_dict,
     prepare_experiment_frame,
@@ -636,11 +637,26 @@ def show_ic_analysis():
     if daily.empty:
         st.info("该实验暂无日度 IC 明细。")
         return
-    daily["metric_date"] = pd.to_datetime(daily["metric_date"])
+    daily = add_rolling_ic_columns(daily)
     daily["cum_rank_ic"] = daily["rank_ic"].fillna(0).cumsum()
+
+    latest = daily.iloc[-1]
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Rank IC 30日", _num(latest.get("rank_ic_ma30"), 4))
+    c2.metric("Rank IC 60日", _num(latest.get("rank_ic_ma60"), 4))
+    c3.metric("Rank IC 180日", _num(latest.get("rank_ic_ma180"), 4))
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=daily["metric_date"], y=daily["rank_ic"], mode="lines", name="Rank IC"))
+    for window in (30, 60, 180):
+        col = f"rank_ic_ma{window}"
+        if col in daily.columns:
+            fig.add_trace(go.Scatter(
+                x=daily["metric_date"],
+                y=daily[col],
+                mode="lines",
+                name=f"Rank IC {window}日均值",
+            ))
     fig.add_trace(go.Scatter(x=daily["metric_date"], y=daily["cum_rank_ic"], mode="lines", name="累计 Rank IC", yaxis="y2"))
     fig.update_layout(
         height=360,

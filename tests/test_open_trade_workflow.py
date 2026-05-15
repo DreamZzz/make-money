@@ -91,12 +91,12 @@ def test_paper_engine_rolls_back_signal_status_when_batch_fails(monkeypatch, tmp
     db_path = _patch_temp_db(monkeypatch, tmp_path)
     _seed_paper_engine_failure_db(db_path)
 
-    def flaky_open_price(_conn, symbol, _trade_date):
+    def flaky_open_quote(_conn, symbol, _trade_date):
         if symbol == "000002":
             raise RuntimeError("price source exploded")
-        return 10.0
+        return {"open": 10.0, "pre_close": 10.0, "is_st": False, "is_suspended": False}
 
-    monkeypatch.setattr(pe, "_get_open_price", flaky_open_price)
+    monkeypatch.setattr(pe, "_get_open_quote", flaky_open_quote)
 
     with pytest.raises(RuntimeError, match="price source exploded"):
         pe.run("trend_following", market="CN")
@@ -159,6 +159,56 @@ def test_paper_engine_marks_unaffordable_lot_as_no_action(monkeypatch, tmp_path)
     assert row[1] == "NO_ACTION"
     assert "不足一手" in row[2]
     assert row[3] == date(2024, 1, 3)
+
+
+def test_paper_engine_marks_cn_limit_open_as_no_action(monkeypatch, tmp_path):
+    db_path = _patch_temp_db(monkeypatch, tmp_path)
+    conn = duckdb.connect(db_path)
+    init_db(conn)
+    conn.execute("INSERT INTO stock_info (symbol, country, name) VALUES ('000001', 'CN', '涨停股')")
+    conn.execute("""
+        INSERT INTO daily_price (symbol, trade_date, open, high, low, close, pre_close, volume)
+        VALUES ('000001', DATE '2024-01-03', 11, 11, 11, 11, 10, 1000)
+    """)
+    conn.execute("""
+        INSERT INTO account_daily (
+            account_id, trade_date, cash, position_value, total_value,
+            net_contribution, nav, daily_return, drawdown
+        )
+        VALUES ('default', DATE '2024-01-02', 100000, 0, 100000, 100000, 1, 0, 0)
+    """)
+    conn.execute("""
+        INSERT INTO signals (
+            signal_id, model_name, model_version, symbol, signal_ts,
+            side, score, confidence, max_position_pct, executed, status
+        )
+        VALUES ('limit_buy', 'alpha158', '1.0', '000001',
+                TIMESTAMP '2024-01-02 15:00:00', 'BUY', 1, 1, 0.10, FALSE, 'ACTIVE')
+    """)
+    conn.close()
+
+    result = pe.run("alpha158", market="CN")
+
+    assert result["executed"] == 0
+    assert result["skipped_untradeable"] == 1
+    assert result["handled_without_order"] == 1
+    assert result["pending"] == 0
+
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        signal = conn.execute("""
+            SELECT executed, status, status_reason, execution_date
+            FROM signals WHERE signal_id='limit_buy'
+        """).fetchone()
+        orders = conn.execute("SELECT COUNT(*) FROM paper_orders WHERE signal_id='limit_buy'").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert signal[0] is True
+    assert signal[1] == "NO_ACTION"
+    assert "涨跌停" in signal[2]
+    assert signal[3] == date(2024, 1, 3)
+    assert orders == 0
 
 
 def test_prioritize_signals_releases_cash_before_older_buys():

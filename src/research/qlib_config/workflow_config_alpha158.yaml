@@ -5,7 +5,7 @@ qlib_init:
     provider_uri: "qlib_data/cn_data"
     region: cn
 
-market: &market csi300
+market: &market csi800
 
 data_handler_config: &data_handler_config
     start_time: 2019-01-01

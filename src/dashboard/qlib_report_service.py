@@ -29,6 +29,22 @@ METRIC_COLUMNS = [
 ]
 
 
+def add_rolling_ic_columns(daily: pd.DataFrame, windows: tuple[int, ...] = (30, 60, 180)) -> pd.DataFrame:
+    """Append rolling IC/RankIC decay columns for Dashboard monitoring."""
+    if daily.empty:
+        return daily.copy()
+    out = daily.copy()
+    out["metric_date"] = pd.to_datetime(out["metric_date"])
+    out = out.sort_values("metric_date").reset_index(drop=True)
+    for metric in ("rank_ic", "ic"):
+        if metric not in out.columns:
+            continue
+        values = pd.to_numeric(out[metric], errors="coerce")
+        for window in windows:
+            out[f"{metric}_ma{window}"] = values.rolling(window=window, min_periods=1).mean()
+    return out
+
+
 METRIC_HIGHLIGHT_STANDARDS = [
     {
         "metric": "annual_return",

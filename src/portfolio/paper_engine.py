@@ -9,6 +9,8 @@ import duckdb
 import pandas as pd
 from loguru import logger
 
+from src.portfolio.execution_guards import check_open_tradeable
+
 
 def _load_config():
     from src.config import load_config
@@ -35,21 +37,39 @@ def _get_next_trading_day(conn: duckdb.DuckDBPyConnection, signal_date: date, ma
 
 def _get_open_price(conn: duckdb.DuckDBPyConnection, symbol: str, trade_date: date) -> Optional[float]:
     """获取某股票在某日的开盘价，盘中优先使用快照表，日线作为兜底。"""
+    quote = _get_open_quote(conn, symbol, trade_date)
+    return quote["open"] if quote else None
+
+
+def _get_open_quote(conn: duckdb.DuckDBPyConnection, symbol: str, trade_date: date) -> Optional[dict]:
+    """获取某股票在某日的开盘成交判断所需行情。"""
     result = conn.execute("""
-        SELECT open
+        SELECT q.open,
+               q.pre_close,
+               COALESCE(dp.is_st, FALSE) AS is_st,
+               COALESCE(q.is_suspended, dp.is_suspended, FALSE) AS is_suspended
         FROM (
-            SELECT open, 1 AS priority
+            SELECT open, prev_close AS pre_close, is_suspended, 1 AS priority
             FROM market_snapshot
             WHERE symbol = ? AND trade_date = ? AND open IS NOT NULL
             UNION ALL
-            SELECT open, 2 AS priority
+            SELECT open, pre_close, is_suspended, 2 AS priority
             FROM daily_price
             WHERE symbol = ? AND trade_date = ? AND open IS NOT NULL
-        )
-        ORDER BY priority
+        ) q
+        LEFT JOIN daily_price dp
+          ON dp.symbol = ? AND dp.trade_date = ?
+        ORDER BY q.priority
         LIMIT 1
-    """, [symbol, trade_date, symbol, trade_date]).fetchone()
-    return result[0] if result else None
+    """, [symbol, trade_date, symbol, trade_date, symbol, trade_date]).fetchone()
+    if not result:
+        return None
+    return {
+        "open": result[0],
+        "pre_close": result[1],
+        "is_st": bool(result[2]),
+        "is_suspended": bool(result[3]),
+    }
 
 
 def _execution_timestamp(conn: duckdb.DuckDBPyConnection, trade_date: date, market: str) -> datetime:
@@ -163,6 +183,7 @@ def _new_result(total: int = 0) -> dict:
         "skipped_cash": 0,
         "skipped_threshold": 0,
         "skipped_lot": 0,
+        "skipped_untradeable": 0,
     }
 
 
@@ -246,10 +267,30 @@ def _run_signal_batch(
                     logger.info(f"  跳过 {sym} {side}：当前无持仓，信号已按无需动作处理")
                     continue
 
-            price = _get_open_price(conn, sym, next_day)
+            quote = _get_open_quote(conn, sym, next_day)
+            price = quote["open"] if quote else None
             if price is None or price <= 0:
                 stats["skipped_no_price"] += 1
                 logger.warning(f"No open price for {sym} on {next_day}")
+                continue
+            tradeability = check_open_tradeable(
+                price,
+                quote.get("pre_close"),
+                market=signal_market,
+                is_st=quote.get("is_st"),
+                is_suspended=quote.get("is_suspended"),
+            )
+            if not tradeability.tradeable:
+                stats["skipped_untradeable"] += 1
+                _mark_signal_handled(
+                    conn,
+                    sig["signal_id"],
+                    next_day,
+                    status="NO_ACTION",
+                    status_reason=tradeability.reason or "开盘不可成交",
+                )
+                stats["handled_without_order"] += 1
+                logger.info(f"  跳过 {sym} {side}：{tradeability.reason}")
                 continue
 
             max_position = sig["max_position_pct"] if sig["max_position_pct"] else 0.05

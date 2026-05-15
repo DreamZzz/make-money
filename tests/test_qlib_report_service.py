@@ -1,9 +1,11 @@
 import json
 
 import duckdb
+import pandas as pd
 import pytest
 
 from src.dashboard.qlib_report_service import (
+    add_rolling_ic_columns,
     get_metric_glossary,
     get_metric_highlight_standards,
     load_experiment_report,
@@ -65,6 +67,20 @@ def test_qlib_report_flattens_experiment_metrics_and_benchmarks():
     assert report["summary"]["experiment_count"] == 1
     assert report["summary"]["succeeded_count"] == 1
     conn.close()
+
+
+def test_add_rolling_ic_columns_creates_decay_windows():
+    daily = pd.DataFrame({
+        "metric_date": pd.date_range("2024-01-01", periods=65),
+        "rank_ic": [0.01] * 30 + [0.03] * 35,
+        "ic": [0.02] * 65,
+    })
+
+    out = add_rolling_ic_columns(daily)
+
+    assert {"rank_ic_ma30", "rank_ic_ma60", "rank_ic_ma180", "ic_ma30", "ic_ma60", "ic_ma180"}.issubset(out.columns)
+    assert out.iloc[-1]["rank_ic_ma30"] == pytest.approx(0.03)
+    assert out.iloc[-1]["rank_ic_ma60"] > out.iloc[29]["rank_ic_ma60"]
 
 
 def test_qlib_report_selects_production_friendly_grid_best():
