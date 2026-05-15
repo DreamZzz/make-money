@@ -2,7 +2,6 @@
 Vectorbt 回测 Runner — 独立验证工具，避免单一框架偏差。
 日频/周频向量化回测，速度快，适合快速迭代。
 """
-from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -16,7 +15,7 @@ def _load_price_data(market: str = "cn") -> pd.DataFrame:
     from src.data_pipeline.loader import get_connection
     conn = get_connection(read_only=True)
 
-    df = conn.execute(f"""
+    df = conn.execute("""
         SELECT symbol, trade_date, close, open, high, low, volume
         FROM daily_price
         WHERE symbol IN (SELECT symbol FROM stock_info WHERE country = ?)

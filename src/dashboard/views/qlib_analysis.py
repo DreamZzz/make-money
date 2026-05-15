@@ -11,17 +11,17 @@ import streamlit as st
 
 from src.config import PROJECT_ROOT
 from src.dashboard.db import DuckDBError, db_error_widget, get_conn, query_df, query_one
-from src.dashboard.qlib_rule_pk_service import (
-    evaluate_ab_tracking,
-    load_rule_qlib_pk,
-    record_ab_snapshot,
-    resolve_champion_experiment,
-)
 from src.dashboard.qlib_report_service import (
     add_rolling_ic_columns,
     load_experiment_report,
     parse_json_dict,
     prepare_experiment_frame,
+)
+from src.dashboard.qlib_rule_pk_service import (
+    evaluate_ab_tracking,
+    load_rule_qlib_pk,
+    record_ab_snapshot,
+    resolve_champion_experiment,
 )
 
 

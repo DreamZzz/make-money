@@ -2,7 +2,7 @@
 import json
 import uuid
 from datetime import date, datetime
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -14,9 +14,9 @@ def _to_date(value) -> date:
 
 def compute_metrics(
     returns: pd.Series,
-    benchmark_returns: Optional[pd.Series] = None,
+    benchmark_returns: pd.Series | None = None,
     risk_free_rate: float = 0.03,
-    turnover: Optional[float] = None,
+    turnover: float | None = None,
 ) -> dict[str, Any]:
     """Compute the common metrics expected by backtest_results."""
     returns = pd.Series(returns).dropna()
@@ -88,8 +88,8 @@ def save_backtest_result(
     strategy_name: str,
     market: str,
     metrics: dict[str, Any],
-    config_snapshot: Optional[dict[str, Any]] = None,
-    run_id: Optional[str] = None,
+    config_snapshot: dict[str, Any] | None = None,
+    run_id: str | None = None,
     engine: str = "unknown",
     decision_scope: str = "decision",
 ) -> str:
@@ -117,10 +117,10 @@ def save_backtest_result(
         "max_drawdown_days", "win_rate", "avg_win_loss", "turnover",
         "info_ratio", "benchmark_return", "excess_return", "config_snapshot",
     ]
-    df = pd.DataFrame([{col: row.get(col) for col in cols}])
     conn = get_connection()
     try:
-        conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_backtest_result AS SELECT * FROM df")
+        conn.register("_tmp_backtest_result_df", pd.DataFrame([{col: row.get(col) for col in cols}]))
+        conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_backtest_result AS SELECT * FROM _tmp_backtest_result_df")
         conn.execute(f"""
             INSERT OR REPLACE INTO backtest_results ({", ".join(cols)})
             SELECT {", ".join(cols)} FROM _tmp_backtest_result

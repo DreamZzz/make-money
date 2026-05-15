@@ -46,10 +46,10 @@ def mean_variance_optimize(returns: pd.DataFrame, signals_buy: pd.DataFrame,
     均值方差优化（PyPortfolioOpt）。
     """
     try:
-        from pypfopt.expected_returns import mean_historical_return
-        from pypfopt.risk_models import sample_cov
         from pypfopt.efficient_frontier import EfficientFrontier
+        from pypfopt.expected_returns import mean_historical_return
         from pypfopt.objective import objective_functions
+        from pypfopt.risk_models import sample_cov
 
         symbols = signals_buy["symbol"].tolist()
         available = [s for s in symbols if s in returns.columns]

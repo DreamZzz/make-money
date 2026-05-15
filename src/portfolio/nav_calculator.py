@@ -13,7 +13,6 @@
 import math
 from collections import defaultdict
 from datetime import date as DateType
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -25,7 +24,7 @@ def _default_initial_capital(config: dict, market: str) -> float:
     return float(config.get("portfolio", {}).get(key, 100000.0))
 
 
-def calculate(strategy_name: str, initial_capital: Optional[float] = None,
+def calculate(strategy_name: str, initial_capital: float | None = None,
               market: str = "CN") -> pd.DataFrame:
     """
     计算策略逐日净值。
@@ -259,11 +258,12 @@ def calculate(strategy_name: str, initial_capital: Optional[float] = None,
     # ---- 6. 写入数据库 ----
     if nav_rows:
         conn_w = get_connection()
-        df_nav = pd.DataFrame(nav_rows)
-        df_pos = pd.DataFrame(position_rows)
+        positions_df = pd.DataFrame(position_rows)
+        conn_w.register("_tmp_nav_df", pd.DataFrame(nav_rows))
+        conn_w.register("_tmp_positions_df", positions_df)
         conn_w.execute("DELETE FROM portfolio_nav WHERE strategy_name = ?", [strategy_name])
         conn_w.execute("DELETE FROM paper_positions WHERE strategy_name = ?", [strategy_name])
-        conn_w.execute("CREATE OR REPLACE TEMP TABLE _tmp_nav AS SELECT * FROM df_nav")
+        conn_w.execute("CREATE OR REPLACE TEMP TABLE _tmp_nav AS SELECT * FROM _tmp_nav_df")
         conn_w.execute("""
             INSERT OR REPLACE INTO portfolio_nav (
                 strategy_name, trade_date, nav, daily_return, cash, position_value,
@@ -275,8 +275,8 @@ def calculate(strategy_name: str, initial_capital: Optional[float] = None,
                    drawdown, sharpe_rolling
             FROM _tmp_nav
         """)
-        if not df_pos.empty:
-            conn_w.execute("CREATE OR REPLACE TEMP TABLE _tmp_positions AS SELECT * FROM df_pos")
+        if not positions_df.empty:
+            conn_w.execute("CREATE OR REPLACE TEMP TABLE _tmp_positions AS SELECT * FROM _tmp_positions_df")
             conn_w.execute("""
                 INSERT OR REPLACE INTO paper_positions (
                     strategy_name, trade_date, symbol, quantity, avg_cost, current_price,

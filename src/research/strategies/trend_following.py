@@ -6,7 +6,6 @@ import math
 
 import numpy as np
 import pandas as pd
-from loguru import logger
 
 _SCORE_NORM = math.log1p(20)  # 20% MA 偏离度 = 满分 1.0
 
@@ -56,8 +55,8 @@ def compute_signals(
 
     if highs is not None and lows is not None:
         h = highs.reindex(columns=prices.columns)
-        l = lows.reindex(columns=prices.columns)
-        atr = _compute_atr(prices, h, l, atr_period)
+        low_prices = lows.reindex(columns=prices.columns)
+        atr = _compute_atr(prices, h, low_prices, atr_period)
     else:
         atr = prices.diff().abs().rolling(atr_period).mean()
 

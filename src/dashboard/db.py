@@ -5,7 +5,7 @@
 """
 import re
 import time
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 import duckdb
 import pandas as pd
@@ -35,7 +35,7 @@ def get_conn() -> duckdb.DuckDBPyConnection:
                 raise
 
 
-def query_df(sql: str, params: Optional[Sequence] = None) -> pd.DataFrame:
+def query_df(sql: str, params: Sequence | None = None) -> pd.DataFrame:
     """执行只读查询并立即关闭连接，避免 Streamlit 长时间持有 DuckDB 连接。"""
     conn = get_conn()
     try:
@@ -44,7 +44,7 @@ def query_df(sql: str, params: Optional[Sequence] = None) -> pd.DataFrame:
         conn.close()
 
 
-def query_one(sql: str, params: Optional[Sequence] = None):
+def query_one(sql: str, params: Sequence | None = None):
     """执行只读标量/单行查询并立即关闭连接。"""
     conn = get_conn()
     try:

@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Iterable
 from datetime import date
-from typing import Any, Iterable
+from typing import Any
 
 import pandas as pd
-
 
 RULE_MODEL_NAMES = ("trend_following", "mean_reversion", "industry_rotation")
 DEFAULT_HORIZONS = (1, 5, 10)
@@ -733,7 +733,7 @@ def main(argv: list[str] | None = None) -> int:
     p_record = sub.add_parser("record-ab", help="记录今日规则/Qlib 影子 A/B 样本")
     p_record.add_argument("--top-n", type=int, default=None)
     p_record.add_argument("--experiment-id", default=None)
-    p_eval = sub.add_parser("evaluate-ab", help="汇总 A/B 影子跟踪表现")
+    sub.add_parser("evaluate-ab", help="汇总 A/B 影子跟踪表现")
     args = parser.parse_args(argv)
 
     from src.data_pipeline.loader import get_connection, init_db

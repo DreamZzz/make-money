@@ -27,7 +27,7 @@ def load_all_results(include_research: bool = False) -> pd.DataFrame:
     scope_expr = _decision_scope_expr("decision_scope" in table_cols)
     engine_expr = "COALESCE(engine, 'unknown')" if "engine" in table_cols else "'unknown'"
     scope_filter = "" if include_research else f"WHERE {scope_expr} = 'decision'"
-    df = conn.execute("""
+    df = conn.execute(f"""
         SELECT strategy_name, market, start_date, end_date,
                {engine_expr} AS engine,
                {scope_expr} AS decision_scope,
@@ -38,7 +38,7 @@ def load_all_results(include_research: bool = False) -> pd.DataFrame:
         FROM backtest_results
         {scope_filter}
         ORDER BY strategy_name, start_date DESC
-    """.format(engine_expr=engine_expr, scope_expr=scope_expr, scope_filter=scope_filter)).fetchdf()
+    """).fetchdf()
     conn.close()
     return df
 
@@ -99,9 +99,9 @@ def generate_report(output_dir: str = None) -> str:
         f"# 策略对比报告 — {datetime.now().strftime('%Y-%m-%d')}",
         "",
         "## 回测配置",
-        f"- 股票池: 沪深300 + 恒生指数成分股",
-        f"- 时间窗口: train 2019-2022 / valid 2023 / test 2024-至今",
-        f"- 成本模型: 见 config/settings.yaml",
+        "- 股票池: 沪深300 + 恒生指数成分股",
+        "- 时间窗口: train 2019-2022 / valid 2023 / test 2024-至今",
+        "- 成本模型: 见 config/settings.yaml",
         "",
         "## 策略对比",
         "",

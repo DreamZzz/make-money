@@ -53,3 +53,11 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP"]
+# Baseline debt to clean incrementally: script-style sys.path bootstraps and long dashboard/UI strings.
+ignore = ["E402", "E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Existing local edits in this file keep Python 3.9-style Optional annotations; clean once that work is reconciled.
+"src/dashboard/job_manager.py" = ["UP045"]
+# Runtime compatibility shim for accidental Python 3.9 execution on macOS system Python.
+"src/data_pipeline/main.py" = ["UP036"]

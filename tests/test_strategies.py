@@ -1,22 +1,19 @@
 """核心策略模块单元测试"""
-import math
-from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from src.config import _deep_merge
+from src.portfolio.risk_rules import RiskLimits, check_drawdown, check_position_limits
 from src.research.strategies.mean_reversion import (
-    compute_rsi,
-    compute_bollinger,
-    generate_signals,
     _apply_min_days_between,
+    compute_bollinger,
+    compute_rsi,
+    generate_signals,
 )
 from src.research.strategies.trend_following import compute_signals as trend_compute_signals
-from src.portfolio.risk_rules import RiskLimits, check_drawdown, check_position_limits
-from src.signals.generator import apply_filters, merge_signals
-from src.config import _deep_merge
-
+from src.signals.generator import apply_filters
 
 # ─── 辅助数据 ───────────────────────────────────────────────────────────────
 

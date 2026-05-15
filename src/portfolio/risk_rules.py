@@ -2,9 +2,7 @@
 风控规则 — 回撤止损、单标的上限、行业上限、最大杠杆控制。
 """
 from dataclasses import dataclass, field
-from typing import Optional
 
-import numpy as np
 import pandas as pd
 from loguru import logger
 

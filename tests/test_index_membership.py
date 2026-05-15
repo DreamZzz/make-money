@@ -3,16 +3,16 @@ from datetime import date
 import duckdb
 import pandas as pd
 
-from src.data_pipeline.loader import init_db
+from scripts.convert_to_qlib import build_dynamic_instruments, write_instrument_files
 from src.data_pipeline.index_membership import (
     active_members,
-    normalize_index_constituent_snapshot,
     merge_membership_ranges,
     normalize_current_snapshot,
+    normalize_index_constituent_snapshot,
     reconcile_index_member_snapshot,
 )
+from src.data_pipeline.loader import init_db
 from src.data_pipeline.main import _persist_index_member_snapshots, _sync_index_member_history
-from scripts.convert_to_qlib import build_dynamic_instruments, write_instrument_files
 
 
 def test_normalize_current_snapshot_uses_price_start_as_snapshot_start():

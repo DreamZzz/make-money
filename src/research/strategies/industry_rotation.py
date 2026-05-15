@@ -2,7 +2,6 @@
 行业轮动策略 — 基于行业动量 + 估值轮动。
 每月计算行业收益率和估值分位数，买入强势+低估行业。
 """
-import numpy as np
 import pandas as pd
 from loguru import logger
 

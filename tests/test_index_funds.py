@@ -4,12 +4,11 @@ import duckdb
 import pandas as pd
 import pytest
 
-from src.data_pipeline.loader import init_db, upsert_fund_info, upsert_fund_nav
 from src.config import DEFAULT_CONFIG
+from src.data_pipeline.loader import init_db, upsert_fund_info, upsert_fund_nav
 from src.index_funds.config import FundWatchItem, get_watchlist
 from src.index_funds.performance import compute_max_drawdown, evaluate_holdings
 from src.index_funds.signals import calculate_signal
-
 
 RULES = {
     "valuation_window_days": 30,

@@ -1,12 +1,11 @@
 """Index membership history helpers."""
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import date, timedelta
-from typing import Iterable, Optional
 
 import duckdb
 import pandas as pd
-
 
 MEMBERSHIP_COLUMNS = ["index_code", "symbol", "start_date", "end_date", "source"]
 SYMBOL_COLUMNS = ("成分券代码", "品种代码", "symbol", "code", "证券代码")
@@ -192,7 +191,7 @@ def upsert_index_member_history(conn: duckdb.DuckDBPyConnection, df: pd.DataFram
 
 def load_index_member_history(
     conn: duckdb.DuckDBPyConnection,
-    index_codes: Optional[Iterable[str]] = None,
+    index_codes: Iterable[str] | None = None,
 ) -> pd.DataFrame:
     """Load membership history, optionally filtered by index code."""
     params: list[object] = []

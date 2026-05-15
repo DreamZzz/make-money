@@ -2,12 +2,10 @@
 AkShare 数据采集器 — A股/港股行情、基本信息、财务数据。
 AkShare 接口可能随版本变动，捕获异常时自动降级。
 """
-import time
 import os
 import random
 import threading
-from datetime import date, timedelta
-from typing import Optional
+import time
 
 import akshare as ak
 import pandas as pd

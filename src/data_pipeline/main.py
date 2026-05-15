@@ -13,7 +13,7 @@ import click
 import pandas as pd
 from loguru import logger
 
-from src.config import DATA_QUALITY_RULES, PROJECT_ROOT, load_config
+from src.config import DATA_QUALITY_RULES, load_config
 
 # 绕过代理访问金融数据 API（如果代理拦截了 *.eastmoney.com / 东方财富）
 _NO_PROXY_DOMAINS = "eastmoney.com,push2his.eastmoney.com,yahoo.com,github.com,wikipedia.org"
@@ -57,7 +57,6 @@ from src.data_pipeline.fetchers import akshare_fetcher as ak
 from src.data_pipeline.fetchers import yfinance_fetcher as yf
 from src.data_pipeline.loader import (
     build_market_snapshot_from_daily,
-    get_all_symbols,
     get_connection,
     get_last_trade_date,
     init_db,
@@ -660,8 +659,8 @@ def _write_quality_status(conn, rows: list[dict]) -> None:
     """Persist the latest structured data-quality check."""
     if not rows:
         return
-    df_quality = pd.DataFrame(rows)
-    conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_quality AS SELECT * FROM df_quality")
+    conn.register("_tmp_quality_df", pd.DataFrame(rows))
+    conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_quality AS SELECT * FROM _tmp_quality_df")
     conn.execute("DELETE FROM data_quality_status")
     conn.execute("""
         INSERT INTO data_quality_status (check_ts, status, metric, value, threshold, detail)
@@ -767,7 +766,7 @@ def check_data(conn, _config: dict, full: bool = False):
             if extra_cn:
                 logger.info(f"  ℹ️  DB多余 {len(extra_cn)} 只(非当前成分股)")
             if not missing_cn:
-                logger.info(f"  ✅ A股成分股全覆盖")
+                logger.info("  ✅ A股成分股全覆盖")
 
             # 港股 - 用硬编码备选列表对比
             hsi = set(_HSI_FALLBACK)
@@ -780,7 +779,7 @@ def check_data(conn, _config: dict, full: bool = False):
             if missing_hk:
                 logger.warning(f"  ❌ 港股缺失 {len(missing_hk)} 只: {sorted(missing_hk)}")
             else:
-                logger.info(f"  ✅ 港股成分股全覆盖")
+                logger.info("  ✅ 港股成分股全覆盖")
         except Exception as e:
             logger.warning(f"  成分股对比不可用 (AkShare 网络问题): {e}")
 

@@ -2,15 +2,15 @@
 import sys
 from datetime import date
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from src.dashboard.db import query_df, db_error_widget, DuckDBError
+from src.dashboard.db import DuckDBError, db_error_widget, query_df
 
 
 def show_cash_account():
@@ -22,8 +22,6 @@ def show_cash_account():
 
     summary = get_account_summary()
     cashflows = load_cashflows()
-    deposits = cashflows.loc[cashflows["flow_type"] == "DEPOSIT", "amount"].sum() if not cashflows.empty else 0.0
-    withdrawals = cashflows.loc[cashflows["flow_type"] == "WITHDRAW", "amount"].sum() if not cashflows.empty else 0.0
     investment_pnl = float(summary.get("total_value") or 0) - float(summary.get("net_contribution") or 0)
 
     c1, c2, c3, c4, c5 = st.columns(5)

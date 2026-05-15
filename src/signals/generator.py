@@ -139,9 +139,9 @@ def generate_all(price_data: pd.DataFrame = None,
                        False 时输出所有日期信号（研究/回测用）。
         如不提供 price_data 则从 DuckDB 加载。
     """
-    from src.research.strategies.trend_following import compute_signals as trend_signals
-    from src.research.strategies.mean_reversion import generate_signals as mean_rev_signals
     from src.research.strategies.industry_rotation import generate_rotation_signals as ind_rot_signals
+    from src.research.strategies.mean_reversion import generate_signals as mean_rev_signals
+    from src.research.strategies.trend_following import compute_signals as trend_signals
 
     if price_data is None:
         from src.data_pipeline.loader import get_connection

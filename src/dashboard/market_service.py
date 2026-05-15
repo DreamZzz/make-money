@@ -5,8 +5,9 @@ depend on Streamlit, so calculations are testable with an in-memory DuckDB.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date
-from typing import Any, Sequence
+from typing import Any
 
 import pandas as pd
 

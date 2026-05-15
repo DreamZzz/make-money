@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """补全缺失的股票日线数据。只拉已有 index 成分股中缺失的。"""
-import sys, time
+import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data_pipeline.loader import get_connection, upsert_daily_price
-from src.data_pipeline.fetchers import yfinance_fetcher as yf
 from datetime import date, timedelta
+
+from src.data_pipeline.fetchers import yfinance_fetcher as yf
+from src.data_pipeline.loader import get_connection, upsert_daily_price
 
 conn = get_connection()
 
@@ -17,6 +19,7 @@ existing = {r[0] for r in conn.execute(
 ).fetchall()}
 
 import akshare as ak
+
 hs300 = set(ak.index_stock_cons("000300")["品种代码"].astype(str))
 zz500 = set(ak.index_stock_cons("000905")["品种代码"].astype(str))
 target_cn = hs300 | zz500
@@ -29,6 +32,7 @@ existing_hk = {r[0] for r in conn.execute(
 
 # 恒指 + 恒生科技 硬编码备选（从 main.py 同步）
 from src.data_pipeline.main import _HSI_FALLBACK
+
 hsi = set(_HSI_FALLBACK)
 hstech = set("00700,09988,03690,01810,09618,09999,09888,09961,02015,01024,00981,02382,06618,09626,00992,01347,01833,02018,03888,09633".split(","))
 target_hk = hsi | hstech

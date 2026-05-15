@@ -3,7 +3,6 @@ Paper Trading 引擎 — 信号→订单→持仓。
 模拟 T日信号 → T+1日开盘价成交，扣除佣金/印花税。
 """
 from datetime import date, datetime, time, timedelta
-from typing import Optional
 
 import duckdb
 import pandas as pd
@@ -17,7 +16,7 @@ def _load_config():
     return load_config()
 
 
-def _get_next_trading_day(conn: duckdb.DuckDBPyConnection, signal_date: date, market: str) -> Optional[date]:
+def _get_next_trading_day(conn: duckdb.DuckDBPyConnection, signal_date: date, market: str) -> date | None:
     """获取信号日之后的下一个交易日"""
     result = conn.execute("""
         WITH trading_days AS (
@@ -35,13 +34,13 @@ def _get_next_trading_day(conn: duckdb.DuckDBPyConnection, signal_date: date, ma
     return result[0] if result and result[0] else None
 
 
-def _get_open_price(conn: duckdb.DuckDBPyConnection, symbol: str, trade_date: date) -> Optional[float]:
+def _get_open_price(conn: duckdb.DuckDBPyConnection, symbol: str, trade_date: date) -> float | None:
     """获取某股票在某日的开盘价，盘中优先使用快照表，日线作为兜底。"""
     quote = _get_open_quote(conn, symbol, trade_date)
     return quote["open"] if quote else None
 
 
-def _get_open_quote(conn: duckdb.DuckDBPyConnection, symbol: str, trade_date: date) -> Optional[dict]:
+def _get_open_quote(conn: duckdb.DuckDBPyConnection, symbol: str, trade_date: date) -> dict | None:
     """获取某股票在某日的开盘成交判断所需行情。"""
     result = conn.execute("""
         SELECT q.open,
@@ -129,7 +128,7 @@ def _mark_signal_handled(
     conn: duckdb.DuckDBPyConnection,
     signal_id: str,
     execution_date: date,
-    execution_price: Optional[float] = None,
+    execution_price: float | None = None,
     status: str = "FILLED",
     status_reason: str = "成交",
 ) -> None:
@@ -147,7 +146,7 @@ def _mark_signal_handled(
 
 def _load_pending_signals(
     conn: duckdb.DuckDBPyConnection,
-    strategy_name: Optional[str],
+    strategy_name: str | None,
     default_market: str,
 ) -> pd.DataFrame:
     params: list[object] = [default_market]
@@ -198,8 +197,8 @@ def _finalize_results(results: dict[str, dict]) -> dict[str, dict]:
 
 
 def _run_signal_batch(
-    strategy_name: Optional[str],
-    initial_capital: Optional[float] = None,
+    strategy_name: str | None,
+    initial_capital: float | None = None,
     market: str = "CN",
 ) -> dict[str, dict]:
     """Execute pending signals in one transaction and one serial cash session."""
@@ -418,7 +417,7 @@ def _run_signal_batch(
         conn.close()
 
 
-def run(strategy_name: str, initial_capital: Optional[float] = None, market: str = "CN") -> dict:
+def run(strategy_name: str, initial_capital: float | None = None, market: str = "CN") -> dict:
     """
     执行单个策略的纸交易：将未执行的信号转换为模拟成交。
 
@@ -429,7 +428,7 @@ def run(strategy_name: str, initial_capital: Optional[float] = None, market: str
     return results.get(strategy_name, {"executed": 0})
 
 
-def run_all_strategies(initial_capital: Optional[float] = None) -> dict:
+def run_all_strategies(initial_capital: float | None = None) -> dict:
     """对所有有信号的策略执行纸交易，共享一个卖出优先的串行现金会话。"""
     results = _run_signal_batch(None, initial_capital, "CN")
     if any(result.get("executed", 0) > 0 for result in results.values()):

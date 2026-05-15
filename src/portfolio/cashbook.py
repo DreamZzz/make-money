@@ -2,12 +2,9 @@
 import uuid
 from collections import defaultdict
 from datetime import date
-from typing import Optional
 
-import numpy as np
 import pandas as pd
 from loguru import logger
-
 
 DEFAULT_ACCOUNT_ID = "default"
 DEFAULT_CURRENCY = "CNY"
@@ -45,8 +42,8 @@ def compute_cashflow_adjusted_return(
 def ensure_initial_cashflow(
     account_id: str = DEFAULT_ACCOUNT_ID,
     currency: str = DEFAULT_CURRENCY,
-    initial_capital: Optional[float] = None,
-    flow_date: Optional[date] = None,
+    initial_capital: float | None = None,
+    flow_date: date | None = None,
 ) -> None:
     """Create one system initial deposit when an account has no cashflow rows."""
     from src.data_pipeline.loader import get_connection, init_db

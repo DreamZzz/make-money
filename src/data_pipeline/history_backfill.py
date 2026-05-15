@@ -9,8 +9,9 @@ import argparse
 import json
 import os
 import time
+from collections.abc import Callable, Iterable
 from datetime import date, timedelta
-from typing import Any, Callable, Iterable
+from typing import Any
 
 import pandas as pd
 from loguru import logger
@@ -19,7 +20,6 @@ from src.config import PROJECT_ROOT
 from src.data_pipeline.fetchers import akshare_fetcher as ak
 from src.data_pipeline.fetchers import yfinance_fetcher as yf
 from src.data_pipeline.loader import get_connection, init_db, upsert_daily_price, upsert_index_daily
-
 
 CN_INDEX_CODES = ["000300", "000905"]
 DEFAULT_QLIB_INSTRUMENTS = PROJECT_ROOT / "qlib_data" / "cn_data" / "instruments" / "all.txt"
@@ -38,7 +38,7 @@ def _read_qlib_symbols(path=DEFAULT_QLIB_INSTRUMENTS) -> list[str]:
     if not os.path.exists(path):
         return []
     out: list[str] = []
-    with open(path, "r", encoding="utf-8") as fh:
+    with open(path, encoding="utf-8") as fh:
         for line in fh:
             parts = line.strip().split()
             if parts:

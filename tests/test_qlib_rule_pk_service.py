@@ -2,13 +2,13 @@ import duckdb
 import pandas as pd
 import pytest
 
-from src.data_pipeline.loader import init_db
 from src.dashboard.qlib_rule_pk_service import (
     evaluate_ab_tracking,
     load_rule_qlib_pk,
     record_ab_snapshot,
     resolve_champion_experiment,
 )
+from src.data_pipeline.loader import init_db
 
 
 def _conn():

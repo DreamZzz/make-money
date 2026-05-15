@@ -12,7 +12,6 @@ from loguru import logger
 
 from src.index_funds.config import FundWatchItem, get_rules, get_watchlist
 
-
 ACTION_LABELS = {
     "BUY": "买入",
     "ADD": "加仓",

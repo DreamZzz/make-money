@@ -4,7 +4,6 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from src.backtest.results import compute_metrics
 from src.backtest.qlib_runner import (
     _latest_covered_cn_data_date,
     _passes_publish_gate,
@@ -17,11 +16,12 @@ from src.backtest.qlib_runner import (
     save_candidate_result,
     score_candidate_grid_row,
     select_best_candidate_grid,
-    simulate_topn_open_constrained,
     simulate_topn_open,
+    simulate_topn_open_constrained,
     simulate_topn_t1_open,
     train_alpha158,
 )
+from src.backtest.results import compute_metrics
 from src.config import PROJECT_ROOT
 from src.data_pipeline.loader import init_db
 from src.portfolio.cashbook import compute_cashflow_adjusted_return, signed_flow
@@ -68,6 +68,7 @@ def _seed_update_db(conn):
 
 def test_update_all_cn_prefers_akshare_before_yfinance(monkeypatch):
     import duckdb
+
     from src.data_pipeline import main
 
     conn = duckdb.connect(":memory:")
@@ -94,6 +95,7 @@ def test_update_all_cn_prefers_akshare_before_yfinance(monkeypatch):
 
 def test_update_all_cn_opens_yfinance_circuit_on_rate_limit(monkeypatch):
     import duckdb
+
     from src.data_pipeline import main
 
     conn = duckdb.connect(":memory:")
@@ -129,6 +131,7 @@ def test_update_all_cn_opens_yfinance_circuit_on_rate_limit(monkeypatch):
 
 def test_update_all_cn_opens_akshare_circuit_after_transient_errors(monkeypatch):
     import duckdb
+
     from src.data_pipeline import main
 
     conn = duckdb.connect(":memory:")
@@ -174,6 +177,7 @@ def test_update_all_cn_opens_akshare_circuit_after_transient_errors(monkeypatch)
 
 def test_update_all_cn_uses_batch_yfinance_after_akshare_circuit(monkeypatch):
     import duckdb
+
     from src.data_pipeline import main
 
     conn = duckdb.connect(":memory:")

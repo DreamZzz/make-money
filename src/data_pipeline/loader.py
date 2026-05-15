@@ -6,7 +6,6 @@ import json
 import os
 from datetime import date
 from pathlib import Path
-from typing import Optional
 
 import duckdb
 import pandas as pd
@@ -242,15 +241,15 @@ def upsert_market_snapshot(conn: duckdb.DuckDBPyConnection, df: pd.DataFrame) ->
 
 def build_market_snapshot_from_daily(
     conn: duckdb.DuckDBPyConnection,
-    markets: Optional[list[str]] = None,
+    markets: list[str] | None = None,
 ) -> int:
     """从最新日线派生日终快照，作为券商级快照字段的基础层。
 
     外部行情源补齐前，先用本地日线统一计算昨收、涨跌幅、量比和振幅。
     """
     market_values = [m.upper() for m in (markets or ["CN", "HK"])]
-    markets_df = pd.DataFrame({"market": market_values})
-    conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_snapshot_markets AS SELECT * FROM markets_df")
+    conn.register("_tmp_snapshot_markets_df", pd.DataFrame({"market": market_values}))
+    conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_snapshot_markets AS SELECT * FROM _tmp_snapshot_markets_df")
     df = conn.execute("""
         WITH priced AS (
             SELECT
@@ -433,7 +432,7 @@ def upsert_financials(conn: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> int:
     return len(df)
 
 
-def get_last_trade_date(conn: duckdb.DuckDBPyConnection, symbol: str) -> Optional[date]:
+def get_last_trade_date(conn: duckdb.DuckDBPyConnection, symbol: str) -> date | None:
     """获取某股票已存储的最新交易日期，用于增量更新"""
     result = conn.execute(
         "SELECT MAX(trade_date) FROM daily_price WHERE symbol = ?", [symbol]
@@ -441,7 +440,7 @@ def get_last_trade_date(conn: duckdb.DuckDBPyConnection, symbol: str) -> Optiona
     return result[0] if result and result[0] else None
 
 
-def get_all_symbols(conn: duckdb.DuckDBPyConnection, country: Optional[str] = None) -> list[str]:
+def get_all_symbols(conn: duckdb.DuckDBPyConnection, country: str | None = None) -> list[str]:
     """获取已存储的所有股票代码"""
     if country:
         result = conn.execute(

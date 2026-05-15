@@ -1,14 +1,12 @@
 """调仓信号页面 — 查看最新交易信号"""
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
-import pandas as pd
 import streamlit as st
 
-from src.dashboard.db import query_df, db_error_widget, DuckDBError
-
-
+from src.dashboard.db import DuckDBError, db_error_widget, query_df
 
 
 def show_signals():

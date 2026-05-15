@@ -17,7 +17,7 @@ import sys
 import uuid
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -26,7 +26,6 @@ from loguru import logger
 from src.backtest.results import compute_metrics, load_benchmark_returns, save_backtest_result
 from src.config import PROJECT_ROOT, load_config
 from src.portfolio.execution_guards import check_open_tradeable
-
 
 MODEL_NAME = "alpha158"
 DEFAULT_TOP_N = 50
@@ -145,7 +144,7 @@ def qlib_status(market: str = "cn") -> dict[str, Any]:
     }
 
 
-def _load_lgb_params(overrides: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+def _load_lgb_params(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     params = {
         "loss": "mse",
         "learning_rate": 0.05,
@@ -163,7 +162,7 @@ def _load_lgb_params(overrides: Optional[dict[str, Any]] = None) -> dict[str, An
     return params
 
 
-def _segments_from_config(test_end: Optional[str] = None) -> dict[str, str]:
+def _segments_from_config(test_end: str | None = None) -> dict[str, str]:
     cfg = load_config().get("qlib", {})
     return {
         "train_start": cfg.get("train_start", "2019-01-01"),
@@ -180,9 +179,9 @@ def _insert_experiment(
     mode: str,
     status: str,
     segments: dict[str, str],
-    log_path: Optional[str] = None,
-    lgb_params: Optional[dict[str, Any]] = None,
-    candidate_spec: Optional[dict[str, Any]] = None,
+    log_path: str | None = None,
+    lgb_params: dict[str, Any] | None = None,
+    candidate_spec: dict[str, Any] | None = None,
 ) -> None:
     from src.data_pipeline.loader import get_connection, init_db
 
@@ -215,11 +214,11 @@ def _insert_experiment(
         }),
         "log_path": log_path,
     }
-    df = pd.DataFrame([row])
     conn = get_connection()
     try:
         init_db(conn)
-        conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_qlib_experiment AS SELECT * FROM df")
+        conn.register("_tmp_qlib_experiment_df", pd.DataFrame([row]))
+        conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_qlib_experiment AS SELECT * FROM _tmp_qlib_experiment_df")
         conn.execute("""
             INSERT OR REPLACE INTO qlib_experiments (
                 experiment_id, model_name, mode, status, market,
@@ -240,10 +239,10 @@ def _insert_experiment(
 def _finish_experiment(
     experiment_id: str,
     status: str,
-    metrics: Optional[dict[str, Any]] = None,
-    run_id: Optional[str] = None,
-    model_version: Optional[str] = None,
-    error_message: Optional[str] = None,
+    metrics: dict[str, Any] | None = None,
+    run_id: str | None = None,
+    model_version: str | None = None,
+    error_message: str | None = None,
 ) -> None:
     from src.data_pipeline.loader import get_connection, init_db
 
@@ -270,11 +269,11 @@ def train_alpha158(
     valid_start: str = "2023-01-01",
     valid_end: str = "2023-12-31",
     test_start: str = "2024-01-01",
-    test_end: Optional[str] = None,
+    test_end: str | None = None,
     market: str = "csi800",
-    model_output_path: Optional[Path] = None,
-    lgb_params: Optional[dict[str, Any]] = None,
-) -> tuple[pd.DataFrame, Optional[str]]:
+    model_output_path: Path | None = None,
+    lgb_params: dict[str, Any] | None = None,
+) -> tuple[pd.DataFrame, str | None]:
     """Train Alpha158 + LightGBM and return predictions plus optional model path."""
     if test_end is None:
         test_end = date.today().strftime("%Y-%m-%d")
@@ -469,7 +468,7 @@ def simulate_topn_open(
     top_n: int,
     holding_days: int,
     rebalance_freq: str = "daily",
-    buffer_n: Optional[int] = None,
+    buffer_n: int | None = None,
     commission_rate: float = 0.00025,
     stamp_duty_rate: float = 0.001,
     market: str = "CN",
@@ -559,15 +558,15 @@ def simulate_topn_open_constrained(
     top_n: int,
     holding_days: int,
     rebalance_freq: str = "daily",
-    buffer_n: Optional[int] = None,
+    buffer_n: int | None = None,
     account_capital: float = 300_000,
     max_position_pct: float = 0.06,
     cash_reserve_pct: float = 0.05,
     lot_size: int = 100,
     commission_rate: float = 0.00025,
     stamp_duty_rate: float = 0.001,
-    max_pe_ttm: Optional[float] = None,
-    max_pb: Optional[float] = None,
+    max_pe_ttm: float | None = None,
+    max_pb: float | None = None,
     market: str = "CN",
 ) -> pd.Series:
     """T signal -> T+1 open execution with account size, lot and concentration constraints."""
@@ -748,10 +747,10 @@ def simulate_topn_open_constrained(
 
 def compute_periodic_metrics(
     returns: pd.Series,
-    benchmark_returns: Optional[pd.Series] = None,
+    benchmark_returns: pd.Series | None = None,
     periods_per_year: int = 252,
     risk_free_rate: float = 0.03,
-    turnover: Optional[float] = None,
+    turnover: float | None = None,
 ) -> dict[str, Any]:
     returns = pd.Series(returns).dropna().sort_index()
     if returns.empty:
@@ -881,9 +880,9 @@ def _parse_float_grid(value: str) -> list[float]:
 
 
 def small_account_profiles(
-    capitals: Optional[list[float]] = None,
-    max_pe_ttm: Optional[float] = 120.0,
-    max_pb: Optional[float] = None,
+    capitals: list[float] | None = None,
+    max_pe_ttm: float | None = 120.0,
+    max_pb: float | None = None,
 ) -> list[dict[str, Any]]:
     profiles = []
     if capitals is None:
@@ -911,7 +910,7 @@ def evaluate_parameter_grid(
     holding_days: list[int],
     rebalance_freqs: list[str],
     buffer_mult: float = 1.5,
-    account_profiles: Optional[list[dict[str, Any]]] = None,
+    account_profiles: list[dict[str, Any]] | None = None,
 ) -> pd.DataFrame:
     from src.data_pipeline.loader import get_connection, init_db
 
@@ -1409,7 +1408,7 @@ def evaluate_predictions(
     return metrics
 
 
-def _latest_covered_cn_data_date(conn: Any, min_coverage: float = 0.80) -> Optional[date]:
+def _latest_covered_cn_data_date(conn: Any, min_coverage: float = 0.80) -> date | None:
     """Return the latest CN date with enough cross-section coverage for inference."""
     rows = conn.execute("""
         SELECT dp.trade_date, COUNT(DISTINCT dp.symbol) AS symbols
@@ -1483,7 +1482,7 @@ def _minmax_confidence(values: pd.Series) -> pd.Series:
     return (values - min_v) / (max_v - min_v)
 
 
-def _register_candidate(experiment_id: str, model_version: str, metrics: dict[str, Any], model_path: Optional[str]) -> None:
+def _register_candidate(experiment_id: str, model_version: str, metrics: dict[str, Any], model_path: str | None) -> None:
     from src.data_pipeline.loader import get_connection, init_db
 
     conn = get_connection()
@@ -1625,7 +1624,7 @@ def _write_production_manifest(
     return str(paths["manifest"])
 
 
-def _qlib_calendar_latest_date(market: str = "cn") -> Optional[date]:
+def _qlib_calendar_latest_date(market: str = "cn") -> date | None:
     calendar = PROJECT_ROOT / "qlib_data" / f"{market}_data" / "calendars" / "day.txt"
     if not calendar.exists():
         return None
@@ -1777,8 +1776,8 @@ def refresh_production_predictions(force: bool = False, min_coverage: float = 0.
 def run_experiment(
     mode: str = "fixed",
     top_n: int = DEFAULT_TOP_N,
-    lgb_params: Optional[dict[str, Any]] = None,
-    candidate_spec: Optional[dict[str, Any]] = None,
+    lgb_params: dict[str, Any] | None = None,
+    candidate_spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if mode not in {"fixed", "walk_forward"}:
         raise ValueError("mode must be fixed or walk_forward")
@@ -1845,7 +1844,7 @@ def _batch_id() -> str:
     return f"QLIB-BATCH-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"
 
 
-def _filter_candidates(candidate_ids: Optional[list[str]]) -> list[dict[str, Any]]:
+def _filter_candidates(candidate_ids: list[str] | None) -> list[dict[str, Any]]:
     candidates = default_candidate_specs(include_unavailable=True)
     if not candidate_ids:
         return candidates
@@ -1853,7 +1852,7 @@ def _filter_candidates(candidate_ids: Optional[list[str]]) -> list[dict[str, Any
     return [item for item in candidates if item["candidate_id"] in wanted]
 
 
-def _skip_reason_for_candidate(spec: dict[str, Any]) -> Optional[str]:
+def _skip_reason_for_candidate(spec: dict[str, Any]) -> str | None:
     if spec.get("status") == "SKIPPED":
         module_by_family = {"xgboost": "xgboost", "catboost": "catboost", "pytorch": "torch"}
         module_name = module_by_family.get(str(spec.get("model_family")))
@@ -1873,11 +1872,11 @@ def _candidate_result_row(
     mode: str,
     status: str,
     started_at: datetime,
-    experiment_id: Optional[str] = None,
-    metrics: Optional[dict[str, Any]] = None,
-    best: Optional[dict[str, Any]] = None,
-    grid_config: Optional[dict[str, Any]] = None,
-    error_message: Optional[str] = None,
+    experiment_id: str | None = None,
+    metrics: dict[str, Any] | None = None,
+    best: dict[str, Any] | None = None,
+    grid_config: dict[str, Any] | None = None,
+    error_message: str | None = None,
 ) -> dict[str, Any]:
     metrics = metrics or {}
     best = best or {}
@@ -1921,14 +1920,14 @@ def _candidate_result_row(
 
 def run_candidate_batch(
     mode: str = "walk_forward",
-    batch_id: Optional[str] = None,
-    candidate_ids: Optional[list[str]] = None,
-    top_ns: Optional[list[int]] = None,
-    holding_days: Optional[list[int]] = None,
-    rebalance_freqs: Optional[list[str]] = None,
+    batch_id: str | None = None,
+    candidate_ids: list[str] | None = None,
+    top_ns: list[int] | None = None,
+    holding_days: list[int] | None = None,
+    rebalance_freqs: list[str] | None = None,
     buffer_mult: float = 1.5,
     turnover_profile: str = "low",
-    account_profiles: Optional[list[dict[str, Any]]] = None,
+    account_profiles: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if mode not in {"fixed", "walk_forward"}:
         raise ValueError("mode must be fixed or walk_forward")
@@ -2144,7 +2143,7 @@ def publish_model(experiment_id: str, force: bool = False) -> dict[str, Any]:
         conn.close()
 
 
-def predict_latest(model: str = "production", top_n: Optional[int] = None) -> dict[str, Any]:
+def predict_latest(model: str = "production", top_n: int | None = None) -> dict[str, Any]:
     from src.data_pipeline.loader import get_connection, init_db
     from src.research.strategies.alpha158_baseline import generate_signals
     from src.signals.generator import save_to_csv, save_to_db
@@ -2152,7 +2151,7 @@ def predict_latest(model: str = "production", top_n: Optional[int] = None) -> di
     if model != "production":
         raise ValueError("目前只支持 model=production")
 
-    refresh_result: Optional[dict[str, Any]] = None
+    refresh_result: dict[str, Any] | None = None
     prod = None
     latest_pred = None
     resolved_top_n = DEFAULT_TOP_N
@@ -2297,7 +2296,7 @@ def _print_json(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, default=str, indent=2))
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Qlib Alpha158 research and production workflow")
     sub = parser.add_subparsers(dest="command")
 

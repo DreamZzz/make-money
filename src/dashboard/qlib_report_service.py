@@ -8,7 +8,6 @@ import pandas as pd
 
 from src.backtest.qlib_runner import score_candidate_grid_row
 
-
 METRIC_COLUMNS = [
     "annual_return",
     "cumulative_return",

@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v ruff >/dev/null 2>&1; then
+  echo "ruff is required. Install it with: brew install ruff"
+  exit 1
+fi
+
+echo "Running ruff check ..."
+ruff check .
+
+if command -v pytest >/dev/null 2>&1; then
+  echo "Running pytest smoke ..."
+  pytest -q tests/test_architecture.py tests/test_strategies.py
+else
+  echo "pytest not found; skipping smoke tests"
+fi

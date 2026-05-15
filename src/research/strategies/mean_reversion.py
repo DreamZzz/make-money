@@ -4,7 +4,6 @@
 """
 import numpy as np
 import pandas as pd
-from loguru import logger
 
 
 def compute_rsi(close: pd.DataFrame, period: int = 14) -> pd.DataFrame:

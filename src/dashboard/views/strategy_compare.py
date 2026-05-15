@@ -2,6 +2,7 @@
 import sys
 from datetime import datetime
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
 import numpy as np
@@ -9,7 +10,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from src.dashboard.db import query_df, query_one, db_error_widget, DuckDBError
+from src.dashboard.db import DuckDBError, db_error_widget, query_df, query_one
 from src.dashboard.job_manager import (
     FAILED,
     PENDING,

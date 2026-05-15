@@ -74,8 +74,8 @@ def generate_review(
             "excess_return": excess_return,
             "max_drawdown": max_drawdown,
         }
-        df = pd.DataFrame([review])
-        conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_review AS SELECT * FROM df")
+        conn.register("_tmp_review_df", pd.DataFrame([review]))
+        conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_review AS SELECT * FROM _tmp_review_df")
         conn.execute("""
             INSERT INTO performance_reviews (
                 review_id, account_id, period_type, start_date, end_date,

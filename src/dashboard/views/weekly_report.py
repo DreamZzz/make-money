@@ -10,7 +10,7 @@ import plotly.express as px
 import streamlit as st
 
 from src.config import load_config
-from src.dashboard.db import query_df, db_error_widget, DuckDBError
+from src.dashboard.db import DuckDBError, db_error_widget, query_df
 
 
 @st.cache_data(ttl=3600)

@@ -7,7 +7,6 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
-
 PERIODS = {
     "return_1m": 22,
     "return_3m": 66,

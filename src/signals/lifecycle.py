@@ -7,7 +7,6 @@ import duckdb
 import pandas as pd
 from loguru import logger
 
-
 ACTIVE = "ACTIVE"
 FILLED = "FILLED"
 NO_ACTION = "NO_ACTION"
