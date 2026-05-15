@@ -12,6 +12,19 @@ import streamlit as st
 
 from src.dashboard.db import DuckDBError, db_error_widget, query_df
 
+ACTION_LABELS = {
+    "BUY": "买入",
+    "ADD": "加仓",
+    "HOLD": "持有",
+    "REDUCE": "减仓",
+    "PAUSE": "暂停",
+}
+
+SLEEVE_LABELS = {
+    "core": "Core 指数基金",
+    "satellite": "Satellite 个股策略",
+}
+
 
 def show_cash_account():
     """全局资金账户：出入金、现金和净投入。"""
@@ -59,6 +72,99 @@ def show_cash_account():
         )
     else:
         st.caption("暂无资金流水")
+
+
+@st.cache_data(ttl=300)
+def _load_latest_allocation_plan() -> tuple[pd.DataFrame, pd.DataFrame]:
+    plan = query_df("""
+        SELECT *
+        FROM allocation_plans
+        WHERE account_id = 'default'
+        ORDER BY plan_date DESC, created_at DESC
+        LIMIT 1
+    """)
+    if plan.empty:
+        return plan, pd.DataFrame()
+    plan_id = str(plan.iloc[0]["plan_id"])
+    items = query_df("""
+        SELECT *
+        FROM allocation_plan_items
+        WHERE plan_id = ?
+        ORDER BY priority, sleeve, instrument_id
+    """, [plan_id])
+    return plan, items
+
+
+def show_allocation_plan():
+    st.subheader("统一资金池")
+    plan_df, items = _load_latest_allocation_plan()
+    if plan_df.empty:
+        st.info("暂无统一资金分配计划。运行 `python3 -m src.portfolio.allocator plan` 后可见。")
+        return
+
+    plan = plan_df.iloc[0]
+    total_value = float(plan.get("total_value") or 0)
+    core_value = float(plan.get("core_value") or 0)
+    satellite_value = float(plan.get("satellite_value") or 0)
+    core_target_pct = float(plan.get("core_target_pct") or 0)
+    satellite_target_pct = float(plan.get("satellite_target_pct") or 0)
+    core_pct = core_value / total_value if total_value > 0 else 0
+    satellite_pct = satellite_value / total_value if total_value > 0 else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Core 当前/目标", f"{core_pct:.1%}", f"目标 {core_target_pct:.0%}")
+    c2.metric("Satellite 当前/目标", f"{satellite_pct:.1%}", f"目标 {satellite_target_pct:.0%}")
+    c3.metric("Core 可投入", f"{float(plan.get('core_budget') or 0):,.0f}")
+    c4.metric("股票 BUY 预算", f"{float(plan.get('satellite_budget') or 0):,.0f}")
+    st.caption(f"计划日期：{plan.get('plan_date')} · 状态：{plan.get('status')} · 现金：{float(plan.get('cash') or 0):,.0f}")
+
+    if items.empty:
+        return
+
+    sleeve_items = items[items["instrument_type"] == "sleeve"].copy()
+    if not sleeve_items.empty:
+        sleeve_items["资产篮子"] = sleeve_items["sleeve"].map(SLEEVE_LABELS).fillna(sleeve_items["sleeve"])
+        sleeve_items["动作"] = sleeve_items["action"].map(ACTION_LABELS).fillna(sleeve_items["action"])
+        sleeve_display = sleeve_items.rename(columns={
+            "current_value": "当前市值",
+            "target_value": "目标市值",
+            "budget_delta": "预算变化",
+            "reason": "说明",
+        })
+        st.dataframe(
+            sleeve_display[["资产篮子", "动作", "当前市值", "目标市值", "预算变化", "说明"]],
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "当前市值": st.column_config.NumberColumn(format="%.0f"),
+                "目标市值": st.column_config.NumberColumn(format="%.0f"),
+                "预算变化": st.column_config.NumberColumn(format="%.0f"),
+            },
+        )
+
+    core_items = items[items["instrument_type"] == "index_fund"].copy()
+    if core_items.empty:
+        st.caption("暂无基金级 core 执行计划")
+        return
+    core_items["动作"] = core_items["action"].map(ACTION_LABELS).fillna(core_items["action"])
+    core_items["计划金额"] = core_items["budget_delta"]
+    core_display = core_items.rename(columns={
+        "instrument_id": "基金代码",
+        "current_value": "当前市值",
+        "target_value": "目标市值",
+        "reason": "说明",
+    })
+    st.markdown("**Core 执行计划**")
+    st.dataframe(
+        core_display[["基金代码", "动作", "当前市值", "目标市值", "计划金额", "说明"]],
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "当前市值": st.column_config.NumberColumn(format="%.0f"),
+            "目标市值": st.column_config.NumberColumn(format="%.0f"),
+            "计划金额": st.column_config.NumberColumn(format="%.0f"),
+        },
+    )
 
 
 def show_portfolio_summary():
@@ -238,6 +344,8 @@ def show_orders():
 st.title("💼 组合监控")
 try:
     show_cash_account()
+    st.divider()
+    show_allocation_plan()
     st.divider()
     show_portfolio_summary()
     st.divider()

@@ -133,3 +133,12 @@ def test_qlib_job_steps_use_qlib_capable_python_when_available():
     }
     for key in qlib_steps:
         assert jm.SINGLE_STEPS[key].cmd[0] == jm.QLIB_PYTHON
+
+
+def test_daily_close_workflow_plans_allocation_before_paper_trade():
+    step_keys = [step.key for step in jm.JOB_DEFINITIONS["daily_close_workflow"].steps]
+
+    assert "allocation_plan" in step_keys
+    assert step_keys.index("qlib_rule_pk_ab") < step_keys.index("allocation_plan")
+    assert step_keys.index("allocation_plan") < step_keys.index("paper_trade")
+    assert jm.SINGLE_STEPS["allocation_plan"].cmd[:3] == [jm.PYTHON, "-m", "src.portfolio.allocator"]

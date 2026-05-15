@@ -1,7 +1,7 @@
 # P1 Core-Satellite Allocator Design
 
 Review date: 2026-05-15
-Status: Draft design, implementation not started
+Status: Phase 1 planner, satellite BUY cap, Dashboard card, and advisory core execution plan implemented
 
 ## Goal
 
@@ -44,7 +44,7 @@ The first version is read-only from an execution perspective: it does not create
    - Risk-reducing sells/reduces first.
    - Underweight core ADD/BUY before satellite BUY when core is below tolerance.
    - Satellite BUY budget is capped by its sleeve budget.
-6. Paper trading can later consume `satellite_budget` as an execution cap; index-fund execution can consume `core_budget` when that module is implemented.
+6. Paper trading consumes `satellite_budget` as a stock BUY cap; index-fund planning consumes `core_budget` as advisory fund-level actions.
 
 ## Configuration
 
@@ -77,19 +77,20 @@ For v1, allocator should not automatically transfer proceeds between same-day st
 
 Phase 1: Planning only
 
-- Add pure calculation helpers and unit tests.
-- Add schema tables and persistence.
-- Add CLI: `python -m src.portfolio.allocator plan`.
-- Add daily job step after signal generation, before paper trading.
+- Add pure calculation helpers and unit tests. (Implemented)
+- Add schema tables and persistence. (Implemented)
+- Add CLI: `python -m src.portfolio.allocator plan`. (Implemented)
+- Add daily job step after signal generation, before paper trading. (Implemented for Dashboard workflow; shell close script also generates a plan)
 
 Phase 2: Execution caps
 
-- Teach `paper_engine` to read latest active allocation plan and cap total BUY notional by `satellite_budget`.
-- Add index-fund execution planning for `core_budget` without real brokerage integration.
+- Teach `paper_engine` to read latest active allocation plan and cap total BUY notional by `satellite_budget`. (Implemented for stock BUY cash requirement; SELL/SHORT remains unaffected)
+- Add index-fund execution planning for `core_budget` without real brokerage integration. (Implemented as `allocation_plan_items.instrument_type = index_fund`)
 
 Phase 3: Dashboard
 
-- Add allocator card showing target/current core-satellite split, drift, deployable budget, and skipped signals due to sleeve budget.
+- Add allocator card showing target/current core-satellite split, deployable budget, sleeve actions, and core fund execution plan. (Implemented in Portfolio Dashboard)
+- Defer skipped-signal count until skipped stock signals are persisted as outcomes or execution audit rows.
 
 ## Testing
 
@@ -99,19 +100,19 @@ Unit tests should cover:
 - Satellite overweight sets satellite buy budget to zero.
 - Missing index-fund holdings do not crash and treat core value as zero.
 - Plan persistence is idempotent by `plan_date/account_id` or uses immutable plan IDs with latest query.
-- Paper-engine cap integration later leaves SELL orders unaffected.
+- Paper-engine cap integration leaves SELL orders unaffected. (Covered by regression tests)
 
 ## Acceptance Criteria
 
 P1-01 can be marked Done when:
 
-- A generated allocation plan records current core/satellite values and budgets.
-- The daily close workflow can create the plan without disrupting existing signal generation or paper trading.
-- Dashboard or CLI exposes the latest plan clearly enough for a retail user to see whether this week is core-heavy, satellite-heavy, or balanced.
+- A generated allocation plan records current core/satellite values and budgets. (Implemented)
+- The daily close workflow can create the plan without disrupting existing signal generation or paper trading. (Implemented)
+- Dashboard and CLI expose the latest plan clearly enough for a retail user to see whether this week is core-heavy, satellite-heavy, or balanced. (Implemented)
 - Existing tests pass, and new allocator tests cover the budget semantics above.
 
 ## Open Decisions
 
-- Whether default execution should enforce allocator budgets immediately or only warn in the first release.
-- Whether index-fund `REDUCE` should create a synthetic cash increase before satellite buys in the same run.
+- Stock BUY execution enforces the latest active `satellite_budget`; core fund execution remains advisory in this release.
+- Whether index-fund `REDUCE` should create a synthetic cash increase before satellite buys in a future executor.
 - Whether target weights should be one global core/satellite split or per-market splits for CN/HK.

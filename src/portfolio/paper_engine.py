@@ -171,6 +171,26 @@ def _load_pending_signals(
     return _prioritize_signals(signals)
 
 
+def _load_latest_satellite_budget(conn: duckdb.DuckDBPyConnection) -> float | None:
+    """Return the latest active satellite buy budget, or None when allocator is not active."""
+    try:
+        row = conn.execute("""
+            SELECT satellite_budget
+            FROM allocation_plans
+            WHERE status = 'ACTIVE'
+            ORDER BY plan_date DESC, created_at DESC
+            LIMIT 1
+        """).fetchone()
+    except Exception:
+        return None
+    if not row or row[0] is None:
+        return None
+    try:
+        return max(float(row[0]), 0.0)
+    except (TypeError, ValueError):
+        return None
+
+
 def _new_result(total: int = 0) -> dict:
     return {
         "executed": 0,
@@ -183,6 +203,7 @@ def _new_result(total: int = 0) -> dict:
         "skipped_threshold": 0,
         "skipped_lot": 0,
         "skipped_untradeable": 0,
+        "skipped_budget": 0,
     }
 
 
@@ -229,6 +250,8 @@ def _run_signal_batch(
             in_transaction = False
             return {}
 
+        satellite_budget = _load_latest_satellite_budget(conn)
+        satellite_budget_remaining = satellite_budget
         results: dict[str, dict] = {}
         position_cache: dict[tuple[str, str], float] = {}
 
@@ -369,11 +392,20 @@ def _run_signal_batch(
             cash_before = session_cash
             if order_side == "BUY":
                 required = execution_value + execution_cost
+                if satellite_budget_remaining is not None and required > satellite_budget_remaining + 1e-9:
+                    stats["skipped_budget"] += 1
+                    logger.warning(
+                        f"  跳过 {sym} BUY：satellite预算不足 "
+                        f"(剩余 {satellite_budget_remaining:,.0f} < 需要 {required:,.0f})"
+                    )
+                    continue
                 if session_cash < required:
                     stats["skipped_cash"] += 1
                     logger.warning(f"  跳过 {sym} BUY：现金不足 (可用 {session_cash:,.0f} < 需要 {required:,.0f})")
                     continue
                 session_cash -= required
+                if satellite_budget_remaining is not None:
+                    satellite_budget_remaining -= required
             else:
                 session_cash += execution_value - execution_cost
                 position_cache[(strategy, sym)] = 0.0
@@ -403,7 +435,8 @@ def _run_signal_batch(
             logger.info(
                 f"Paper engine: {name} executed {result['executed']}/{result['total']} signals "
                 f"(handled_without_order={result['handled_without_order']}, "
-                f"no_price={result['skipped_no_price']}, cash={result['skipped_cash']})"
+                f"no_price={result['skipped_no_price']}, cash={result['skipped_cash']}, "
+                f"budget={result['skipped_budget']})"
             )
         return results
     except Exception:

@@ -30,3 +30,12 @@ index_funds:
       currency: "CNY"
       target_weight: 0.33
       enabled: true
+
+portfolio:
+  allocation:
+    enabled: true
+    core_target_pct: 0.60
+    satellite_target_pct: 0.40
+    rebalance_tolerance_pct: 0.05
+    min_trade_amount: 1000
+    core_cash_priority: true

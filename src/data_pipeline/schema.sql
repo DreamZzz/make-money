@@ -599,3 +599,44 @@ CREATE TABLE IF NOT EXISTS index_fund_signals (
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (signal_id)
 );
+
+-- ============================================
+-- 18. Core-Satellite 统一资金分配计划表
+-- ============================================
+CREATE TABLE IF NOT EXISTS allocation_plans (
+    plan_id              VARCHAR NOT NULL,
+    plan_date            DATE NOT NULL,
+    account_id           VARCHAR NOT NULL DEFAULT 'default',
+    total_value          DOUBLE,
+    cash                 DOUBLE,
+    core_target_pct      DOUBLE,
+    satellite_target_pct DOUBLE,
+    core_value           DOUBLE,
+    satellite_value      DOUBLE,
+    core_budget          DOUBLE,
+    satellite_budget     DOUBLE,
+    core_drift_pct       DOUBLE,
+    satellite_drift_pct  DOUBLE,
+    status               VARCHAR DEFAULT 'ACTIVE',
+    created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (plan_id)
+);
+
+-- ============================================
+-- 19. Core-Satellite 分配计划明细表
+-- ============================================
+CREATE TABLE IF NOT EXISTS allocation_plan_items (
+    plan_id          VARCHAR NOT NULL,
+    sleeve           VARCHAR NOT NULL,       -- core / satellite
+    instrument_type  VARCHAR NOT NULL,       -- sleeve / index_fund / stock_strategy
+    instrument_id    VARCHAR NOT NULL,
+    action           VARCHAR NOT NULL,       -- BUY / ADD / HOLD / REDUCE / PAUSE
+    current_value    DOUBLE,
+    target_value     DOUBLE,
+    budget_delta     DOUBLE,
+    priority         INTEGER,
+    reason           VARCHAR,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (plan_id, sleeve, instrument_type, instrument_id, action)
+);

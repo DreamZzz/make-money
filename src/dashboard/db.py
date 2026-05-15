@@ -3,6 +3,8 @@
 设计原则：Streamlit 是纯读端，所有写操作由 CLI 脚本独立进程完成。
 短生命周期只读连接确保回测/更新脚本随时可获取写锁，互不阻塞。
 """
+from __future__ import annotations
+
 import re
 import time
 from collections.abc import Sequence

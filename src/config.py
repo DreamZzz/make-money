@@ -80,6 +80,14 @@ DEFAULT_CONFIG = {
         "max_drawdown_limit": 0.20,
         "rebalance": {"frequency": "weekly", "weekday": 5},
         "benchmark_weights": {"000300.SH": 0.35, "000905.SH": 0.15, "HSI": 0.35, "HSTECH": 0.15},
+        "allocation": {
+            "enabled": True,
+            "core_target_pct": 0.60,
+            "satellite_target_pct": 0.40,
+            "rebalance_tolerance_pct": 0.05,
+            "min_trade_amount": 1000,
+            "core_cash_priority": True,
+        },
     },
     "signals": {
         "min_confidence": 0.6,

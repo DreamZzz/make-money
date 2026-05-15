@@ -51,7 +51,7 @@ This file is the durable project backlog. Keep it small enough to review every w
 
 | ID | Item | Status | Owner | Next Action | Acceptance |
 |---|---|---|---|---|---|
-| P1-01 | Core-satellite allocator for index funds and stock strategies | Ready | Codex | Review `docs/superpowers/specs/2026-05-15-p1-core-satellite-allocator-design.md`, then write implementation plan | One account-level budget governs both index-fund signals and stock strategy orders |
+| P1-01 | Core-satellite allocator for index funds and stock strategies | Done | Codex | Monitor daily close output for one week | One account-level budget governs stock strategy BUY orders; index-fund core execution remains advisory |
 | P1-02 | Portfolio exposure monitor | Proposed | Codex | Write design after allocator data model is known | Dashboard shows industry, size, valuation, and benchmark-relative concentration |
 | P1-03 | Enforce daily turnover cap in executable rebalance plan | Proposed | Codex | Decide whether turnover cap applies to gross or one-way notional | Orders above cap are dropped by confidence/rank priority |
 | P1-04 | Persist signal outcomes | Proposed | Codex | Reconcile with existing rule/Qlib A-B tracking | T+1/T+5/T+20 outcomes are stored by signal and model version |
@@ -95,3 +95,14 @@ Copy this block below the previous weekly entry.
 - Metrics to watch: Qlib excess return, max drawdown, annual turnover, rolling RankIC, skipped tradability count, skipped lot count.
 - Next P0/P1 action: use the archive importer when source files are available; start P1-01 core-satellite allocator design.
 - Verification evidence: focused P0 regression suite passed with 15 tests; latest `pytest -q` passed with 133 tests; `ruff check .` passed after Ruff install and baseline enablement.
+
+### 2026-05-15 P1 Allocator Phase 1
+
+- Landed: `src.portfolio.allocator` computes and persists a core-satellite plan with current sleeve values, drift, and deployable budgets.
+- Landed: `allocation_plans` and `allocation_plan_items` schema tables.
+- Landed: CLI `python3 -m src.portfolio.allocator plan` and daily close script/Dashboard workflow step before paper trading.
+- Landed: `paper_engine` reads latest active allocation plan and caps stock BUY cash requirement by `satellite_budget`; SELL orders remain unaffected.
+- Landed: allocator writes advisory core fund execution items from latest `index_fund_signals`, allocating `core_budget` to BUY/ADD signals while leaving PAUSE/HOLD/REDUCE visible.
+- Landed: Portfolio Dashboard shows the latest unified wallet split, sleeve budgets, sleeve actions, and core fund execution plan.
+- Current live plan: `ALLOC-DEFAULT-20260515` recommends core budget around 95k and satellite budget around 28k from current cash.
+- Remaining: decide whether core fund execution should remain advisory or get a separate snapshot/order executor in a later P1/P2 iteration.

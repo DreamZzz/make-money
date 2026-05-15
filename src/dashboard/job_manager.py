@@ -1,5 +1,4 @@
 """File-backed Dashboard job runner for command workbench workflows."""
-from __future__ import annotations
 
 import argparse
 import json
@@ -11,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from src.config import PROJECT_ROOT
 
@@ -37,7 +36,7 @@ def _resolve_project_python() -> str:
     return os.environ.get("PYTHON") or sys.executable
 
 
-def _resolve_qlib_python(default_python: str, candidates: list[str] | None = None) -> str:
+def _resolve_qlib_python(default_python: str, candidates: Optional[list[str]] = None) -> str:
     explicit = os.environ.get("QLIB_PYTHON")
     if explicit:
         return explicit
@@ -111,7 +110,7 @@ class JobRun:
         return self.data.get("status", PENDING)
 
     @property
-    def exit_code(self) -> int | None:
+    def exit_code(self) -> Optional[int]:
         return self.data.get("exit_code")
 
     @property
@@ -159,6 +158,11 @@ SINGLE_STEPS: dict[str, JobStep] = {
         "qlib_rule_pk_ab",
         "记录规则/Qlib A-B影子样本",
         [PYTHON, "-m", "src.dashboard.qlib_rule_pk_service", "record-ab"],
+    ),
+    "allocation_plan": _step(
+        "allocation_plan",
+        "生成统一资金分配计划",
+        [PYTHON, "-m", "src.portfolio.allocator", "plan"],
     ),
     "paper_trade": _step("paper_trade", "执行股票纸交易", [PYTHON, "-m", "src.portfolio.paper_engine"]),
     "recalculate_nav": _step("recalculate_nav", "重算资金净值", [PYTHON, "-m", "src.portfolio.nav_calculator"]),
@@ -235,6 +239,7 @@ JOB_DEFINITIONS: dict[str, JobDefinition] = {
             SINGLE_STEPS["generate_signals"],
             SINGLE_STEPS["qlib_predict"],
             SINGLE_STEPS["qlib_rule_pk_ab"],
+            SINGLE_STEPS["allocation_plan"],
             SINGLE_STEPS["paper_trade"],
             SINGLE_STEPS["recalculate_nav"],
             SINGLE_STEPS["performance_review"],
@@ -324,7 +329,7 @@ def start_job(job_key: str) -> str:
     return run_id
 
 
-def run_job(job_key: str, run_id: str | None = None) -> JobRun:
+def run_job(job_key: str, run_id: Optional[str] = None) -> JobRun:
     """Run a job synchronously. Used by the background runner and tests."""
     if run_id is None:
         run_id = _create_run_record(job_key)
@@ -391,7 +396,7 @@ def run_job(job_key: str, run_id: str | None = None) -> JobRun:
     return JobRun(data)
 
 
-def poll_run(run_id: str | None) -> JobRun | None:
+def poll_run(run_id: Optional[str]) -> Optional[JobRun]:
     if not run_id:
         return None
     data = _read_run_data(run_id)
@@ -406,7 +411,7 @@ def poll_run(run_id: str | None) -> JobRun | None:
     return JobRun(data)
 
 
-def active_run() -> JobRun | None:
+def active_run() -> Optional[JobRun]:
     for path in sorted(RUNS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
         run = poll_run(path.stem)
         if run and run.status in ACTIVE_STATUSES:
@@ -414,7 +419,7 @@ def active_run() -> JobRun | None:
     return None
 
 
-def latest_run(job_key: str | None = None) -> JobRun | None:
+def latest_run(job_key: Optional[str] = None) -> Optional[JobRun]:
     candidates = sorted(RUNS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     for path in candidates:
         run = poll_run(path.stem)
@@ -423,7 +428,7 @@ def latest_run(job_key: str | None = None) -> JobRun | None:
     return None
 
 
-def tail_log(run_id: str | None, lines: int = 200) -> str:
+def tail_log(run_id: Optional[str], lines: int = 200) -> str:
     run = poll_run(run_id)
     if run is None or not run.log_path:
         return ""
@@ -475,7 +480,7 @@ def _new_run_data(job: JobDefinition, run_id: str) -> dict[str, Any]:
     }
 
 
-def _read_run_data(run_id: str) -> dict[str, Any] | None:
+def _read_run_data(run_id: str) -> Optional[dict[str, Any]]:
     path = RUNS_DIR / f"{run_id}.json"
     if not path.exists():
         return None
@@ -524,9 +529,9 @@ def _mark_step(
     data: dict[str, Any],
     step_key: str,
     status: str,
-    started_at: str | None = None,
-    ended_at: str | None = None,
-    exit_code: int | None = None,
+    started_at: Optional[str] = None,
+    ended_at: Optional[str] = None,
+    exit_code: Optional[int] = None,
 ) -> None:
     for step in data.get("steps", []):
         if step.get("key") != step_key:
@@ -578,7 +583,7 @@ def _pid_alive(pid: Any) -> bool:
         return False
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Dashboard job manager")
     sub = parser.add_subparsers(dest="command", required=True)
     run_parser = sub.add_parser("run")
