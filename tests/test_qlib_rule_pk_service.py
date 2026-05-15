@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 
 from src.dashboard.qlib_rule_pk_service import (
+    build_pk_details,
     evaluate_ab_tracking,
     load_rule_qlib_pk,
     record_ab_snapshot,
@@ -113,6 +114,47 @@ def test_rule_qlib_pk_handles_missing_predictions():
     assert report["history"].empty
     assert report["summary"]["rule_symbols"] == 0
     conn.close()
+
+
+def test_build_pk_details_handles_qlib_only_cross_section():
+    qlib = pd.DataFrame({
+        "prediction_date": [pd.Timestamp("2024-01-02")],
+        "experiment_id": ["E1"],
+        "symbol": ["D"],
+        "name": ["Qlib独立"],
+        "industry": ["科技"],
+        "qlib_score": [0.7],
+        "qlib_rank": [1],
+        "qlib_confidence": [0.75],
+    })
+
+    details = build_pk_details(pd.DataFrame(), qlib, top_n=1, secondary_top_n=2)
+
+    assert details.loc[0, "symbol"] == "D"
+    assert details.loc[0, "classification"] == "Qlib独立候选"
+    assert details.loc[0, "rule_confidence"] is None
+
+
+def test_build_pk_details_handles_rule_only_cross_section():
+    rules = pd.DataFrame({
+        "signal_date": [pd.Timestamp("2024-01-02")],
+        "signal_id": ["S1"],
+        "model_name": ["trend_following"],
+        "symbol": ["A"],
+        "name": ["规则买入"],
+        "industry": ["消费"],
+        "side": ["BUY"],
+        "rule_score": [0.8],
+        "rule_confidence": [0.7],
+        "max_position_pct": [0.1],
+        "thesis": ["test"],
+    })
+
+    details = build_pk_details(rules, pd.DataFrame(), top_n=1, secondary_top_n=2)
+
+    assert details.loc[0, "symbol"] == "A"
+    assert details.loc[0, "classification"] == "规则买入/Qlib弱"
+    assert pd.isna(details.loc[0, "qlib_rank"])
 
 
 def test_record_ab_snapshot_persists_rule_and_qlib_arms_idempotently():

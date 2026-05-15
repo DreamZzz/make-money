@@ -2364,8 +2364,9 @@ def main(argv: list[str] | None = None) -> int:
         _print_json(publish_model(args.experiment_id, force=args.force))
         return 0
     if args.command == "predict-latest":
-        _print_json(predict_latest(args.model, top_n=args.top_n))
-        return 0
+        result = predict_latest(args.model, top_n=args.top_n)
+        _print_json(result)
+        return 0 if result.get("status") != "FAILED" else 1
     if args.command == "refresh-production":
         result = refresh_production_predictions(force=args.force, min_coverage=args.min_coverage)
         _print_json(result)

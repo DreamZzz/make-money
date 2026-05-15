@@ -5,6 +5,8 @@
 Qlib 二进制格式要求通过 qlib.run.dump_bin 工具生成，
 本脚本先导出 CSV，再调 dump_bin 完成转换。
 """
+from __future__ import annotations
+
 import subprocess
 import sys
 from pathlib import Path

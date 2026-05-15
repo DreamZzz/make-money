@@ -4,6 +4,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from src.backtest import qlib_runner
 from src.backtest.qlib_runner import (
     _latest_covered_cn_data_date,
     _passes_publish_gate,
@@ -34,6 +35,26 @@ from src.signals.lifecycle import expire_stale_signals, retire_replaced_signals
 def test_project_root_is_repo_root():
     assert (PROJECT_ROOT / "pyproject.toml").exists()
     assert PROJECT_ROOT == Path(__file__).resolve().parents[1]
+
+
+def test_qlib_python39_entry_modules_defer_annotations():
+    for rel_path in [
+        "scripts/convert_to_qlib.py",
+        "src/backtest/results.py",
+        "src/data_pipeline/loader.py",
+    ]:
+        text = (PROJECT_ROOT / rel_path).read_text(encoding="utf-8")
+        assert "from __future__ import annotations" in text
+
+
+def test_predict_latest_cli_returns_nonzero_on_failed_result(monkeypatch):
+    monkeypatch.setattr(
+        qlib_runner,
+        "predict_latest",
+        lambda model="production", top_n=None: {"status": "FAILED", "reason": "boom"},
+    )
+
+    assert qlib_runner.main(["predict-latest", "--model", "production"]) == 1
 
 
 def _status_df(status: str, close: float | None = None, error: str = "") -> pd.DataFrame:

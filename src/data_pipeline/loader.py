@@ -2,6 +2,8 @@
 DuckDB 数据入库模块。
 支持全量导入和增量更新，自动建表。
 """
+from __future__ import annotations
+
 import json
 import os
 from datetime import date

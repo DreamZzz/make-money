@@ -1,4 +1,6 @@
 """Backtest metric helpers and DuckDB persistence."""
+from __future__ import annotations
+
 import json
 import uuid
 from datetime import date, datetime

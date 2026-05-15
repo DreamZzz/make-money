@@ -315,6 +315,10 @@ def build_pk_details(
         if col not in base:
             base[col] = ""
         base[col] = base[col].fillna("")
+    for col in ["rule_confidence", "rule_score", "qlib_rank", "qlib_score", "qlib_confidence"]:
+        if col not in base:
+            base[col] = None
+    base["qlib_rank"] = pd.to_numeric(base["qlib_rank"], errors="coerce")
 
     base["classification"] = base.apply(
         lambda row: _classify(row, top_n=top_n, secondary_top_n=secondary_top_n),
