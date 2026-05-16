@@ -18,9 +18,9 @@ This file is the durable project backlog. Keep it small enough to review every w
 
 ## Current Baseline
 
-- Latest pushed commit before P2-04: `d85a235` (`feat: add daily close failure diagnostics`).
+- Latest pushed commit before P2-05: `1170b3f` (`feat: add signal outcomes dashboard`).
 - Review v2 baseline correction: the external v2 review used `origin/main` (`23b8178`) and did not include local commits `93e9995` and `9e000f4`.
-- Test baseline: `pytest -q` passed with 185 tests on 2026-05-16.
+- Test baseline: `pytest -q` passed with 187 tests on 2026-05-16.
 - Lint baseline: `ruff check .` passed on 2026-05-16.
 - Durable rule: before starting new alpha work, finish the survivorship-bias impact report so future backtests have a trust anchor.
 - Validation-period data stance: do not assume Tushare or other paid data sources are available; prefer Baostock snapshots plus official public adjustment announcements for index membership history.
@@ -52,7 +52,7 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 | ID | Item | Status | Owner | Next Action | Acceptance |
 |---|---|---|---|---|---|
 | P2-04 | Signal outcomes Dashboard | Done | Codex | Re-check after the next filled paper orders create READY outcome rows | Dashboard exposes T+1/T+5/T+20 realized signal performance with empty-state handling |
-| P2-05 | Extend signal outcomes to benchmark-relative returns | Proposed | Codex | Add benchmark return lookup and `alpha_vs_benchmark`; consider T+60 only after enough history exists | `signal_outcomes` can report raw return and benchmark-relative alpha per signal/horizon |
+| P2-05 | Extend signal outcomes to benchmark-relative returns | Done | Codex | Re-check alpha columns after the next READY outcome rows are produced | `signal_outcomes` can report raw return and benchmark-relative alpha per signal/horizon |
 | P2-06 | Value-quality fundamental factor prototype | Proposed | Codex | Design financial data ingestion and a small `value_quality.py` strategy using existing `financials`, `pe_ttm`, and `pb` fields | 2022-2025 standalone backtest exists and correlation with Alpha158/technical sleeve is measured |
 | P2-07 | Qlib PortAna artifact | Proposed | Codex | Verify installed Qlib report APIs and add optional HTML artifact output | Successful Qlib runs can link to a saved attribution/position report artifact |
 | P2-08 | Environment-specific config loading | Proposed | Codex | Design `MM_ENV` config merge order | `config/settings.dev.yaml` and `config/settings.prod.yaml` override safely without breaking default local runs |
@@ -152,6 +152,15 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 - Empty-state behavior: when `signal_outcomes` has no rows, Dashboard shows a clear message instead of an empty table.
 - Real local check: current production DuckDB has 0 `signal_outcomes` rows, so the new panel currently renders the empty-state path until the next filled paper orders mature.
 - Verification evidence: `pytest tests/test_signal_outcome_dashboard.py tests/test_dashboard_runtime_scripts.py -q` passed with 5 tests; targeted `ruff check` passed for the new service, Portfolio Dashboard, and tests.
+
+### 2026-05-16 P2-05 Benchmark-Relative Signal Outcomes
+
+- Landed: `signal_outcomes` now stores `benchmark_code`, `benchmark_return_pct`, and `alpha_vs_benchmark`.
+- Landed: `src.signals.outcome_tracker` maps A-share signals to `000300` and HK signals to `HSTECH`, computes benchmark same-horizon return, and writes raw return minus benchmark return as alpha when both sides are READY.
+- Landed: Portfolio Dashboard signal outcome summary, monthly feedback, and detail tables now show average alpha / benchmark return / alpha vs benchmark.
+- Empty/partial-data behavior: if a signal return is READY but benchmark data is missing, raw return remains READY while benchmark return and alpha stay empty.
+- Real local check: `python -m src.signals.outcome_tracker update` returned `updated=0`, and production DuckDB has the three new benchmark columns with no current outcome rows.
+- Verification evidence: focused signal outcome and Dashboard tests passed; full verification is recorded with this commit.
 
 ## P1 Candidates
 

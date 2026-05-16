@@ -10,6 +10,10 @@ from typing import Any
 import pandas as pd
 
 DEFAULT_HORIZONS = (1, 5, 20)
+DEFAULT_BENCHMARK_BY_COUNTRY = {
+    "CN": "000300",
+    "HK": "HSTECH",
+}
 
 
 def update_signal_outcomes(
@@ -25,8 +29,14 @@ def update_signal_outcomes(
     rows = []
     for _, signal in signals.iterrows():
         prices = _future_prices(conn, str(signal["symbol"]), signal["execution_date"], as_of=as_of)
+        benchmark_code = _benchmark_code_for_signal(signal)
+        benchmark_prices = (
+            _benchmark_prices(conn, benchmark_code, signal["execution_date"], as_of=as_of)
+            if benchmark_code
+            else pd.DataFrame()
+        )
         for horizon in horizon_values:
-            outcome = _outcome_for_horizon(signal, prices, horizon)
+            outcome = _outcome_for_horizon(signal, prices, horizon, benchmark_code, benchmark_prices)
             rows.append(outcome)
 
     df = pd.DataFrame(rows)
@@ -38,11 +48,13 @@ def update_signal_outcomes(
         INSERT INTO signal_outcomes (
             signal_id, horizon_days, model_name, model_version, symbol, side,
             signal_date, execution_date, execution_price, outcome_date,
-            outcome_price, return_pct, status
+            outcome_price, return_pct, benchmark_code, benchmark_return_pct,
+            alpha_vs_benchmark, status
         )
         SELECT signal_id, horizon_days, model_name, model_version, symbol, side,
                signal_date, execution_date, execution_price, outcome_date,
-               outcome_price, return_pct, status
+               outcome_price, return_pct, benchmark_code, benchmark_return_pct,
+               alpha_vs_benchmark, status
         FROM _tmp_signal_outcomes
     """)
     ready = int((df["status"] == "READY").sum())
@@ -52,16 +64,18 @@ def update_signal_outcomes(
 
 def _load_executed_signals(conn: Any) -> pd.DataFrame:
     return conn.execute("""
-        SELECT signal_id, model_name, model_version, symbol, side,
+        SELECT s.signal_id, s.model_name, s.model_version, s.symbol, s.side,
                CAST(signal_ts AS DATE) AS signal_date,
-               execution_date,
-               execution_price
-        FROM signals
-        WHERE executed = TRUE
-          AND status = 'FILLED'
-          AND execution_date IS NOT NULL
-          AND execution_price IS NOT NULL
-          AND execution_price > 0
+               s.execution_date,
+               s.execution_price,
+               COALESCE(si.country, '') AS country
+        FROM signals s
+        LEFT JOIN stock_info si ON s.symbol = si.symbol
+        WHERE s.executed = TRUE
+          AND s.status = 'FILLED'
+          AND s.execution_date IS NOT NULL
+          AND s.execution_price IS NOT NULL
+          AND s.execution_price > 0
         ORDER BY execution_date, signal_id
     """).fetchdf()
 
@@ -83,7 +97,45 @@ def _future_prices(conn: Any, symbol: str, execution_date: date, as_of: date | N
     """, params).fetchdf()
 
 
-def _outcome_for_horizon(signal: pd.Series, prices: pd.DataFrame, horizon_days: int) -> dict[str, Any]:
+def _benchmark_prices(conn: Any, benchmark_code: str, execution_date: date, as_of: date | None = None) -> pd.DataFrame:
+    params: list[Any] = [benchmark_code, execution_date, benchmark_code, execution_date]
+    as_of_filter = ""
+    if as_of is not None:
+        as_of_filter = "AND trade_date <= ?"
+        params.append(as_of)
+    return conn.execute(f"""
+        WITH base AS (
+            SELECT trade_date, close
+            FROM index_daily
+            WHERE index_code = ?
+              AND trade_date <= ?
+              AND close IS NOT NULL
+            ORDER BY trade_date DESC
+            LIMIT 1
+        ),
+        future AS (
+            SELECT trade_date, close
+            FROM index_daily
+            WHERE index_code = ?
+              AND trade_date > ?
+              AND close IS NOT NULL
+              {as_of_filter}
+            ORDER BY trade_date
+        )
+        SELECT trade_date, close, TRUE AS is_base FROM base
+        UNION ALL
+        SELECT trade_date, close, FALSE AS is_base FROM future
+        ORDER BY is_base DESC, trade_date
+    """, params).fetchdf()
+
+
+def _outcome_for_horizon(
+    signal: pd.Series,
+    prices: pd.DataFrame,
+    horizon_days: int,
+    benchmark_code: str | None = None,
+    benchmark_prices: pd.DataFrame | None = None,
+) -> dict[str, Any]:
     base = {
         "signal_id": signal["signal_id"],
         "horizon_days": horizon_days,
@@ -97,6 +149,9 @@ def _outcome_for_horizon(signal: pd.Series, prices: pd.DataFrame, horizon_days: 
         "outcome_date": None,
         "outcome_price": None,
         "return_pct": None,
+        "benchmark_code": benchmark_code,
+        "benchmark_return_pct": None,
+        "alpha_vs_benchmark": None,
         "status": "PENDING",
     }
     if len(prices) < horizon_days:
@@ -108,8 +163,37 @@ def _outcome_for_horizon(signal: pd.Series, prices: pd.DataFrame, horizon_days: 
     base["outcome_date"] = pd.to_datetime(row["trade_date"]).date()
     base["outcome_price"] = outcome_price
     base["return_pct"] = _forward_return(base["side"], base["execution_price"], outcome_price)
+    benchmark_return = _benchmark_return_for_horizon(benchmark_prices, horizon_days)
+    if benchmark_return is not None:
+        base["benchmark_return_pct"] = benchmark_return
+        base["alpha_vs_benchmark"] = base["return_pct"] - benchmark_return
     base["status"] = "READY"
     return base
+
+
+def _benchmark_code_for_signal(signal: pd.Series) -> str | None:
+    country = str(signal.get("country") or "").upper()
+    if country in DEFAULT_BENCHMARK_BY_COUNTRY:
+        return DEFAULT_BENCHMARK_BY_COUNTRY[country]
+    symbol = str(signal.get("symbol") or "")
+    if symbol.startswith(("0", "3", "6")) and len(symbol) == 6:
+        return DEFAULT_BENCHMARK_BY_COUNTRY["CN"]
+    return None
+
+
+def _benchmark_return_for_horizon(benchmark_prices: pd.DataFrame | None, horizon_days: int) -> float | None:
+    if benchmark_prices is None or benchmark_prices.empty:
+        return None
+    is_base = benchmark_prices["is_base"].astype(bool)
+    base_rows = benchmark_prices[is_base]
+    future_rows = benchmark_prices[~is_base]
+    if base_rows.empty or len(future_rows) < horizon_days:
+        return None
+    base_price = float(base_rows.iloc[0]["close"])
+    outcome_price = float(future_rows.iloc[horizon_days - 1]["close"])
+    if base_price <= 0 or outcome_price <= 0:
+        return None
+    return outcome_price / base_price - 1
 
 
 def _forward_return(side: str, execution_price: float, outcome_price: float) -> float:

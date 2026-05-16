@@ -13,6 +13,7 @@ SUMMARY_COLUMNS = [
     "hit_count",
     "hit_rate",
     "avg_return",
+    "avg_alpha_vs_benchmark",
     "median_return",
 ]
 MONTHLY_COLUMNS = [
@@ -24,6 +25,7 @@ MONTHLY_COLUMNS = [
     "hit_count",
     "hit_rate",
     "avg_return",
+    "avg_alpha_vs_benchmark",
 ]
 DETAIL_COLUMNS = [
     "signal_id",
@@ -39,6 +41,9 @@ DETAIL_COLUMNS = [
     "outcome_date",
     "outcome_price",
     "return_pct",
+    "benchmark_code",
+    "benchmark_return_pct",
+    "alpha_vs_benchmark",
     "status",
 ]
 
@@ -74,6 +79,9 @@ def _load_outcome_detail(conn: Any) -> pd.DataFrame:
             so.outcome_date,
             so.outcome_price,
             so.return_pct,
+            so.benchmark_code,
+            so.benchmark_return_pct,
+            so.alpha_vs_benchmark,
             so.status
         FROM signal_outcomes so
         LEFT JOIN stock_info si ON so.symbol = si.symbol
@@ -85,6 +93,8 @@ def _load_outcome_detail(conn: Any) -> pd.DataFrame:
     df["status"] = df["status"].fillna("PENDING").str.upper()
     df["horizon_days"] = pd.to_numeric(df["horizon_days"], errors="coerce").fillna(0).astype(int)
     df["return_pct"] = pd.to_numeric(df["return_pct"], errors="coerce")
+    df["benchmark_return_pct"] = pd.to_numeric(df["benchmark_return_pct"], errors="coerce")
+    df["alpha_vs_benchmark"] = pd.to_numeric(df["alpha_vs_benchmark"], errors="coerce")
     df["execution_date"] = pd.to_datetime(df["execution_date"]).dt.date
     df["signal_date"] = pd.to_datetime(df["signal_date"]).dt.date
     df["outcome_date"] = pd.to_datetime(df["outcome_date"], errors="coerce").dt.date
@@ -125,6 +135,7 @@ def _aggregate_monthly(detail: pd.DataFrame) -> pd.DataFrame:
 def _aggregate_group(group: pd.DataFrame, keys: dict[str, Any], include_median: bool) -> dict[str, Any]:
     ready = group[group["status"] == "READY"].copy()
     returns = pd.to_numeric(ready["return_pct"], errors="coerce").dropna()
+    alpha = pd.to_numeric(ready["alpha_vs_benchmark"], errors="coerce").dropna()
     sample_count = int(len(returns))
     hit_count = int((returns > 0).sum())
     row = {
@@ -134,6 +145,7 @@ def _aggregate_group(group: pd.DataFrame, keys: dict[str, Any], include_median: 
         "hit_count": hit_count,
         "hit_rate": float(hit_count / sample_count) if sample_count else 0.0,
         "avg_return": float(returns.mean()) if sample_count else 0.0,
+        "avg_alpha_vs_benchmark": float(alpha.mean()) if len(alpha) else 0.0,
     }
     if include_median:
         row["median_return"] = float(returns.median()) if sample_count else 0.0

@@ -112,6 +112,9 @@ def init_db(conn: duckdb.DuckDBPyConnection) -> None:
         "ALTER TABLE allocation_plan_items ADD COLUMN IF NOT EXISTS expected_cash DOUBLE DEFAULT 0",
         "ALTER TABLE allocation_plan_items ADD COLUMN IF NOT EXISTS cash_effect DOUBLE DEFAULT 0",
         "ALTER TABLE allocation_plan_items ADD COLUMN IF NOT EXISTS budget_consumption DOUBLE DEFAULT 0",
+        "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS benchmark_code VARCHAR",
+        "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS benchmark_return_pct DOUBLE",
+        "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS alpha_vs_benchmark DOUBLE",
     ]:
         try:
             conn.execute(col_ddl)

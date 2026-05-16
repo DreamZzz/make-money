@@ -520,14 +520,16 @@ def show_signal_outcomes():
     ready_samples = int(summary["sample_count"].sum()) if not summary.empty else 0
     pending_samples = int(summary["pending_count"].sum()) if not summary.empty else 0
     avg_return = _weighted_average(summary, "avg_return", "sample_count")
+    avg_alpha = _weighted_average(summary, "avg_alpha_vs_benchmark", "sample_count")
     hit_rate = _weighted_average(summary, "hit_rate", "sample_count")
     best_row = summary.sort_values(["avg_return", "sample_count"], ascending=[False, False]).head(1)
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("READY样本", f"{ready_samples}")
     c2.metric("PENDING样本", f"{pending_samples}")
     c3.metric("平均收益", f"{avg_return:.1%}")
-    c4.metric("命中率", f"{hit_rate:.1%}")
+    c4.metric("平均超额", f"{avg_alpha:+.1%}")
+    c5.metric("命中率", f"{hit_rate:.1%}")
     if not best_row.empty:
         row = best_row.iloc[0]
         st.caption(
@@ -545,16 +547,18 @@ def show_signal_outcomes():
             "hit_count": "命中数",
             "hit_rate": "命中率",
             "avg_return": "平均收益",
+            "avg_alpha_vs_benchmark": "平均超额",
             "median_return": "中位收益",
         })
         display["周期"] = display["周期"].map(lambda value: f"T+{int(value)}")
         st.dataframe(
-            display[["策略", "周期", "READY样本", "PENDING样本", "命中数", "命中率", "平均收益", "中位收益"]],
+            display[["策略", "周期", "READY样本", "PENDING样本", "命中数", "命中率", "平均收益", "平均超额", "中位收益"]],
             hide_index=True,
             width="stretch",
             column_config={
                 "命中率": st.column_config.NumberColumn(format="%.1%"),
                 "平均收益": st.column_config.NumberColumn(format="%+.1%"),
+                "平均超额": st.column_config.NumberColumn(format="%+.1%"),
                 "中位收益": st.column_config.NumberColumn(format="%+.1%"),
             },
         )
@@ -572,16 +576,18 @@ def show_signal_outcomes():
                 "hit_count": "命中数",
                 "hit_rate": "命中率",
                 "avg_return": "平均收益",
+                "avg_alpha_vs_benchmark": "平均超额",
             })
             display["月份"] = pd.to_datetime(display["月份"]).dt.strftime("%Y-%m")
             display["周期"] = display["周期"].map(lambda value: f"T+{int(value)}")
             st.dataframe(
-                display[["月份", "策略", "周期", "READY样本", "PENDING样本", "命中数", "命中率", "平均收益"]],
+                display[["月份", "策略", "周期", "READY样本", "PENDING样本", "命中数", "命中率", "平均收益", "平均超额"]],
                 hide_index=True,
                 width="stretch",
                 column_config={
                     "命中率": st.column_config.NumberColumn(format="%.1%"),
                     "平均收益": st.column_config.NumberColumn(format="%+.1%"),
+                    "平均超额": st.column_config.NumberColumn(format="%+.1%"),
                 },
             )
             ready = monthly[monthly["sample_count"] > 0].copy()
@@ -612,17 +618,25 @@ def show_signal_outcomes():
             "outcome_date": "观察日",
             "outcome_price": "观察价",
             "return_pct": "收益",
+            "benchmark_code": "基准",
+            "benchmark_return_pct": "基准收益",
+            "alpha_vs_benchmark": "超额收益",
             "status": "状态",
         })
         display["周期"] = display["周期"].map(lambda value: f"T+{int(value)}")
         st.dataframe(
-            display[["成交日", "策略", "周期", "状态", "代码", "名称", "方向", "成交价", "观察日", "观察价", "收益", "信号ID"]],
+            display[[
+                "成交日", "策略", "周期", "状态", "代码", "名称", "方向", "成交价",
+                "观察日", "观察价", "收益", "基准", "基准收益", "超额收益", "信号ID",
+            ]],
             hide_index=True,
             width="stretch",
             column_config={
                 "成交价": st.column_config.NumberColumn(format="%.2f"),
                 "观察价": st.column_config.NumberColumn(format="%.2f"),
                 "收益": st.column_config.NumberColumn(format="%+.1%"),
+                "基准收益": st.column_config.NumberColumn(format="%+.1%"),
+                "超额收益": st.column_config.NumberColumn(format="%+.1%"),
             },
         )
 

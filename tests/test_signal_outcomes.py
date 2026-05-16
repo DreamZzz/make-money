@@ -72,3 +72,71 @@ def test_update_signal_outcomes_scores_sell_positive_when_price_falls():
     assert result == {"updated": 1, "ready": 1, "pending": 0}
     assert row == pytest.approx((0.25, "READY"))
     conn.close()
+
+
+def test_update_signal_outcomes_persists_benchmark_relative_alpha_for_cn_signal():
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    conn.execute("INSERT INTO stock_info (symbol, country, name) VALUES ('000001', 'CN', '测试股')")
+    conn.execute("""
+        INSERT INTO signals (
+            signal_id, model_name, model_version, symbol, signal_ts, side,
+            executed, execution_price, execution_date, status
+        )
+        VALUES (
+            'buy_signal', 'alpha158', '1.0', '000001', TIMESTAMP '2026-05-01 15:00:00',
+            'BUY', TRUE, 10, DATE '2026-05-02', 'FILLED'
+        )
+    """)
+    conn.execute("""
+        INSERT INTO daily_price (symbol, trade_date, close)
+        VALUES ('000001', DATE '2026-05-03', 11)
+    """)
+    conn.execute("""
+        INSERT INTO index_daily (index_code, trade_date, close)
+        VALUES
+            ('000300', DATE '2026-05-02', 1000),
+            ('000300', DATE '2026-05-03', 1050)
+    """)
+
+    result = update_signal_outcomes(conn, horizons=(1,))
+    row = conn.execute("""
+        SELECT benchmark_code, benchmark_return_pct, alpha_vs_benchmark
+        FROM signal_outcomes
+        WHERE signal_id = 'buy_signal' AND horizon_days = 1
+    """).fetchone()
+
+    assert result == {"updated": 1, "ready": 1, "pending": 0}
+    assert row[0] == "000300"
+    assert row[1:] == pytest.approx((0.05, 0.05))
+    conn.close()
+
+
+def test_update_signal_outcomes_leaves_alpha_empty_when_benchmark_is_missing():
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    conn.execute("INSERT INTO stock_info (symbol, country, name) VALUES ('000001', 'CN', '测试股')")
+    conn.execute("""
+        INSERT INTO signals (
+            signal_id, model_name, model_version, symbol, signal_ts, side,
+            executed, execution_price, execution_date, status
+        )
+        VALUES (
+            'buy_signal', 'alpha158', '1.0', '000001', TIMESTAMP '2026-05-01 15:00:00',
+            'BUY', TRUE, 10, DATE '2026-05-02', 'FILLED'
+        )
+    """)
+    conn.execute("""
+        INSERT INTO daily_price (symbol, trade_date, close)
+        VALUES ('000001', DATE '2026-05-03', 11)
+    """)
+
+    update_signal_outcomes(conn, horizons=(1,))
+    row = conn.execute("""
+        SELECT benchmark_code, benchmark_return_pct, alpha_vs_benchmark
+        FROM signal_outcomes
+        WHERE signal_id = 'buy_signal' AND horizon_days = 1
+    """).fetchone()
+
+    assert row == ("000300", None, None)
+    conn.close()

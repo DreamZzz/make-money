@@ -168,6 +168,9 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
     outcome_date     DATE,
     outcome_price    DOUBLE,
     return_pct       DOUBLE,
+    benchmark_code   VARCHAR,
+    benchmark_return_pct DOUBLE,
+    alpha_vs_benchmark DOUBLE,
     status           VARCHAR DEFAULT 'PENDING', -- READY / PENDING
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
