@@ -59,6 +59,57 @@ def test_job_manager_workflow_stops_after_failed_step(monkeypatch, tmp_path):
     assert "after" not in log_text
 
 
+def test_job_manager_persists_step_diagnostics_for_failure(monkeypatch, tmp_path):
+    jobs = {
+        "flow": _job("flow", [
+            jm.JobStep("ok", "ok", [sys.executable, "-c", "print('ok')"]),
+            jm.JobStep(
+                "fail",
+                "fail",
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; print('stdout-before'); sys.stderr.write('stderr-boom\\n'); sys.exit(7)",
+                ],
+            ),
+        ], kind="workflow")
+    }
+    _install_jobs(monkeypatch, tmp_path, jobs)
+
+    run = jm.run_job("flow")
+    failed_step = run.steps[1]
+
+    assert run.status == jm.FAILED
+    assert failed_step["status"] == jm.FAILED
+    assert failed_step["exit_code"] == 7
+    assert failed_step["cmd_text"].endswith("sys.exit(7)")
+    assert failed_step["duration_seconds"] >= 0
+    assert "stdout-before" in failed_step["log_excerpt"]
+    assert "stderr-boom" in failed_step["log_excerpt"]
+
+
+def test_job_manager_latest_failure_diagnostic_identifies_failed_step(monkeypatch, tmp_path):
+    jobs = {
+        "flow": _job("flow", [
+            jm.JobStep("ok", "ok", [sys.executable, "-c", "print('ok')"]),
+            jm.JobStep("fail", "fail", [sys.executable, "-c", "import sys; print('fatal detail'); sys.exit(3)"]),
+            jm.JobStep("after", "after", [sys.executable, "-c", "print('after')"]),
+        ], kind="workflow")
+    }
+    _install_jobs(monkeypatch, tmp_path, jobs)
+
+    run = jm.run_job("flow")
+    diagnostic = jm.latest_failure_diagnostic(run)
+
+    assert diagnostic is not None
+    assert diagnostic["run_id"] == run.run_id
+    assert diagnostic["step_key"] == "fail"
+    assert diagnostic["step_label"] == "fail"
+    assert diagnostic["exit_code"] == 3
+    assert diagnostic["cmd_text"].endswith("sys.exit(3)")
+    assert "fatal detail" in diagnostic["log_excerpt"]
+
+
 def test_job_manager_degraded_step_continues_and_marks_workflow(monkeypatch, tmp_path):
     jobs = {
         "flow": _job("flow", [

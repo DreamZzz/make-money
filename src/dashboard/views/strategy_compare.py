@@ -21,6 +21,7 @@ from src.dashboard.job_manager import (
     JobRun,
     active_run,
     advanced_jobs,
+    latest_failure_diagnostic,
     latest_run,
     poll_run,
     scenario_jobs,
@@ -194,6 +195,19 @@ def _format_duration(run: JobRun | None) -> str:
     return f"{sec}s"
 
 
+def _format_seconds(value) -> str:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if pd.isna(seconds):
+        return "—"
+    if seconds >= 60:
+        minutes, sec = divmod(int(seconds), 60)
+        return f"{minutes}m {sec}s"
+    return f"{seconds:.1f}s"
+
+
 def _step_progress(run: JobRun | None) -> tuple[int, int]:
     if run is None:
         return 0, 0
@@ -291,19 +305,42 @@ def _render_run_status(run: JobRun | None, active: JobRun | None) -> None:
         st.success(f"最近完成：{run.data.get('job_label', run.job_key)}")
     elif run.status == FAILED:
         st.error(f"最近任务失败：{run.data.get('error') or '请查看日志定位原因'}")
+        diagnostic = latest_failure_diagnostic(run)
+        if diagnostic is not None:
+            with st.container(border=True):
+                st.markdown("**失败诊断**")
+                cols = st.columns(4)
+                cols[0].metric("失败步骤", diagnostic.get("step_label") or diagnostic.get("step_key") or "—")
+                cols[1].metric("退出码", str(diagnostic.get("exit_code")))
+                cols[2].metric("耗时", _format_seconds(diagnostic.get("duration_seconds")))
+                cols[3].metric("状态", _STATUS_TEXT.get(diagnostic.get("status"), diagnostic.get("status") or "—"))
+                st.caption(diagnostic.get("cmd_text") or "无命令记录")
+                excerpt = str(diagnostic.get("log_excerpt") or "").strip()
+                if excerpt:
+                    st.code(excerpt, language="text", line_numbers=False)
 
     steps = pd.DataFrame(run.steps)
     if not steps.empty:
-        display = steps[["label", "status", "started_at", "ended_at", "exit_code"]].copy()
+        for column, default in [
+            ("duration_seconds", None),
+            ("exit_code", None),
+            ("started_at", None),
+            ("ended_at", None),
+        ]:
+            if column not in steps.columns:
+                steps[column] = default
+        display = steps[["label", "status", "started_at", "ended_at", "exit_code", "duration_seconds"]].copy()
         display["status"] = display["status"].map(lambda s: _STATUS_TEXT.get(s, s))
         display["started_at"] = display["started_at"].map(_format_dt)
         display["ended_at"] = display["ended_at"].map(_format_dt)
+        display["duration_seconds"] = display["duration_seconds"].map(_format_seconds)
         display = display.rename(columns={
             "label": "步骤",
             "status": "状态",
             "started_at": "开始",
             "ended_at": "结束",
             "exit_code": "退出码",
+            "duration_seconds": "耗时",
         })
         st.dataframe(display, hide_index=True, width="stretch")
 

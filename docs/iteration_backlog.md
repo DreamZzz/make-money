@@ -18,9 +18,9 @@ This file is the durable project backlog. Keep it small enough to review every w
 
 ## Current Baseline
 
-- Latest pushed commit before P1-07: `5faaee1` (`feat: add manual core fund execution plan`).
+- Latest pushed commit before P1-08: `13fa154` (`feat: add exposure quality warnings`).
 - Review v2 baseline correction: the external v2 review used `origin/main` (`23b8178`) and did not include local commits `93e9995` and `9e000f4`.
-- Test baseline: `pytest -q` passed with 181 tests on 2026-05-16.
+- Test baseline: `pytest -q` passed with 183 tests on 2026-05-16.
 - Lint baseline: `ruff check .` passed on 2026-05-16.
 - Durable rule: before starting new alpha work, finish the survivorship-bias impact report so future backtests have a trust anchor.
 - Validation-period data stance: do not assume Tushare or other paid data sources are available; prefer Baostock snapshots plus official public adjustment announcements for index membership history.
@@ -45,7 +45,7 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 | P1-05 | Automate current-holding fundamentals coverage | Done | Codex | Monitor the next daily close run for the new non-blocking fundamentals step | Current holdings have 0 missing values for the four fields after daily close; failures are logged per symbol without blocking the close |
 | P1-06 | Core fund execution planning v2 | Done | Codex | Monitor the next allocation plan output in Dashboard before any manual core fund operation | Dashboard shows actionable core fund BUY/ADD/REDUCE plan with budget consumption and no mutation of paper orders |
 | P1-07 | Exposure monitor quality thresholds | Done | Codex | Monitor exposure warnings during the next paper-trade cycle | Dashboard flags exposure risks with deterministic thresholds and tests for each warning state |
-| P1-08 | Daily close failure diagnostics | Proposed | Codex | Persist per-step close status and stderr excerpts to a durable job run table/file | Dashboard can show latest failed step, command, return code, and last log excerpt without reading terminal history |
+| P1-08 | Daily close failure diagnostics | Done | Codex | Use the failure diagnostic card for the next failed close run before opening raw logs | Dashboard can show latest failed step, command, return code, and last log excerpt without reading terminal history |
 
 ### P2 - Feedback And Alpha Expansion
 
@@ -136,6 +136,14 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 - Landed: Portfolio Dashboard shows active exposure-quality warnings above the industry/size/position tables; all-clear state is explicit.
 - Real local check: current 13 stock holdings are OK under defaults: top1 8.6%, Top5 41.8%, max industry 23.1%, unknown industry 0.0%, PE coverage 91.8%, PB coverage 100.0%.
 - Verification evidence: `pytest tests/test_exposure_monitor.py -q` passed with 5 tests; targeted `ruff check` passed for exposure monitor, portfolio dashboard, config, and exposure tests.
+
+### 2026-05-16 P1-08 Daily Close Failure Diagnostics
+
+- Landed: Dashboard job runner now persists per-step `cmd_text`, `duration_seconds`, and `log_excerpt` in each durable run JSON file while still streaming full logs to disk.
+- Landed: `latest_failure_diagnostic()` extracts the failed step, command, return code, duration, and output excerpt directly from the run record.
+- Landed: Strategy Compare / task workbench shows a failure diagnostic card with failed step, exit code, command, duration, and recent output before the raw log console.
+- Compatibility: old run JSON records without new diagnostic fields remain renderable in Dashboard.
+- Verification evidence: `pytest tests/test_dashboard_job_manager.py tests/test_dashboard_runtime_scripts.py -q` passed with 16 tests; targeted `ruff check` passed for job manager, strategy compare view, and related tests.
 
 ## P1 Candidates
 

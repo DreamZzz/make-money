@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -71,6 +72,7 @@ FAILED = "FAILED"
 SKIPPED = "SKIPPED"
 TERMINAL_STATUSES = {SUCCEEDED, DEGRADED, FAILED}
 ACTIVE_STATUSES = {PENDING, RUNNING}
+STEP_EXCERPT_LINES = 30
 
 
 @dataclass(frozen=True)
@@ -362,7 +364,8 @@ def run_job(job_key: str, run_id: Optional[str] = None) -> JobRun:
         _append_log(run_id, f"\n--- {index + 1}/{len(job.steps)} {step.label} ---\n")
         _append_log(run_id, f"$ {' '.join(step.cmd)}\n")
 
-        retcode = _run_step(run_id, step)
+        step_result = _run_step(run_id, step)
+        retcode = int(step_result["exit_code"])
         if retcode in step.degraded_exit_codes:
             status = DEGRADED
             degraded = True
@@ -373,7 +376,14 @@ def run_job(job_key: str, run_id: Optional[str] = None) -> JobRun:
         _append_log(run_id, f"--- {step.label} exit={retcode} ---\n")
 
         data = _read_run_data(run_id) or data
-        _mark_step(data, step.key, status, ended_at=_now(), exit_code=retcode)
+        _mark_step(
+            data,
+            step.key,
+            status,
+            ended_at=_now(),
+            exit_code=retcode,
+            diagnostics=step_result,
+        )
         _write_run_data(run_id, data)
 
         if retcode != 0 and status != DEGRADED and not step.allow_failure:
@@ -449,6 +459,32 @@ def tail_log(run_id: Optional[str], lines: int = 200) -> str:
     return "\n".join(text.splitlines()[-lines:])
 
 
+def latest_failure_diagnostic(run: JobRun | dict[str, Any] | None) -> dict[str, Any] | None:
+    if run is None:
+        return None
+    data = run.data if isinstance(run, JobRun) else run
+    steps = list(data.get("steps", []))
+    failed = next((step for step in steps if step.get("status") == FAILED), None)
+    if failed is None:
+        failed = next((step for step in steps if step.get("exit_code") not in (None, 0)), None)
+    if failed is None:
+        return None
+    return {
+        "run_id": data.get("run_id", ""),
+        "job_key": data.get("job_key", ""),
+        "job_label": data.get("job_label", ""),
+        "step_key": failed.get("key", ""),
+        "step_label": failed.get("label", ""),
+        "status": failed.get("status", ""),
+        "exit_code": failed.get("exit_code"),
+        "cmd_text": failed.get("cmd_text") or _cmd_text(failed.get("cmd", [])),
+        "started_at": failed.get("started_at"),
+        "ended_at": failed.get("ended_at"),
+        "duration_seconds": failed.get("duration_seconds"),
+        "log_excerpt": failed.get("log_excerpt", ""),
+    }
+
+
 def _create_run_record(job_key: str) -> str:
     job = _get_job(job_key)
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
@@ -478,10 +514,13 @@ def _new_run_data(job: JobDefinition, run_id: str) -> dict[str, Any]:
                 "key": step.key,
                 "label": step.label,
                 "cmd": step.cmd,
+                "cmd_text": _cmd_text(step.cmd),
                 "status": PENDING,
                 "started_at": None,
                 "ended_at": None,
                 "exit_code": None,
+                "duration_seconds": None,
+                "log_excerpt": "",
             }
             for step in job.steps
         ],
@@ -518,19 +557,32 @@ def _append_log(run_id: str, text: str) -> None:
             fh.write("\n")
 
 
-def _run_step(run_id: str, step: JobStep) -> int:
+def _run_step(run_id: str, step: JobStep) -> dict[str, Any]:
     data = _read_run_data(run_id)
     if not data:
-        return 1
+        return _step_result(step, 1, 0.0, "missing run data")
+    started = datetime.now()
+    excerpt: deque[str] = deque(maxlen=STEP_EXCERPT_LINES)
     with Path(data["log_path"]).open("a", encoding="utf-8") as log_file:
         proc = subprocess.Popen(
             step.cmd,
-            stdout=log_file,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             cwd=str(PROJECT_ROOT),
             env=_command_env(),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
         )
-        return proc.wait()
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                log_file.write(line)
+                log_file.flush()
+                excerpt.append(line.rstrip("\n"))
+        exit_code = proc.wait()
+    duration = max((datetime.now() - started).total_seconds(), 0.0)
+    return _step_result(step, exit_code, duration, "\n".join(excerpt))
 
 
 def _mark_step(
@@ -540,6 +592,7 @@ def _mark_step(
     started_at: Optional[str] = None,
     ended_at: Optional[str] = None,
     exit_code: Optional[int] = None,
+    diagnostics: Optional[dict[str, Any]] = None,
 ) -> None:
     for step in data.get("steps", []):
         if step.get("key") != step_key:
@@ -551,7 +604,24 @@ def _mark_step(
             step["ended_at"] = ended_at
         if exit_code is not None:
             step["exit_code"] = exit_code
+        if diagnostics is not None:
+            step["cmd_text"] = diagnostics.get("cmd_text", step.get("cmd_text", ""))
+            step["duration_seconds"] = diagnostics.get("duration_seconds")
+            step["log_excerpt"] = diagnostics.get("log_excerpt", "")
         return
+
+
+def _step_result(step: JobStep, exit_code: int, duration_seconds: float, log_excerpt: str) -> dict[str, Any]:
+    return {
+        "exit_code": int(exit_code),
+        "cmd_text": _cmd_text(step.cmd),
+        "duration_seconds": round(float(duration_seconds), 3),
+        "log_excerpt": log_excerpt,
+    }
+
+
+def _cmd_text(cmd: list[str]) -> str:
+    return " ".join(str(part) for part in cmd)
 
 
 def _get_job(job_key: str) -> JobDefinition:
