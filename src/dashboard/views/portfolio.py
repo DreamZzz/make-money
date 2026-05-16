@@ -12,6 +12,7 @@ import streamlit as st
 
 from src.config import load_config
 from src.dashboard.db import DuckDBError, db_error_widget, get_conn, query_df
+from src.dashboard.signal_outcome_service import load_signal_outcome_snapshot
 from src.portfolio.exposure_monitor import DEFAULT_BENCHMARK_INDEX, ExposureRiskThresholds, load_exposure_snapshot
 
 ACTION_LABELS = {
@@ -497,6 +498,146 @@ def show_orders():
     )
 
 
+@st.cache_data(ttl=300)
+def _load_signal_outcomes() -> dict[str, pd.DataFrame]:
+    conn = get_conn()
+    try:
+        return load_signal_outcome_snapshot(conn)
+    finally:
+        conn.close()
+
+
+def show_signal_outcomes():
+    st.subheader("信号收益跟踪")
+    snapshot = _load_signal_outcomes()
+    summary = snapshot["summary"].copy()
+    monthly = snapshot["monthly"].copy()
+    detail = snapshot["detail"].copy()
+    if summary.empty and detail.empty:
+        st.info("暂无已完成的信号收益样本。收盘闭环会在纸交易和净值更新后自动运行 `src.signals.outcome_tracker update`。")
+        return
+
+    ready_samples = int(summary["sample_count"].sum()) if not summary.empty else 0
+    pending_samples = int(summary["pending_count"].sum()) if not summary.empty else 0
+    avg_return = _weighted_average(summary, "avg_return", "sample_count")
+    hit_rate = _weighted_average(summary, "hit_rate", "sample_count")
+    best_row = summary.sort_values(["avg_return", "sample_count"], ascending=[False, False]).head(1)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("READY样本", f"{ready_samples}")
+    c2.metric("PENDING样本", f"{pending_samples}")
+    c3.metric("平均收益", f"{avg_return:.1%}")
+    c4.metric("命中率", f"{hit_rate:.1%}")
+    if not best_row.empty:
+        row = best_row.iloc[0]
+        st.caption(
+            f"当前最佳：{row['model_name']} · T+{int(row['horizon_days'])} · "
+            f"平均 {float(row['avg_return']):.1%} · 样本 {int(row['sample_count'])}"
+        )
+
+    tab_summary, tab_monthly, tab_detail = st.tabs(["策略汇总", "月度反馈", "明细"])
+    with tab_summary:
+        display = summary.rename(columns={
+            "model_name": "策略",
+            "horizon_days": "周期",
+            "sample_count": "READY样本",
+            "pending_count": "PENDING样本",
+            "hit_count": "命中数",
+            "hit_rate": "命中率",
+            "avg_return": "平均收益",
+            "median_return": "中位收益",
+        })
+        display["周期"] = display["周期"].map(lambda value: f"T+{int(value)}")
+        st.dataframe(
+            display[["策略", "周期", "READY样本", "PENDING样本", "命中数", "命中率", "平均收益", "中位收益"]],
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "命中率": st.column_config.NumberColumn(format="%.1%"),
+                "平均收益": st.column_config.NumberColumn(format="%+.1%"),
+                "中位收益": st.column_config.NumberColumn(format="%+.1%"),
+            },
+        )
+
+    with tab_monthly:
+        if monthly.empty:
+            st.caption("暂无月度可聚合样本。")
+        else:
+            display = monthly.rename(columns={
+                "model_name": "策略",
+                "execution_month": "月份",
+                "horizon_days": "周期",
+                "sample_count": "READY样本",
+                "pending_count": "PENDING样本",
+                "hit_count": "命中数",
+                "hit_rate": "命中率",
+                "avg_return": "平均收益",
+            })
+            display["月份"] = pd.to_datetime(display["月份"]).dt.strftime("%Y-%m")
+            display["周期"] = display["周期"].map(lambda value: f"T+{int(value)}")
+            st.dataframe(
+                display[["月份", "策略", "周期", "READY样本", "PENDING样本", "命中数", "命中率", "平均收益"]],
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "命中率": st.column_config.NumberColumn(format="%.1%"),
+                    "平均收益": st.column_config.NumberColumn(format="%+.1%"),
+                },
+            )
+            ready = monthly[monthly["sample_count"] > 0].copy()
+            if not ready.empty:
+                ready["label"] = ready["model_name"] + " T+" + ready["horizon_days"].astype(str)
+                fig = px.bar(
+                    ready,
+                    x="execution_month",
+                    y="avg_return",
+                    color="label",
+                    barmode="group",
+                    title="月度平均信号收益",
+                )
+                fig.update_layout(height=360, xaxis_title=None, yaxis_title="平均收益")
+                fig.update_yaxes(tickformat=".1%")
+                st.plotly_chart(fig, width="stretch")
+
+    with tab_detail:
+        display = detail.rename(columns={
+            "signal_id": "信号ID",
+            "model_name": "策略",
+            "symbol": "代码",
+            "stock_name": "名称",
+            "side": "方向",
+            "horizon_days": "周期",
+            "execution_date": "成交日",
+            "execution_price": "成交价",
+            "outcome_date": "观察日",
+            "outcome_price": "观察价",
+            "return_pct": "收益",
+            "status": "状态",
+        })
+        display["周期"] = display["周期"].map(lambda value: f"T+{int(value)}")
+        st.dataframe(
+            display[["成交日", "策略", "周期", "状态", "代码", "名称", "方向", "成交价", "观察日", "观察价", "收益", "信号ID"]],
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "成交价": st.column_config.NumberColumn(format="%.2f"),
+                "观察价": st.column_config.NumberColumn(format="%.2f"),
+                "收益": st.column_config.NumberColumn(format="%+.1%"),
+            },
+        )
+
+
+def _weighted_average(df: pd.DataFrame, value_col: str, weight_col: str) -> float:
+    if df.empty:
+        return 0.0
+    weights = pd.to_numeric(df[weight_col], errors="coerce").fillna(0.0)
+    values = pd.to_numeric(df[value_col], errors="coerce").fillna(0.0)
+    total_weight = float(weights.sum())
+    if total_weight <= 0:
+        return 0.0
+    return float((values * weights).sum() / total_weight)
+
+
 # ----
 st.title("💼 组合监控")
 try:
@@ -513,5 +654,7 @@ try:
     show_holdings()
     st.divider()
     show_orders()
+    st.divider()
+    show_signal_outcomes()
 except DuckDBError as e:
     db_error_widget(e)
