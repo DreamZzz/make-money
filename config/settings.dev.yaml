@@ -1,0 +1,10 @@
+# Optional development overlay. Activate with `MM_ENV=dev`.
+runtime:
+  env: dev
+
+logging:
+  level: DEBUG
+
+data:
+  max_update_failures: 5
+

@@ -1,4 +1,5 @@
 """公共配置：项目路径 + 默认参数。YAML 配置文件为可选覆盖项。"""
+import copy
 import os
 from pathlib import Path
 
@@ -154,22 +155,45 @@ DEFAULT_CONFIG = {
 
 def _deep_merge(base: dict, override: dict) -> dict:
     """递归合并：override 中的键覆盖 base，缺失的键保留 base 默认值"""
-    result = base.copy()
+    result = copy.deepcopy(base)
     for k, v in override.items():
         if k in result and isinstance(result[k], dict) and isinstance(v, dict):
             result[k] = _deep_merge(result[k], v)
         else:
-            result[k] = v
+            result[k] = copy.deepcopy(v)
     return result
 
 
-def load_config() -> dict:
-    """加载配置：以 DEFAULT_CONFIG 为基准，YAML 存在时深度合并覆盖"""
+def load_config(env: str | None = None, config_dir: str | Path | None = None) -> dict:
+    """加载配置：DEFAULT_CONFIG -> settings.yaml -> settings.<MM_ENV>.yaml。"""
     import yaml
 
-    yaml_path = PROJECT_ROOT / "config" / "settings.yaml"
-    if yaml_path.exists():
-        with open(yaml_path) as f:
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
+    base_dir = Path(config_dir) if config_dir is not None else PROJECT_ROOT / "config"
+    for yaml_path in _config_paths(base_dir, env):
+        if not yaml_path.exists():
+            continue
+        with yaml_path.open(encoding="utf-8") as f:
             overrides = yaml.safe_load(f) or {}
-        return _deep_merge(DEFAULT_CONFIG, overrides)
-    return DEFAULT_CONFIG.copy()
+        if not isinstance(overrides, dict):
+            raise ValueError(f"Config file must contain a YAML mapping: {yaml_path}")
+        cfg = _deep_merge(cfg, overrides)
+    return cfg
+
+
+def _config_paths(config_dir: Path, env: str | None = None) -> list[Path]:
+    paths = [config_dir / "settings.yaml"]
+    env_name = _normalize_env_name(os.environ.get("MM_ENV", "") if env is None else env)
+    if env_name:
+        paths.append(config_dir / f"settings.{env_name}.yaml")
+    return paths
+
+
+def _normalize_env_name(env: str | None) -> str:
+    env_name = str(env or "").strip().lower()
+    if not env_name:
+        return ""
+    allowed = env_name.replace("-", "").replace("_", "")
+    if not allowed.isalnum():
+        raise ValueError("MM_ENV may only contain letters, numbers, hyphens, and underscores")
+    return env_name

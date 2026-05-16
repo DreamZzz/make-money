@@ -55,7 +55,7 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 | P2-05 | Extend signal outcomes to benchmark-relative returns | Done | Codex | Re-check alpha columns after the next READY outcome rows are produced | `signal_outcomes` can report raw return and benchmark-relative alpha per signal/horizon |
 | P2-06 | Value-quality fundamental factor prototype | Done | Codex | Keep research-only; improve historical valuation/size coverage before another promotion attempt | 2022-2025 standalone backtest and correlation evidence are recorded; current prototype is not approved for production |
 | P2-07 | Qlib PortAna artifact | Done | Codex | Re-check after the next successful Qlib run that Dashboard exposes the artifact status/path | Successful Qlib runs can link to a saved attribution/position report artifact |
-| P2-08 | Environment-specific config loading | Proposed | Codex | Design `MM_ENV` config merge order | `config/settings.dev.yaml` and `config/settings.prod.yaml` override safely without breaking default local runs |
+| P2-08 | Environment-specific config loading | Done | Codex | Use `MM_ENV=dev` or `MM_ENV=prod` only when an explicit environment overlay is needed | `config/settings.dev.yaml` and `config/settings.prod.yaml` override safely without breaking default local runs |
 
 ### P3 - Retail Usability And Hygiene
 
@@ -192,6 +192,14 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 - Real local check: Homebrew Python lacks Qlib report APIs and correctly records `status=skipped`; `/usr/bin/python3` has `qlib.contrib.report.analysis_position.report_graph` and generated `/Users/zhaoqiang/Documents/Project/make-money/output/qlib_portana/QLIB-WALK_FORWARD-20260514221005-AD82EC/portana.html` with 563 report rows.
 - Verification evidence: focused PortAna and report-service tests passed; full verification is recorded with this commit.
 
+### 2026-05-16 P2-08 Environment-Specific Config Loading
+
+- Landed: `load_config()` now merges configs in this order: built-in defaults, `config/settings.yaml`, then optional `config/settings.<MM_ENV>.yaml`.
+- Landed: explicit `load_config(env=..., config_dir=...)` arguments make the merge order testable without changing process-wide environment state.
+- Safety behavior: unset `MM_ENV` preserves the existing local behavior; unsafe environment names such as `../prod` are rejected before any path is built.
+- Landed: `config/settings.dev.yaml` and `config/settings.prod.yaml` provide minimal opt-in overlays for development and production runs.
+- Verification evidence: focused config tests passed; full verification is recorded with this commit.
+
 ## P1 Candidates
 
 | ID | Item | Status | Owner | Next Action | Acceptance |
@@ -206,7 +214,7 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 | ID | Item | Status | Owner | Next Action | Acceptance |
 |---|---|---|---|---|---|
 | P2-01 | Qlib PortAna report artifacts | Done | Codex | Superseded by current priority item P2-07 | Each successful Qlib run can produce a linked position/attribution report |
-| P2-02 | Environment-specific config loading | Proposed | Codex | Design `MM_ENV` config merge order | `config/settings.dev.yaml` and `config/settings.prod.yaml` override safely |
+| P2-02 | Environment-specific config loading | Done | Codex | Superseded by current priority item P2-08 | `config/settings.dev.yaml` and `config/settings.prod.yaml` override safely |
 | P2-03 | Small-account risk profiles | Proposed | Codex | Design profile interaction with allocator | 50k/100k/300k modes show realistic lot and concentration constraints |
 
 ## P3 Hygiene

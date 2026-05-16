@@ -1,0 +1,10 @@
+# Optional production overlay. Activate with `MM_ENV=prod`.
+runtime:
+  env: prod
+
+logging:
+  level: INFO
+
+data:
+  max_update_failures: 0
+
