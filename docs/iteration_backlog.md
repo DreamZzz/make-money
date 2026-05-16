@@ -34,8 +34,8 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 | ID | Item | Status | Owner | Next Action | Acceptance |
 |---|---|---|---|---|---|
 | P0-06 | Guard Qlib production readiness | Done | Codex | Monitor next `predict-latest` / `refresh-production` output for publish-gate skips | Qlib training refuses static current-only universes; publish and production inference reject models below IC/excess/drawdown gates |
-| P0-07 | Import reliable historical index membership archives | In Progress | Codex | Install/run the Baostock fetcher for 000300/000905, then cross-check sample periods against official public adjustment announcements before running `scripts/backfill_index_membership.py` | `build_membership_coverage_report` shows earliest coverage <= 2020-01-01 and at least one closed historical interval per required index; source labels remain free/public unless paid use is explicitly approved |
-| P0-08 | Produce survivorship impact report v2 | Blocked | Codex | After P0-07, regenerate Qlib data and run static-vs-dynamic universe comparison | `docs/survivorship_impact_v2.md` reports annual return, excess return, Sharpe, max drawdown, and turnover delta between static and point-in-time universes |
+| P0-07 | Import reliable historical index membership archives | Done | Codex | Re-run after each future membership refresh or source change | `build_membership_coverage_report` shows earliest coverage <= 2020-01-01 and active counts of 300/500; sample validation against public adjustment announcements is recorded in `docs/index_membership_sample_validation.md` |
+| P0-08 | Produce survivorship impact report v2 | Ready | Codex | Run static-vs-dynamic universe comparison using the Baostock point-in-time archive | `docs/survivorship_impact_v2.md` reports annual return, excess return, Sharpe, max drawdown, and turnover delta between static and point-in-time universes |
 | P0-09 | One-week daily close monitoring | Ready | Codex | Run/inspect daily close after each trading day for one week | 5 consecutive close runs complete or produce actionable failure notes; track `skipped_untradeable`, `skipped_turnover`, `skipped_budget`, signal outcome updates |
 
 ### P1 - Execution And Risk Loop
@@ -107,8 +107,9 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 - Landed: `scripts/backfill_index_membership.py --replace-indexes` can replace synthetic current snapshot rows when importing an authoritative historical archive, preventing duplicated active member counts.
 - Dependency stance: `baostock>=0.9.1` is recorded as a free data dependency, but local Homebrew Python blocks global pip installs; use a project environment or temporary target install before running the real fetch.
 - Real fetch/import: Baostock monthly snapshots for 2020-01-01 through 2026-05-16 generated 1,621 interval rows. Imported rows produce active counts `000300=300` and `000905=500`; Qlib `csi300/csi500/csi800` dynamic instrument checks pass after `prepare-data`.
+- Sample validation: public adjustment examples from 2020-12, 2023-12, and 2024-06 match local Baostock intervals in direction and month-end timing; see `docs/index_membership_sample_validation.md`.
 - Verification evidence: `pytest tests/test_baostock_membership_fetcher.py tests/test_index_membership_backfill.py -q` passed; `ruff check scripts/fetch_index_membership_baostock.py tests/test_baostock_membership_fetcher.py pyproject.toml docs/iteration_backlog.md` passed; full `pytest -q` passed with 164 tests before the import-replace fix.
-- Remaining: compare at least two known semiannual adjustment periods against official public announcements, then run survivorship impact v2.
+- Remaining: run survivorship impact v2 and state the monthly-snapshot effective-date limitation in the report.
 
 ## P1 Candidates
 
