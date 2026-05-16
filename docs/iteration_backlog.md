@@ -18,7 +18,7 @@ This file is the durable project backlog. Keep it small enough to review every w
 
 ## Current Baseline
 
-- Latest reviewed commit: `8f5d342` (`docs: validate free membership archive samples`), local `main` is ahead of `origin/main` until pushed.
+- Latest reviewed commit: `067c19d` (`docs: add survivorship impact report`), local `main` matches `origin/main`.
 - Review v2 baseline correction: the external v2 review used `origin/main` (`23b8178`) and did not include local commits `93e9995` and `9e000f4`.
 - Test baseline: `pytest -q` passed with 170 tests on 2026-05-16.
 - Lint baseline: `ruff check .` passed on 2026-05-16.
@@ -36,7 +36,7 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 | P0-06 | Guard Qlib production readiness | Done | Codex | Monitor next `predict-latest` / `refresh-production` output for publish-gate skips | Qlib training refuses static current-only universes; publish and production inference reject models below IC/excess/drawdown gates |
 | P0-07 | Import reliable historical index membership archives | Done | Codex | Re-run after each future membership refresh or source change | `build_membership_coverage_report` shows earliest coverage <= 2020-01-01 and active counts of 300/500; sample validation against public adjustment announcements is recorded in `docs/index_membership_sample_validation.md` |
 | P0-08 | Produce survivorship impact report v2 | Done | Codex | Use PIT universe as the default trust anchor for future model PK and promotion discussions | `docs/survivorship_impact_v2.md` reports annual return, excess return, Sharpe, max drawdown, and turnover delta between static and point-in-time universes |
-| P0-09 | One-week daily close monitoring | Ready | Codex | Run/inspect daily close after each trading day for one week | 5 consecutive close runs complete or produce actionable failure notes; track `skipped_untradeable`, `skipped_turnover`, `skipped_budget`, signal outcome updates |
+| P0-09 | One-week daily close monitoring | In Progress | Codex | Continue the 2026-05-18 to 2026-05-22 close-run checks in `docs/daily_close_monitoring.md` | 5 consecutive close runs complete or produce actionable failure notes; track `skipped_untradeable`, `skipped_turnover`, `skipped_budget`, signal outcome updates |
 
 ### P1 - Execution And Risk Loop
 
@@ -111,6 +111,7 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 - Verification evidence: `pytest tests/test_baostock_membership_fetcher.py tests/test_index_membership_backfill.py -q` passed; `ruff check scripts/fetch_index_membership_baostock.py tests/test_baostock_membership_fetcher.py pyproject.toml docs/iteration_backlog.md` passed; full `pytest -q` passed with 164 tests before the import-replace fix.
 - Landed P0-08: `docs/survivorship_impact_v2.md` compares current static constituents with the Baostock point-in-time archive on the production Alpha158 predictions. Static current constituents overstate annual return by 6.29 pp in the 2024-01-01 to 2026-05-14 sample, so future model PK/promotion discussion should treat PIT universe results as the trust anchor.
 - Remaining caveat: Baostock membership is monthly snapshot history, so official adjustment effective dates are approximated to month-end; this is acceptable for the six-month free-data validation period but should be revisited before paid-data-grade audit.
+- Started P0-09: `docs/daily_close_monitoring.md` records the 2026-05-16 weekend baseline run. The latest `daily_close_workflow` succeeded 11/11 steps; paper trading executed 0/261 signals because there was no trading day after 2026-05-15 in local data, so it is a useful baseline but not counted toward the 5 trading-day target.
 
 ## P1 Candidates
 
