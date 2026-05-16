@@ -63,6 +63,12 @@ DEFAULT_CONFIG = {
         "valid_end": "2023-12-31",
         "test_start": "2024-01-01",
         "test_end": None,
+        "publish_gate": {
+            "min_ic_mean": 0.0,
+            "min_icir": 0.30,
+            "min_excess_return": 0.0,
+            "max_drawdown_floor": -0.35,
+        },
     },
     "portfolio": {
         "initial_capital_cn": 300000,

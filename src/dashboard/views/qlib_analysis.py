@@ -9,6 +9,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from src.backtest.qlib_runner import _publish_gate_thresholds
 from src.config import PROJECT_ROOT
 from src.dashboard.db import DuckDBError, db_error_widget, get_conn, query_df, query_one
 from src.dashboard.qlib_report_service import (
@@ -1068,7 +1069,14 @@ def show_model_registry():
     display["ic_mean"] = display["ic_mean"].map(lambda x: _num(x, 4))
     display["icir"] = display["icir"].map(lambda x: _num(x, 3))
     st.dataframe(display, hide_index=True, width="stretch")
-    st.caption("发布门槛：IC Mean > 0、ICIR > 0、最大回撤不低于 -60%、相对基准年化劣化不超过 5%。")
+    gate = _publish_gate_thresholds()
+    st.caption(
+        "发布门槛："
+        f"IC Mean > {gate['min_ic_mean']:.3f}、"
+        f"ICIR >= {gate['min_icir']:.2f}、"
+        f"最大回撤不低于 {gate['max_drawdown_floor']:.0%}、"
+        f"主基准超额 > {gate['min_excess_return']:.1%}。"
+    )
     st.code("python -m src.backtest.qlib_runner publish --experiment-id <实验ID>", language="bash")
 
 

@@ -30,6 +30,18 @@ from src.portfolio.execution_guards import check_open_tradeable
 MODEL_NAME = "alpha158"
 DEFAULT_TOP_N = 50
 _QLIB_INITIALIZED = False
+QLIB_OPEN_END_TS = pd.Timestamp("2099-12-31")
+QLIB_MARKET_INDEX_CODES = {
+    "csi300": ("000300",),
+    "csi500": ("000905",),
+    "csi800": ("000300", "000905"),
+}
+DEFAULT_PUBLISH_GATE = {
+    "min_ic_mean": 0.0,
+    "min_icir": 0.30,
+    "min_excess_return": 0.0,
+    "max_drawdown_floor": -0.35,
+}
 DEFAULT_SMALL_ACCOUNT_PROFILES = [
     {
         "account_capital": 300_000,
@@ -162,6 +174,101 @@ def _load_lgb_params(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     return params
 
 
+def _publish_gate_thresholds() -> dict[str, float]:
+    gate = load_config().get("qlib", {}).get("publish_gate", {}) or {}
+    thresholds = DEFAULT_PUBLISH_GATE.copy()
+    for key, default in DEFAULT_PUBLISH_GATE.items():
+        try:
+            thresholds[key] = float(gate.get(key, default))
+        except (TypeError, ValueError):
+            thresholds[key] = float(default)
+    return thresholds
+
+
+def _dynamic_membership_history_check(
+    membership_df: pd.DataFrame,
+    required_index_codes: tuple[str, ...] | list[str],
+) -> tuple[bool, str]:
+    required = {str(code) for code in required_index_codes}
+    if not required:
+        return True, ""
+    if membership_df is None or membership_df.empty:
+        return False, f"缺少指数历史成分记录: {', '.join(sorted(required))}"
+
+    df = membership_df.copy()
+    for column in ("index_code", "symbol", "start_date", "end_date"):
+        if column not in df.columns:
+            return False, f"index_member_history 缺少字段 {column}"
+    df["index_code"] = df["index_code"].astype(str)
+    missing = sorted(required - set(df["index_code"].unique()))
+    if missing:
+        return False, f"缺少指数历史成分记录: {', '.join(missing)}"
+
+    stale_codes = []
+    for code in sorted(required):
+        sub = df[df["index_code"] == code]
+        end_dates = pd.to_datetime(sub["end_date"], errors="coerce")
+        has_closed_range = bool(((end_dates.notna()) & (end_dates < QLIB_OPEN_END_TS)).any())
+        if not has_closed_range:
+            stale_codes.append(code)
+    if stale_codes:
+        return (
+            False,
+            "index_member_history 仅包含当前快照或开口区间，缺少历史成分退出记录: "
+            + ", ".join(stale_codes),
+        )
+    return True, ""
+
+
+def _dynamic_instrument_ranges_check(instruments: pd.DataFrame, market: str) -> tuple[bool, str]:
+    if instruments is None or instruments.empty:
+        return False, f"{market} instruments 为空"
+    for column in ("symbol", "start", "end"):
+        if column not in instruments.columns:
+            return False, f"{market} instruments 缺少字段 {column}"
+    end_dates = pd.to_datetime(instruments["end"], errors="coerce")
+    has_closed_range = bool(((end_dates.notna()) & (end_dates < QLIB_OPEN_END_TS)).any())
+    if not has_closed_range:
+        return False, f"{market} instruments 缺少动态历史区间，疑似仍是当前成分股静态池"
+    return True, ""
+
+
+def _read_qlib_instruments(market: str) -> pd.DataFrame:
+    path = PROJECT_ROOT / "qlib_data" / "cn_data" / "instruments" / f"{market}.txt"
+    if not path.exists():
+        return pd.DataFrame(columns=["symbol", "start", "end"])
+    return pd.read_csv(path, sep="\t", names=["symbol", "start", "end"], dtype=str)
+
+
+def _ensure_dynamic_universe_ready(market: str) -> None:
+    required_codes = QLIB_MARKET_INDEX_CODES.get(str(market).lower())
+    if not required_codes:
+        return
+
+    from src.data_pipeline.index_membership import load_index_member_history
+    from src.data_pipeline.loader import get_connection
+
+    conn = get_connection(read_only=True)
+    try:
+        membership = load_index_member_history(conn, required_codes)
+    finally:
+        conn.close()
+
+    ok, reason = _dynamic_membership_history_check(membership, required_codes)
+    if not ok:
+        raise RuntimeError(
+            f"Qlib {market} universe 未通过动态历史成分检查：{reason}。"
+            "请先回补 index_member_history，再运行 prepare-data。"
+        )
+
+    ok, reason = _dynamic_instrument_ranges_check(_read_qlib_instruments(str(market).lower()), market)
+    if not ok:
+        raise RuntimeError(
+            f"Qlib {market} instruments 未通过动态历史区间检查：{reason}。"
+            "请重新运行 prepare-data 生成动态 instruments。"
+        )
+
+
 def _segments_from_config(test_end: str | None = None) -> dict[str, str]:
     cfg = load_config().get("qlib", {})
     return {
@@ -283,6 +390,7 @@ def train_alpha158(
         raise RuntimeError(f"Qlib 未安装或不可导入：{env.get('error')}")
     if not _qlib_data_status("cn")["ready"]:
         raise RuntimeError("Qlib CN 数据未就绪，请先运行 prepare-data")
+    _ensure_dynamic_universe_ready(market)
 
     import qlib  # type: ignore
     from qlib.contrib.data.handler import Alpha158  # type: ignore
@@ -1499,20 +1607,33 @@ def _register_candidate(experiment_id: str, model_version: str, metrics: dict[st
 
 
 def _passes_publish_gate(metrics: dict[str, Any]) -> tuple[bool, str]:
+    thresholds = _publish_gate_thresholds()
     ic = metrics.get("ic_mean")
     icir = metrics.get("icir")
     max_dd = metrics.get("max_drawdown")
     excess = metrics.get("excess_return")
     failures = []
-    if ic is None or ic <= 0:
-        failures.append("IC Mean <= 0")
-    if icir is None or icir <= 0:
-        failures.append("ICIR <= 0")
-    if max_dd is None or max_dd < -0.60:
-        failures.append("最大回撤低于 -60%")
-    if excess is not None and excess < -0.05:
-        failures.append("相对基准年化劣化超过 5%")
+    min_ic = thresholds["min_ic_mean"]
+    min_icir = thresholds["min_icir"]
+    min_excess = thresholds["min_excess_return"]
+    max_dd_floor = thresholds["max_drawdown_floor"]
+    if ic is None or ic <= min_ic:
+        failures.append(f"IC Mean <= {min_ic:.3f}")
+    if icir is None or icir < min_icir:
+        failures.append(f"ICIR < {min_icir:.2f}")
+    if max_dd is None or max_dd < max_dd_floor:
+        failures.append(f"最大回撤低于 {max_dd_floor:.0%}")
+    if excess is None or excess <= min_excess:
+        failures.append(f"主基准超额 <= {min_excess:.1%}")
     return not failures, "；".join(failures)
+
+
+def _production_gate_failure(model_version: str, metrics: dict[str, Any] | str | None) -> str | None:
+    parsed = _safe_json_dict(metrics)
+    ok, reason = _passes_publish_gate(parsed)
+    if ok:
+        return None
+    return f"production 模型 {model_version} 未通过当前发布门槛: {reason}"
 
 
 def _rebalance_period_expr(rebalance_freq: str) -> str:
@@ -1657,7 +1778,7 @@ def refresh_production_predictions(force: bool = False, min_coverage: float = 0.
             SELECT r.model_version, r.experiment_id, r.model_path,
                    e.mode, e.train_start, e.train_end, e.valid_start, e.valid_end,
                    e.test_start, e.test_end, e.config_snapshot,
-                   c.params_json, c.best_top_n
+                   c.params_json, c.best_top_n, r.metrics_json
             FROM qlib_model_registry r
             LEFT JOIN qlib_experiments e ON e.experiment_id = r.experiment_id
             LEFT JOIN qlib_candidate_results c
@@ -1669,6 +1790,14 @@ def refresh_production_predictions(force: bool = False, min_coverage: float = 0.
         """, [MODEL_NAME]).fetchone()
         if not row:
             return {"status": "SKIPPED", "reason": "没有 production Qlib 模型"}
+        gate_failure = _production_gate_failure(row[0], row[13])
+        if gate_failure:
+            return {
+                "status": "SKIPPED",
+                "reason": gate_failure,
+                "experiment_id": row[1],
+                "model_version": row[0],
+            }
         latest_data = _latest_covered_cn_data_date(conn, min_coverage=min_coverage)
         latest_pred = conn.execute("""
             SELECT MAX(prediction_date)
@@ -2116,6 +2245,12 @@ def publish_model(experiment_id: str, force: bool = False) -> dict[str, Any]:
                 "best_holding_days": row[15],
                 "best_rebalance_freq": row[16],
                 "metrics": metrics,
+                "publish_gate": {
+                    "passed": ok,
+                    "reason": reason,
+                    "forced": force,
+                    "thresholds": _publish_gate_thresholds(),
+                },
             },
         )
         production_path = row[4] or manifest_path
@@ -2164,7 +2299,7 @@ def predict_latest(model: str = "production", top_n: int | None = None) -> dict[
             init_db(conn)
             prod = conn.execute("""
                 SELECT r.model_version, r.experiment_id, c.best_top_n, c.best_holding_days,
-                       c.best_rebalance_freq
+                       c.best_rebalance_freq, r.metrics_json
                 FROM qlib_model_registry r
                 LEFT JOIN qlib_candidate_results c
                   ON c.experiment_id = r.experiment_id
@@ -2175,6 +2310,14 @@ def predict_latest(model: str = "production", top_n: int | None = None) -> dict[
             """, [MODEL_NAME]).fetchone()
             if not prod:
                 return {"status": "SKIPPED", "reason": "没有 production Qlib 模型"}
+            gate_failure = _production_gate_failure(prod[0], prod[5])
+            if gate_failure:
+                return {
+                    "status": "SKIPPED",
+                    "reason": gate_failure,
+                    "experiment_id": prod[1],
+                    "model_version": prod[0],
+                }
             resolved_top_n = int(top_n or prod[2] or DEFAULT_TOP_N)
             expected_holding_days = int(prod[3] or 5)
             latest_data = _latest_covered_cn_data_date(conn)

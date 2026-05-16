@@ -6,9 +6,12 @@ import pytest
 
 from src.backtest import qlib_runner
 from src.backtest.qlib_runner import (
+    _dynamic_instrument_ranges_check,
+    _dynamic_membership_history_check,
     _latest_covered_cn_data_date,
     _passes_publish_gate,
     _persist_prediction_frame,
+    _production_gate_failure,
     _production_inference_segments,
     _should_skip_rebalance_signal_write,
     _valid_rebalance_horizon,
@@ -650,10 +653,37 @@ def test_qlib_topn_t1_open_simulation_applies_cost_and_turnover():
     assert returns_cost.attrs["turnover"] == pytest.approx(252.0)
 
 
-def test_qlib_publish_gate_requires_positive_ic_and_reasonable_drawdown():
+def test_qlib_publish_gate_requires_positive_excess_icir_floor_and_reasonable_drawdown():
     ok, reason = _passes_publish_gate({
         "ic_mean": 0.01,
         "icir": 0.2,
+        "max_drawdown": -0.25,
+        "excess_return": 0.01,
+    })
+    assert not ok
+    assert "ICIR" in reason
+
+    ok, reason = _passes_publish_gate({
+        "ic_mean": 0.01,
+        "icir": 0.35,
+        "max_drawdown": -0.25,
+        "excess_return": -0.01,
+    })
+    assert not ok
+    assert "主基准超额" in reason
+
+    ok, reason = _passes_publish_gate({
+        "ic_mean": 0.01,
+        "icir": 0.35,
+        "max_drawdown": -0.40,
+        "excess_return": 0.01,
+    })
+    assert not ok
+    assert "最大回撤" in reason
+
+    ok, reason = _passes_publish_gate({
+        "ic_mean": 0.01,
+        "icir": 0.35,
         "max_drawdown": -0.25,
         "excess_return": 0.01,
     })
@@ -669,6 +699,75 @@ def test_qlib_publish_gate_requires_positive_ic_and_reasonable_drawdown():
     assert not ok
     assert "IC Mean" in reason
     assert "最大回撤" in reason
+
+
+def test_qlib_universe_checks_reject_current_snapshot_only_membership():
+    current_only = pd.DataFrame({
+        "index_code": ["000300", "000905"],
+        "symbol": ["000001", "000002"],
+        "start_date": [pd.Timestamp("2016-01-04").date(), pd.Timestamp("2016-01-04").date()],
+        "end_date": [None, None],
+    })
+
+    ok, reason = _dynamic_membership_history_check(current_only, ["000300", "000905"])
+
+    assert not ok
+    assert "历史成分" in reason
+
+    historical = current_only.copy()
+    historical.loc[0, "end_date"] = pd.Timestamp("2021-12-31").date()
+    historical.loc[1, "end_date"] = pd.Timestamp("2022-06-30").date()
+
+    ok, reason = _dynamic_membership_history_check(historical, ["000300", "000905"])
+
+    assert ok
+    assert reason == ""
+
+
+def test_qlib_universe_checks_reject_static_open_ended_instruments():
+    static_instruments = pd.DataFrame({
+        "symbol": ["000001", "000002"],
+        "start": ["2016-01-04", "2020-01-01"],
+        "end": ["2099-12-31", "2099-12-31"],
+    })
+
+    ok, reason = _dynamic_instrument_ranges_check(static_instruments, "csi800")
+
+    assert not ok
+    assert "动态历史区间" in reason
+
+    dynamic_instruments = pd.DataFrame({
+        "symbol": ["000001", "000001", "000002"],
+        "start": ["2016-01-04", "2022-01-01", "2020-01-01"],
+        "end": ["2021-12-31", "2099-12-31", "2099-12-31"],
+    })
+
+    ok, reason = _dynamic_instrument_ranges_check(dynamic_instruments, "csi800")
+
+    assert ok
+    assert reason == ""
+
+
+def test_production_gate_failure_rechecks_existing_production_metrics():
+    reason = _production_gate_failure("v1", {
+        "ic_mean": 0.01,
+        "icir": 0.2,
+        "max_drawdown": -0.25,
+        "excess_return": 0.01,
+    })
+
+    assert reason is not None
+    assert "v1" in reason
+    assert "ICIR" in reason
+
+    reason = _production_gate_failure("v2", {
+        "ic_mean": 0.01,
+        "icir": 0.35,
+        "max_drawdown": -0.25,
+        "excess_return": 0.01,
+    })
+
+    assert reason is None
 
 
 def test_qlib_candidate_catalog_contains_runnable_lgbm_and_skipped_model_choices():

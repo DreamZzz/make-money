@@ -28,7 +28,7 @@ def test_qlib_report_flattens_experiment_metrics_and_benchmarks():
         "max_drawdown": -0.18,
         "turnover": 12.5,
         "ic_mean": 0.015,
-        "icir": 0.25,
+        "icir": 0.35,
         "rank_ic_mean": 0.02,
         "rank_ic_positive_rate": 0.58,
         "primary_benchmark": "MIXED_EQUAL",

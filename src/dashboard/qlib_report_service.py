@@ -6,7 +6,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.backtest.qlib_runner import score_candidate_grid_row
+from src.backtest.qlib_runner import _publish_gate_thresholds, score_candidate_grid_row
 
 METRIC_COLUMNS = [
     "annual_return",
@@ -156,7 +156,7 @@ METRIC_GLOSSARY = [
         "label": "ICIR",
         "meaning": "IC 均值除以 IC 波动，衡量预测能力是否稳定。",
         "plain_explanation": "不是偶尔蒙对，而是看模型选股能力是否比较稳定地在线。",
-        "watch_out": "ICIR > 0 是发布门槛之一，但仍要结合收益和回撤。",
+        "watch_out": "默认发布门槛要求 ICIR >= 0.30，但仍要结合主基准超额和回撤。",
     },
     {
         "metric": "rank_ic_positive_rate",
@@ -489,11 +489,12 @@ def _experiment_verdict(row: pd.Series) -> str:
     icir = _to_float(row.get("icir"))
     excess = _to_float(row.get("excess_return"))
     max_drawdown = _to_float(row.get("max_drawdown"))
-    if ic <= 0 or icir <= 0:
+    thresholds = _publish_gate_thresholds()
+    if ic <= thresholds["min_ic_mean"] or icir < thresholds["min_icir"]:
         return "IC未过门槛"
-    if max_drawdown < -0.60:
+    if max_drawdown < thresholds["max_drawdown_floor"]:
         return "回撤过大"
-    if excess < -0.05:
+    if excess <= thresholds["min_excess_return"]:
         return "明显跑输基准"
     if excess > 0:
         return "可重点关注"
