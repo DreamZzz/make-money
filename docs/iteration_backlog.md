@@ -1,7 +1,7 @@
 # make-money Iteration Backlog
 
-Review date: 2026-05-15
-Last reviewed: 2026-05-15
+Review date: 2026-05-16
+Last reviewed: 2026-05-16
 Review cadence: weekly after Friday close, plus ad-hoc review after any P0 production change
 
 This file is the durable project backlog. Keep it small enough to review every week, and link each active item to a design, implementation plan, test evidence, and final outcome.
@@ -17,10 +17,52 @@ This file is the durable project backlog. Keep it small enough to review every w
 
 ## Current Baseline
 
-- Latest reviewed commit: `fea9f60`
-- Existing dirty worktree note: `src/dashboard/job_manager.py` has unrelated local edits and should not be overwritten by backlog work.
-- Test baseline from review: `pytest -q` passed with 112 tests.
-- Lint baseline from review: `ruff` is installed locally via Homebrew; `ruff check .` now passes with baseline ignores for `E402` and `E501`.
+- Latest reviewed commit: `9e000f4` (`feat: guard qlib production readiness`), local `main` is ahead of `origin/main` until pushed.
+- Review v2 baseline correction: the external v2 review used `origin/main` (`23b8178`) and did not include local commits `93e9995` and `9e000f4`.
+- Test baseline: `pytest -q` passed with 160 tests on 2026-05-16.
+- Lint baseline: `ruff check .` passed on 2026-05-16.
+- Durable rule: before starting new alpha work, finish the survivorship-bias impact report so future backtests have a trust anchor.
+
+## Current Priority Backlog
+
+This section is the executable queue after the 2026-05-16 v2 review reconciliation. Items are intentionally ordered by decision impact, not by implementation size.
+
+### P0 - Trustworthiness Gates
+
+| ID | Item | Status | Owner | Next Action | Acceptance |
+|---|---|---|---|---|---|
+| P0-06 | Guard Qlib production readiness | Done | Codex | Monitor next `predict-latest` / `refresh-production` output for publish-gate skips | Qlib training refuses static current-only universes; publish and production inference reject models below IC/excess/drawdown gates |
+| P0-07 | Import reliable historical index membership archives | Blocked | User/Codex | Acquire official or curated 000300/000905 membership interval files, then run `scripts/backfill_index_membership.py` | `build_membership_coverage_report` shows earliest coverage <= 2020-01-01 and at least one closed historical interval per required index |
+| P0-08 | Produce survivorship impact report v2 | Blocked | Codex | After P0-07, regenerate Qlib data and run static-vs-dynamic universe comparison | `docs/survivorship_impact_v2.md` reports annual return, excess return, Sharpe, max drawdown, and turnover delta between static and point-in-time universes |
+| P0-09 | One-week daily close monitoring | Ready | Codex | Run/inspect daily close after each trading day for one week | 5 consecutive close runs complete or produce actionable failure notes; track `skipped_untradeable`, `skipped_turnover`, `skipped_budget`, signal outcome updates |
+
+### P1 - Execution And Risk Loop
+
+| ID | Item | Status | Owner | Next Action | Acceptance |
+|---|---|---|---|---|---|
+| P1-05 | Automate current-holding fundamentals coverage | Ready | Codex | Add a small updater for held symbols' `industry`, `market_cap`, `pe_ttm`, and `pb` using the proven AkShare sources/fallbacks | Current holdings have 0 missing values for the four fields after daily close; failures are logged per symbol without blocking the close |
+| P1-06 | Core fund execution planning v2 | Ready | Codex | Convert allocator core advisory items into a manual execution plan with expected cash, action, and reason; do not auto-fill orders yet | Dashboard shows actionable core fund BUY/ADD/REDUCE plan with budget consumption and no mutation of paper orders |
+| P1-07 | Exposure monitor quality thresholds | Proposed | Codex | Define warning bands for unknown industry, max industry weight, top5 concentration, PE/PB coverage | Dashboard flags exposure risks with deterministic thresholds and tests for each warning state |
+| P1-08 | Daily close failure diagnostics | Proposed | Codex | Persist per-step close status and stderr excerpts to a durable job run table/file | Dashboard can show latest failed step, command, return code, and last log excerpt without reading terminal history |
+
+### P2 - Feedback And Alpha Expansion
+
+| ID | Item | Status | Owner | Next Action | Acceptance |
+|---|---|---|---|---|---|
+| P2-04 | Signal outcomes Dashboard | Ready | Codex | Add model_name x month x horizon tables/charts for hit rate, average return, and sample count | Dashboard exposes T+1/T+5/T+20 realized signal performance with empty-state handling |
+| P2-05 | Extend signal outcomes to benchmark-relative returns | Proposed | Codex | Add benchmark return lookup and `alpha_vs_benchmark`; consider T+60 only after enough history exists | `signal_outcomes` can report raw return and benchmark-relative alpha per signal/horizon |
+| P2-06 | Value-quality fundamental factor prototype | Proposed | Codex | Design financial data ingestion and a small `value_quality.py` strategy using existing `financials`, `pe_ttm`, and `pb` fields | 2022-2025 standalone backtest exists and correlation with Alpha158/technical sleeve is measured |
+| P2-07 | Qlib PortAna artifact | Proposed | Codex | Verify installed Qlib report APIs and add optional HTML artifact output | Successful Qlib runs can link to a saved attribution/position report artifact |
+| P2-08 | Environment-specific config loading | Proposed | Codex | Design `MM_ENV` config merge order | `config/settings.dev.yaml` and `config/settings.prod.yaml` override safely without breaking default local runs |
+
+### P3 - Retail Usability And Hygiene
+
+| ID | Item | Status | Owner | Next Action | Acceptance |
+|---|---|---|---|---|---|
+| P3-04 | Small-account risk profiles | Proposed | Codex | Design profile interaction with allocator, lot-size skips, and max holdings | 50k/100k/300k modes produce realistic position counts and explicit one-lot funding hints |
+| P3-05 | Weekly operation summary card | Proposed | Codex | Add weekly suggested actions count, required cash, and estimated manual time to the weekly report | Retail user can see "operate N times / need cash Y / expected time T" before reading individual signals |
+| P3-06 | Retail user manual | Proposed | Codex | Draft after P0-08 and P1-06 stabilize | `docs/user_guide.md` explains weekly workflow, follow/ignore rules, failure modes, and manual execution discipline in <= 20 pages |
+| P3-07 | Strategy math unit tests expansion | Proposed | Codex | Add direct tests for ATR, RSI, Bollinger bands, and IC edge cases | Focused tests cover warmup, gaps, flat series, NaN handling, and known toy examples |
 
 ## Active P0 Track
 
@@ -46,6 +88,15 @@ This file is the durable project backlog. Keep it small enough to review every w
 - Remaining P0 data task: populate the archive importer with official historical adjustment files when available; the system-side ingestion path is now in place.
 - P1 design started: core-satellite allocator design is drafted at `docs/superpowers/specs/2026-05-15-p1-core-satellite-allocator-design.md`.
 - Verification: `pytest -q` passed with 133 tests on 2026-05-15; `ruff check .` passed after enabling the local Ruff baseline.
+
+### 2026-05-16 Review v2 Reconciliation And P0' Closeout
+
+- Baseline correction: the v2 review inspected `origin/main` and missed local commit `93e9995`, so P1 exposure monitoring, BUY turnover cap, and basic signal outcomes were already done locally.
+- Landed in `9e000f4`: Qlib production readiness guard now rejects static current-only universes and dynamic instruments without closed historical membership ranges.
+- Landed in `9e000f4`: model publish and production inference now use configurable gates for IC mean, ICIR, excess return, and max drawdown.
+- Decision: keep dynamic universe filtering in Qlib instruments generated by `scripts/convert_to_qlib.py`; `qlib_runner.py` acts as a guard instead of reimplementing a second per-date universe join inside every simulator.
+- Remaining P0 trust gap: the code path is guarded, but the historical archive itself still needs reliable 000300/000905 interval data before the survivorship impact report can be produced.
+- Verification: `ruff check .` passed; `pytest -q` passed with 160 tests; commit hook passed with Ruff plus 65-test smoke suite.
 
 ## P1 Candidates
 
