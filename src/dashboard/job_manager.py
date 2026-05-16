@@ -146,6 +146,11 @@ def _step(
 
 SINGLE_STEPS: dict[str, JobStep] = {
     "update": _step("update", "更新行情数据", [PYTHON, "-m", "src.data_pipeline.main", "update"]),
+    "fundamentals_coverage": _step(
+        "fundamentals_coverage",
+        "补当前持仓基础信息",
+        [PYTHON, "-m", "src.portfolio.fundamentals_coverage", "update"],
+    ),
     "index_funds_update": _step("index_funds_update", "更新指数基金数据", [PYTHON, "-m", "src.index_funds.pipeline", "update"]),
     "index_funds_signals": _step("index_funds_signals", "生成指数基金信号", [PYTHON, "-m", "src.index_funds.signals", "generate"]),
     "generate_signals": _step("generate_signals", "生成股票调仓信号", [PYTHON, "-m", "src.signals.generator"]),
@@ -235,6 +240,7 @@ JOB_DEFINITIONS: dict[str, JobDefinition] = {
         category="scenario",
         steps=(
             SINGLE_STEPS["update"],
+            SINGLE_STEPS["fundamentals_coverage"],
             SINGLE_STEPS["index_funds_update"],
             SINGLE_STEPS["index_funds_signals"],
             SINGLE_STEPS["generate_signals"],

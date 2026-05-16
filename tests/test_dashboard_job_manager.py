@@ -144,6 +144,20 @@ def test_daily_close_workflow_plans_allocation_before_paper_trade():
     assert jm.SINGLE_STEPS["allocation_plan"].cmd[:3] == [jm.PYTHON, "-m", "src.portfolio.allocator"]
 
 
+def test_daily_close_workflow_refreshes_holding_fundamentals_before_signals():
+    step_keys = [step.key for step in jm.JOB_DEFINITIONS["daily_close_workflow"].steps]
+
+    assert "fundamentals_coverage" in step_keys
+    assert step_keys.index("update") < step_keys.index("fundamentals_coverage")
+    assert step_keys.index("fundamentals_coverage") < step_keys.index("generate_signals")
+    assert jm.SINGLE_STEPS["fundamentals_coverage"].cmd == [
+        jm.PYTHON,
+        "-m",
+        "src.portfolio.fundamentals_coverage",
+        "update",
+    ]
+
+
 def test_daily_close_workflow_updates_signal_outcomes_after_nav_and_performance():
     step_keys = [step.key for step in jm.JOB_DEFINITIONS["daily_close_workflow"].steps]
 

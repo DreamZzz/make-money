@@ -19,6 +19,7 @@ def test_daily_close_restarts_dashboard_even_when_a_step_fails():
     assert "_resolve_python" in script
     assert "python3.12" in script
     assert "trap _restart_dashboard EXIT" in script
+    assert "src.portfolio.fundamentals_coverage update || true" in script
 
 
 def test_dashboard_app_renders_primary_pages_without_exceptions():

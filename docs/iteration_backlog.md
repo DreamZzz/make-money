@@ -18,9 +18,9 @@ This file is the durable project backlog. Keep it small enough to review every w
 
 ## Current Baseline
 
-- Latest reviewed commit: `067c19d` (`docs: add survivorship impact report`), local `main` matches `origin/main`.
+- Latest pushed commit: `067c19d` (`docs: add survivorship impact report`); local `main` is ahead until the P0-09/P1-05 work is pushed.
 - Review v2 baseline correction: the external v2 review used `origin/main` (`23b8178`) and did not include local commits `93e9995` and `9e000f4`.
-- Test baseline: `pytest -q` passed with 170 tests on 2026-05-16.
+- Test baseline: `pytest -q` passed with 177 tests on 2026-05-16.
 - Lint baseline: `ruff check .` passed on 2026-05-16.
 - Durable rule: before starting new alpha work, finish the survivorship-bias impact report so future backtests have a trust anchor.
 - Validation-period data stance: do not assume Tushare or other paid data sources are available; prefer Baostock snapshots plus official public adjustment announcements for index membership history.
@@ -42,7 +42,7 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 
 | ID | Item | Status | Owner | Next Action | Acceptance |
 |---|---|---|---|---|---|
-| P1-05 | Automate current-holding fundamentals coverage | Ready | Codex | Add a small updater for held symbols' `industry`, `market_cap`, `pe_ttm`, and `pb` using the proven AkShare sources/fallbacks | Current holdings have 0 missing values for the four fields after daily close; failures are logged per symbol without blocking the close |
+| P1-05 | Automate current-holding fundamentals coverage | Done | Codex | Monitor the next daily close run for the new non-blocking fundamentals step | Current holdings have 0 missing values for the four fields after daily close; failures are logged per symbol without blocking the close |
 | P1-06 | Core fund execution planning v2 | Ready | Codex | Convert allocator core advisory items into a manual execution plan with expected cash, action, and reason; do not auto-fill orders yet | Dashboard shows actionable core fund BUY/ADD/REDUCE plan with budget consumption and no mutation of paper orders |
 | P1-07 | Exposure monitor quality thresholds | Proposed | Codex | Define warning bands for unknown industry, max industry weight, top5 concentration, PE/PB coverage | Dashboard flags exposure risks with deterministic thresholds and tests for each warning state |
 | P1-08 | Daily close failure diagnostics | Proposed | Codex | Persist per-step close status and stderr excerpts to a durable job run table/file | Dashboard can show latest failed step, command, return code, and last log excerpt without reading terminal history |
@@ -112,6 +112,14 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 - Landed P0-08: `docs/survivorship_impact_v2.md` compares current static constituents with the Baostock point-in-time archive on the production Alpha158 predictions. Static current constituents overstate annual return by 6.29 pp in the 2024-01-01 to 2026-05-14 sample, so future model PK/promotion discussion should treat PIT universe results as the trust anchor.
 - Remaining caveat: Baostock membership is monthly snapshot history, so official adjustment effective dates are approximated to month-end; this is acceptable for the six-month free-data validation period but should be revisited before paid-data-grade audit.
 - Started P0-09: `docs/daily_close_monitoring.md` records the 2026-05-16 weekend baseline run. The latest `daily_close_workflow` succeeded 11/11 steps; paper trading executed 0/261 signals because there was no trading day after 2026-05-15 in local data, so it is a useful baseline but not counted toward the 5 trading-day target.
+
+### 2026-05-16 P1-05 Current Holding Fundamentals Coverage
+
+- Landed: `src.portfolio.fundamentals_coverage` checks latest positive `paper_positions` and fills missing `stock_info.industry`, `stock_info.market_cap`, `daily_price.pe_ttm`, and `daily_price.pb` for current holdings only.
+- Data-source behavior: the updater uses AkShare A-share spot data for market cap/PE/PB and per-symbol individual info for industry fallback; existing non-empty fields are preserved unless `--force` is used.
+- Operational behavior: `scripts/daily_close.sh` runs the updater 在行情更新后、信号生成前 with `|| true`; Dashboard `daily_close_workflow` has a matching `fundamentals_coverage` step before `generate_signals`.
+- Real local check: `python -m src.portfolio.fundamentals_coverage update` returned `status=OK` for 13 current holdings with 0 missing `industry/market_cap/pe_ttm/pb` fields and no external fetch needed.
+- Verification evidence: `pytest tests/test_fundamentals_coverage.py tests/test_dashboard_job_manager.py tests/test_dashboard_runtime_scripts.py -q` passed; `bash -n scripts/daily_close.sh` passed; targeted `ruff check` passed.
 
 ## P1 Candidates
 

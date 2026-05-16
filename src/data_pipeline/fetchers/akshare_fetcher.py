@@ -179,6 +179,109 @@ def fetch_hk_stock_info() -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def fetch_cn_stock_spot() -> pd.DataFrame:
+    """Fetch A-share spot valuation fields for small-scope metadata repair."""
+    try:
+        df = ak.stock_zh_a_spot_em()
+        return normalize_cn_stock_spot(df)
+    except Exception as e:
+        logger.warning(f"Fetch CN stock spot failed: {e}")
+        return _with_status(pd.DataFrame(), STATUS_SOURCE_ERROR, str(e))
+
+
+def normalize_cn_stock_spot(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return _with_status(pd.DataFrame(), STATUS_EMPTY)
+    out = df.rename(columns={
+        "代码": "symbol",
+        "名称": "name",
+        "市盈率-动态": "pe_ttm",
+        "市盈率": "pe_ttm",
+        "市净率": "pb",
+        "总市值": "market_cap",
+    }).copy()
+    keep = [col for col in ["symbol", "name", "pe_ttm", "pb", "market_cap"] if col in out.columns]
+    out = out[keep].copy()
+    out["symbol"] = out["symbol"].astype(str).str.zfill(6)
+    for col in ["pe_ttm", "pb"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+    if "market_cap" in out.columns:
+        out["market_cap"] = out["market_cap"].map(_market_cap_to_yi)
+    out["country"] = "CN"
+    return _with_status(out, STATUS_OK if not out.empty else STATUS_EMPTY)
+
+
+def fetch_cn_stock_individual_info(symbol: str) -> pd.DataFrame:
+    """Fetch per-symbol A-share metadata, mainly industry and market cap."""
+    try:
+        raw = ak.stock_individual_info_em(symbol=symbol)
+        return normalize_cn_stock_individual_info(symbol, raw)
+    except Exception as e:
+        logger.warning(f"Fetch CN individual info failed for {symbol}: {e}")
+        return _with_status(pd.DataFrame(), STATUS_SOURCE_ERROR, str(e))
+
+
+def normalize_cn_stock_individual_info(symbol: str, df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or len(df.columns) < 2:
+        return _with_status(pd.DataFrame(), STATUS_EMPTY)
+    work = df.copy()
+    if {"item", "value"}.issubset(work.columns):
+        item_col, value_col = "item", "value"
+    elif {"项目", "值"}.issubset(work.columns):
+        item_col, value_col = "项目", "值"
+    else:
+        item_col, value_col = work.columns[:2]
+    mapping = {
+        str(row[item_col]).strip(): row[value_col]
+        for _, row in work.iterrows()
+        if pd.notna(row.get(item_col))
+    }
+    industry = (
+        mapping.get("行业")
+        or mapping.get("所属行业")
+        or mapping.get("行业分类")
+        or mapping.get("板块")
+    )
+    market_cap = mapping.get("总市值") or mapping.get("总市值(元)") or mapping.get("总市值（元）")
+    name = mapping.get("股票简称") or mapping.get("简称") or mapping.get("名称")
+    out = pd.DataFrame([{
+        "symbol": str(symbol).zfill(6),
+        "country": "CN",
+        "name": None if pd.isna(name) else name,
+        "industry": None if pd.isna(industry) else industry,
+        "market_cap": _market_cap_to_yi(market_cap),
+    }])
+    return _with_status(out, STATUS_OK)
+
+
+def _market_cap_to_yi(value) -> float | None:
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip().replace(",", "")
+    if not text or text in {"-", "--", "nan", "None"}:
+        return None
+    multiplier = 1.0
+    if text.endswith("万亿"):
+        multiplier = 10_000.0
+        text = text[:-2]
+    elif text.endswith("亿"):
+        multiplier = 1.0
+        text = text[:-1]
+    elif text.endswith("万"):
+        multiplier = 1 / 10_000
+        text = text[:-1]
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    if multiplier != 1.0:
+        return number * multiplier
+    if abs(number) > 1_000_000:
+        return number / 100_000_000
+    return number
+
+
 def fetch_cn_index_daily(index_code: str, start_date: str, end_date: str) -> pd.DataFrame:
     """拉取A股指数日线，如 000300（沪深300）"""
     try:
