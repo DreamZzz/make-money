@@ -18,9 +18,9 @@ This file is the durable project backlog. Keep it small enough to review every w
 
 ## Current Baseline
 
-- Latest reviewed commit: `9e000f4` (`feat: guard qlib production readiness`), local `main` is ahead of `origin/main` until pushed.
+- Latest reviewed commit: `8f5d342` (`docs: validate free membership archive samples`), local `main` is ahead of `origin/main` until pushed.
 - Review v2 baseline correction: the external v2 review used `origin/main` (`23b8178`) and did not include local commits `93e9995` and `9e000f4`.
-- Test baseline: `pytest -q` passed with 160 tests on 2026-05-16.
+- Test baseline: `pytest -q` passed with 170 tests on 2026-05-16.
 - Lint baseline: `ruff check .` passed on 2026-05-16.
 - Durable rule: before starting new alpha work, finish the survivorship-bias impact report so future backtests have a trust anchor.
 - Validation-period data stance: do not assume Tushare or other paid data sources are available; prefer Baostock snapshots plus official public adjustment announcements for index membership history.
@@ -35,7 +35,7 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 |---|---|---|---|---|---|
 | P0-06 | Guard Qlib production readiness | Done | Codex | Monitor next `predict-latest` / `refresh-production` output for publish-gate skips | Qlib training refuses static current-only universes; publish and production inference reject models below IC/excess/drawdown gates |
 | P0-07 | Import reliable historical index membership archives | Done | Codex | Re-run after each future membership refresh or source change | `build_membership_coverage_report` shows earliest coverage <= 2020-01-01 and active counts of 300/500; sample validation against public adjustment announcements is recorded in `docs/index_membership_sample_validation.md` |
-| P0-08 | Produce survivorship impact report v2 | Ready | Codex | Run static-vs-dynamic universe comparison using the Baostock point-in-time archive | `docs/survivorship_impact_v2.md` reports annual return, excess return, Sharpe, max drawdown, and turnover delta between static and point-in-time universes |
+| P0-08 | Produce survivorship impact report v2 | Done | Codex | Use PIT universe as the default trust anchor for future model PK and promotion discussions | `docs/survivorship_impact_v2.md` reports annual return, excess return, Sharpe, max drawdown, and turnover delta between static and point-in-time universes |
 | P0-09 | One-week daily close monitoring | Ready | Codex | Run/inspect daily close after each trading day for one week | 5 consecutive close runs complete or produce actionable failure notes; track `skipped_untradeable`, `skipped_turnover`, `skipped_budget`, signal outcome updates |
 
 ### P1 - Execution And Risk Loop
@@ -109,7 +109,8 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 - Real fetch/import: Baostock monthly snapshots for 2020-01-01 through 2026-05-16 generated 1,621 interval rows. Imported rows produce active counts `000300=300` and `000905=500`; Qlib `csi300/csi500/csi800` dynamic instrument checks pass after `prepare-data`.
 - Sample validation: public adjustment examples from 2020-12, 2023-12, and 2024-06 match local Baostock intervals in direction and month-end timing; see `docs/index_membership_sample_validation.md`.
 - Verification evidence: `pytest tests/test_baostock_membership_fetcher.py tests/test_index_membership_backfill.py -q` passed; `ruff check scripts/fetch_index_membership_baostock.py tests/test_baostock_membership_fetcher.py pyproject.toml docs/iteration_backlog.md` passed; full `pytest -q` passed with 164 tests before the import-replace fix.
-- Remaining: run survivorship impact v2 and state the monthly-snapshot effective-date limitation in the report.
+- Landed P0-08: `docs/survivorship_impact_v2.md` compares current static constituents with the Baostock point-in-time archive on the production Alpha158 predictions. Static current constituents overstate annual return by 6.29 pp in the 2024-01-01 to 2026-05-14 sample, so future model PK/promotion discussion should treat PIT universe results as the trust anchor.
+- Remaining caveat: Baostock membership is monthly snapshot history, so official adjustment effective dates are approximated to month-end; this is acceptable for the six-month free-data validation period but should be revisited before paid-data-grade audit.
 
 ## P1 Candidates
 
