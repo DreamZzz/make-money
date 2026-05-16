@@ -4,6 +4,7 @@ AkShare 接口可能随版本变动，捕获异常时自动降级。
 """
 import os
 import random
+import re
 import threading
 import time
 
@@ -356,14 +357,147 @@ def fetch_index_member_snapshot(index_code: str) -> pd.DataFrame:
 def fetch_cn_financials(symbol: str) -> pd.DataFrame:
     """获取A股财务数据（资产负债表+利润表主要指标）"""
     try:
-        df = ak.stock_financial_abstract(symbol=symbol)
-        if df.empty:
-            return pd.DataFrame()
-        df["symbol"] = symbol
-        return df
+        raw = ak.stock_financial_abstract(symbol=symbol)
+        return normalize_cn_financial_abstract(symbol, raw)
     except Exception as e:
         logger.error(f"Fetch financials failed for {symbol}: {e}")
-        return pd.DataFrame()
+        return _with_status(pd.DataFrame(), STATUS_SOURCE_ERROR, str(e))
+
+
+FINANCIAL_COLUMNS = [
+    "symbol",
+    "report_date",
+    "revenue",
+    "net_profit",
+    "total_assets",
+    "total_equity",
+    "operating_cf",
+    "roe",
+    "roa",
+    "gross_margin",
+    "net_margin",
+    "debt_ratio",
+    "eps",
+    "bvps",
+]
+
+_FINANCIAL_LABELS = {
+    "revenue": ("营业总收入", "营业收入"),
+    "net_profit": ("归母净利润", "归属于母公司所有者的净利润", "净利润"),
+    "total_assets": ("资产总计", "总资产"),
+    "total_equity": ("股东权益合计(净资产)", "所有者权益合计", "股东权益合计"),
+    "operating_cf": ("经营现金流量净额", "经营活动产生的现金流量净额"),
+    "roe": ("净资产收益率(ROE)", "净资产收益率_平均", "摊薄净资产收益率"),
+    "roa": ("总资产报酬率(ROA)", "总资产报酬率", "总资产净利率_平均"),
+    "gross_margin": ("毛利率", "销售毛利率"),
+    "net_margin": ("销售净利率", "净利率"),
+    "debt_ratio": ("资产负债率",),
+    "eps": ("基本每股收益",),
+    "bvps": ("每股净资产", "每股净资产_最新股数"),
+}
+
+_MONEY_FIELDS = {"revenue", "net_profit", "total_assets", "total_equity", "operating_cf"}
+
+
+def normalize_cn_financial_abstract(symbol: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize AkShare stock_financial_abstract output into the financials schema."""
+    if df.empty:
+        return _with_status(pd.DataFrame(columns=FINANCIAL_COLUMNS), STATUS_EMPTY)
+    indicator_col = _pick_financial_indicator_column(df)
+    if indicator_col is None:
+        return _with_status(pd.DataFrame(columns=FINANCIAL_COLUMNS), STATUS_EMPTY)
+
+    work = df.copy()
+    work[indicator_col] = work[indicator_col].astype(str).str.strip()
+    report_cols = _financial_report_columns(work)
+    if not report_cols:
+        return _with_status(pd.DataFrame(columns=FINANCIAL_COLUMNS), STATUS_EMPTY)
+
+    rows = []
+    normalized_symbol = _normalize_cn_symbol(symbol)
+    for report_col in report_cols:
+        row = {
+            "symbol": normalized_symbol,
+            "report_date": pd.to_datetime(str(report_col), format="%Y%m%d").date(),
+        }
+        for field, labels in _FINANCIAL_LABELS.items():
+            value = _financial_value_for_period(work, indicator_col, labels, report_col)
+            row[field] = value / 100_000_000 if field in _MONEY_FIELDS and value is not None else value
+        if row.get("total_assets") is None:
+            row["total_assets"] = _derive_total_assets(row.get("total_equity"), row.get("debt_ratio"))
+        rows.append(row)
+
+    out = pd.DataFrame(rows, columns=FINANCIAL_COLUMNS)
+    out = out.dropna(how="all", subset=[col for col in FINANCIAL_COLUMNS if col not in {"symbol", "report_date"}])
+    out = out.sort_values("report_date", ascending=False).reset_index(drop=True)
+    return _with_status(out, STATUS_OK if not out.empty else STATUS_EMPTY)
+
+
+def _pick_financial_indicator_column(df: pd.DataFrame) -> str | None:
+    for column in ("指标", "item", "项目", "metric"):
+        if column in df.columns:
+            return column
+    return None
+
+
+def _financial_report_columns(df: pd.DataFrame) -> list[str]:
+    columns = []
+    for column in df.columns:
+        text = str(column)
+        if re.fullmatch(r"\d{8}", text):
+            try:
+                pd.to_datetime(text, format="%Y%m%d")
+            except ValueError:
+                continue
+            columns.append(column)
+    return sorted(columns, key=lambda value: str(value), reverse=True)
+
+
+def _financial_value_for_period(
+    df: pd.DataFrame,
+    indicator_col: str,
+    labels: tuple[str, ...],
+    report_col: str,
+) -> float | None:
+    indicators = df[indicator_col].astype(str).str.strip()
+    for label in labels:
+        matches = df.loc[indicators == label, report_col]
+        for value in matches:
+            parsed = _financial_number(value)
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _financial_number(value) -> float | None:
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip().replace(",", "").replace("%", "")
+    if not text or text in {"-", "--", "nan", "None"}:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _derive_total_assets(total_equity: float | None, debt_ratio: float | None) -> float | None:
+    if total_equity is None or debt_ratio is None:
+        return None
+    equity_ratio = 1 - debt_ratio / 100
+    if equity_ratio <= 0:
+        return None
+    return total_equity / equity_ratio
+
+
+def _normalize_cn_symbol(symbol: str) -> str:
+    text = str(symbol).strip()
+    if "." in text:
+        left, right = text.split(".", 1)
+        text = right if len(right) == 6 else left
+    if text.endswith(".0"):
+        text = text[:-2]
+    return text.zfill(6) if text.isdigit() and len(text) <= 6 else text
 
 
 def fetch_cn_industry() -> pd.DataFrame:

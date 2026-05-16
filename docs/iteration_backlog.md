@@ -18,9 +18,9 @@ This file is the durable project backlog. Keep it small enough to review every w
 
 ## Current Baseline
 
-- Latest pushed commit before P2-06: `0a126df` (`feat: add benchmark relative signal outcomes`).
+- Latest pushed commit before P2-06 financials backfill: `4af0dbd` (`feat: add value quality research prototype`).
 - Review v2 baseline correction: the external v2 review used `origin/main` (`23b8178`) and did not include local commits `93e9995` and `9e000f4`.
-- Test baseline: `pytest -q` passed with 191 tests on 2026-05-16.
+- Test baseline: `pytest -q` passed with 195 tests on 2026-05-16.
 - Lint baseline: `ruff check .` passed on 2026-05-16.
 - Durable rule: before starting new alpha work, finish the survivorship-bias impact report so future backtests have a trust anchor.
 - Validation-period data stance: do not assume Tushare or other paid data sources are available; prefer Baostock snapshots plus official public adjustment announcements for index membership history.
@@ -53,7 +53,7 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 |---|---|---|---|---|---|
 | P2-04 | Signal outcomes Dashboard | Done | Codex | Re-check after the next filled paper orders create READY outcome rows | Dashboard exposes T+1/T+5/T+20 realized signal performance with empty-state handling |
 | P2-05 | Extend signal outcomes to benchmark-relative returns | Done | Codex | Re-check alpha columns after the next READY outcome rows are produced | `signal_outcomes` can report raw return and benchmark-relative alpha per signal/horizon |
-| P2-06 | Value-quality fundamental factor prototype | Blocked | Codex | Backfill free/public CN financials before running 2022-2025 historical validation | Research prototype exists; final acceptance still requires 2022-2025 standalone backtest and correlation with Alpha158/technical sleeve |
+| P2-06 | Value-quality fundamental factor prototype | In Progress | Codex | Run 2022-2025 standalone validation and measure correlation with Alpha158/technical sleeve | Free-source financials are backfilled for the priced research universe; final acceptance still requires standalone backtest and correlation evidence |
 | P2-07 | Qlib PortAna artifact | Proposed | Codex | Verify installed Qlib report APIs and add optional HTML artifact output | Successful Qlib runs can link to a saved attribution/position report artifact |
 | P2-08 | Environment-specific config loading | Proposed | Codex | Design `MM_ENV` config merge order | `config/settings.dev.yaml` and `config/settings.prod.yaml` override safely without breaking default local runs |
 
@@ -167,8 +167,11 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 - Landed: research-only `src.research.strategies.value_quality` with local value/quality/liquidity scoring from `daily_price.pe_ttm`, `daily_price.pb`, `financials.roe`, `financials.net_margin`, `financials.debt_ratio`, and `stock_info.market_cap`.
 - Landed: standard BUY signal conversion for the top scored names, tagged `value_quality/fundamental/research_only`; production `generate_all()` is not wired to this strategy yet.
 - Landed: simple equal-weight Top-N return simulation and return-correlation helper so the future 2022-2025 validation can compare against Alpha158/technical sleeves.
-- Real local check: current DuckDB has `financials=0`, so the CLI can score 708 CN rows but average factor coverage is only 0.9%; generated prototype names are valuation/liquidity-driven with quality factors neutral.
-- Status note: P2-06 remains `Blocked` for final acceptance until free/public financial history is backfilled; do not treat the current prototype scores as production alpha.
+- Real local check before backfill: current DuckDB had `financials=0`, so the CLI could score 708 CN rows but average factor coverage was only 0.9%; generated prototype names were valuation/liquidity-driven with quality factors neutral.
+- Landed next: free-source AkShare financial backfill support via `src.data_pipeline.financials_backfill` and `scripts/backfill_cn_financials_akshare.py`; the script defaults to the local priced research universe and can opt into all `stock_info` CN symbols with `--all-stock-info`.
+- Real local backfill: `scripts/backfill_cn_financials_akshare.py --sleep 0.2` selected 708 priced CN symbols, skipped 25 existing symbols, fetched 683 symbols, inserted 49,353 rows, and reported `empty=0 / failed=0`.
+- Real local coverage after backfill: `financials=60,544` rows, `priced_with_financials=708/708`, report coverage spans `1989-12-31` to `2026-03-31`; value-quality CLI average coverage improved to 50.9%.
+- Status note: P2-06 is no longer blocked on financial history, but it is still research-only until 2022-2025 standalone backtest and correlation evidence are recorded.
 - Verification evidence: focused value-quality tests passed; full verification is recorded with this commit.
 
 ## P1 Candidates

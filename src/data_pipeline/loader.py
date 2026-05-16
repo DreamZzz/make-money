@@ -433,12 +433,34 @@ def upsert_financials(conn: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> int:
     """导入财务数据"""
     if df.empty:
         return 0
-    conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_fin AS SELECT * FROM df")
-    conn.execute("""
-        INSERT OR REPLACE INTO financials
-        SELECT * FROM _tmp_fin
+    columns = [
+        "symbol",
+        "report_date",
+        "revenue",
+        "net_profit",
+        "total_assets",
+        "total_equity",
+        "operating_cf",
+        "roe",
+        "roa",
+        "gross_margin",
+        "net_margin",
+        "debt_ratio",
+        "eps",
+        "bvps",
+    ]
+    work = df.copy()
+    for column in columns:
+        if column not in work.columns:
+            work[column] = None
+    work = work[columns].copy()
+    work["report_date"] = pd.to_datetime(work["report_date"]).dt.date
+    conn.execute("CREATE OR REPLACE TEMP TABLE _tmp_fin AS SELECT * FROM work")
+    conn.execute(f"""
+        INSERT OR REPLACE INTO financials ({", ".join(columns)})
+        SELECT {", ".join(columns)} FROM _tmp_fin
     """)
-    return len(df)
+    return len(work)
 
 
 def get_last_trade_date(conn: duckdb.DuckDBPyConnection, symbol: str) -> date | None:
