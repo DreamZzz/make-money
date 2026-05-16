@@ -33,6 +33,12 @@ def test_qlib_report_flattens_experiment_metrics_and_benchmarks():
         "rank_ic_positive_rate": 0.58,
         "primary_benchmark": "MIXED_EQUAL",
         "excess_return": 0.04,
+        "portana_artifact": {
+            "status": "generated",
+            "path": "/tmp/portana/E1/portana.html",
+            "figure_count": 3,
+            "report_rows": 20,
+        },
         "benchmark_suite": {
             "000300": {"benchmark_return": 0.05, "excess_return": 0.07, "info_ratio": 0.4},
             "MIXED_EQUAL": {"benchmark_return": 0.08, "excess_return": 0.04, "info_ratio": 0.3},
@@ -61,6 +67,9 @@ def test_qlib_report_flattens_experiment_metrics_and_benchmarks():
 
     assert experiments.iloc[0]["candidate_id"] == "lgb_balanced"
     assert experiments.iloc[0]["annual_return"] == 0.12
+    assert experiments.iloc[0]["portana_status"] == "generated"
+    assert experiments.iloc[0]["portana_artifact_path"] == "/tmp/portana/E1/portana.html"
+    assert experiments.iloc[0]["portana_figure_count"] == 3
     assert experiments.iloc[0]["duration_seconds"] == 600
     assert experiments.iloc[0]["verdict"] == "可重点关注"
     assert set(benchmarks["benchmark_name"]) == {"000300", "MIXED_EQUAL"}

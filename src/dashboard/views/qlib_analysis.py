@@ -532,7 +532,7 @@ def show_experiment_report():
         "experiment_id", "candidate_id", "candidate_variant", "mode", "status", "verdict",
         "test_start", "test_end", "annual_return", "benchmark_return", "excess_return", "sharpe_ratio",
         "max_drawdown", "ic_mean", "icir", "rank_ic_positive_rate", "turnover",
-        "primary_benchmark", "duration_seconds", "error_message",
+        "primary_benchmark", "portana_status", "portana_artifact_path", "duration_seconds", "error_message",
     ]
     display = filtered[[col for col in table_cols if col in filtered.columns]].copy()
     st.dataframe(_format_report_table(display), hide_index=True, width="stretch")

@@ -1443,6 +1443,14 @@ def evaluate_predictions(
         }
     metrics["benchmark_suite"] = benchmark_metrics
     metrics["primary_benchmark"] = primary_benchmark_name
+    from src.backtest.qlib_portana import generate_portana_artifact
+
+    metrics["portana_artifact"] = generate_portana_artifact(
+        experiment_id,
+        returns,
+        primary_benchmark,
+        turnover=returns.attrs.get("turnover"),
+    )
     if ic_df.empty:
         metrics.update({"ic_mean": None, "icir": None, "rank_ic_mean": None, "rank_ic_positive_rate": None})
     else:

@@ -54,7 +54,7 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 | P2-04 | Signal outcomes Dashboard | Done | Codex | Re-check after the next filled paper orders create READY outcome rows | Dashboard exposes T+1/T+5/T+20 realized signal performance with empty-state handling |
 | P2-05 | Extend signal outcomes to benchmark-relative returns | Done | Codex | Re-check alpha columns after the next READY outcome rows are produced | `signal_outcomes` can report raw return and benchmark-relative alpha per signal/horizon |
 | P2-06 | Value-quality fundamental factor prototype | Done | Codex | Keep research-only; improve historical valuation/size coverage before another promotion attempt | 2022-2025 standalone backtest and correlation evidence are recorded; current prototype is not approved for production |
-| P2-07 | Qlib PortAna artifact | Proposed | Codex | Verify installed Qlib report APIs and add optional HTML artifact output | Successful Qlib runs can link to a saved attribution/position report artifact |
+| P2-07 | Qlib PortAna artifact | Done | Codex | Re-check after the next successful Qlib run that Dashboard exposes the artifact status/path | Successful Qlib runs can link to a saved attribution/position report artifact |
 | P2-08 | Environment-specific config loading | Proposed | Codex | Design `MM_ENV` config merge order | `config/settings.dev.yaml` and `config/settings.prod.yaml` override safely without breaking default local runs |
 
 ### P3 - Retail Usability And Hygiene
@@ -183,6 +183,15 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 - Judgment: keep `value_quality` research-only and do not wire into production signal generation; current version does not provide a reliable standalone or diversifying alpha.
 - Details: `docs/value_quality_validation_2022_2025.md`.
 
+### 2026-05-16 P2-07 Qlib PortAna Artifact
+
+- Landed: optional `src.backtest.qlib_portana` artifact generator converts Qlib portfolio/benchmark daily metrics into the `report_graph` DataFrame contract and writes a saved `portana.html` when the local Qlib report API is available.
+- Landed: future `evaluate_predictions()` runs attach `metrics_json.portana_artifact` with status, path, figure count, row count, and source; missing Qlib report APIs are recorded as `skipped` instead of failing the experiment.
+- Landed: `scripts/generate_qlib_portana.py` can refresh an existing experiment from `qlib_daily_metrics`, with `--experiment-id latest` and `--no-update` modes.
+- Landed: Qlib analysis Dashboard report tables expose `portana_status` and `portana_artifact_path` so the artifact can be located without querying DuckDB manually.
+- Real local check: Homebrew Python lacks Qlib report APIs and correctly records `status=skipped`; `/usr/bin/python3` has `qlib.contrib.report.analysis_position.report_graph` and generated `/Users/zhaoqiang/Documents/Project/make-money/output/qlib_portana/QLIB-WALK_FORWARD-20260514221005-AD82EC/portana.html` with 563 report rows.
+- Verification evidence: focused PortAna and report-service tests passed; full verification is recorded with this commit.
+
 ## P1 Candidates
 
 | ID | Item | Status | Owner | Next Action | Acceptance |
@@ -196,7 +205,7 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 
 | ID | Item | Status | Owner | Next Action | Acceptance |
 |---|---|---|---|---|---|
-| P2-01 | Qlib PortAna report artifacts | Proposed | Codex | Verify local Qlib report APIs in active environment | Each successful Qlib run can produce a linked position/attribution report |
+| P2-01 | Qlib PortAna report artifacts | Done | Codex | Superseded by current priority item P2-07 | Each successful Qlib run can produce a linked position/attribution report |
 | P2-02 | Environment-specific config loading | Proposed | Codex | Design `MM_ENV` config merge order | `config/settings.dev.yaml` and `config/settings.prod.yaml` override safely |
 | P2-03 | Small-account risk profiles | Proposed | Codex | Design profile interaction with allocator | 50k/100k/300k modes show realistic lot and concentration constraints |
 

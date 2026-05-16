@@ -343,6 +343,11 @@ def prepare_experiment_frame(experiments: pd.DataFrame) -> pd.DataFrame:
 
     for key in METRIC_COLUMNS:
         df[key] = metrics.map(lambda item, k=key: item.get(k) if isinstance(item, dict) else None)
+    portana = metrics.map(lambda item: item.get("portana_artifact", {}) if isinstance(item, dict) else {})
+    df["portana_status"] = portana.map(lambda item: item.get("status") if isinstance(item, dict) else None)
+    df["portana_artifact_path"] = portana.map(lambda item: item.get("path") if isinstance(item, dict) else None)
+    df["portana_figure_count"] = portana.map(lambda item: item.get("figure_count") if isinstance(item, dict) else None)
+    df["portana_report_rows"] = portana.map(lambda item: item.get("report_rows") if isinstance(item, dict) else None)
     df["candidate_id"] = candidate.map(lambda item: item.get("candidate_id") if isinstance(item, dict) else None)
     df["candidate_batch_id"] = candidate.map(lambda item: item.get("batch_id") if isinstance(item, dict) else None)
     df["candidate_variant"] = candidate.map(lambda item: item.get("model_variant") if isinstance(item, dict) else None)
