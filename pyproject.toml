@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     # 数据采集
     "akshare>=1.16.0",
+    "baostock>=0.9.1",
     "yfinance>=0.2.50",
     # 数据处理
     "pandas>=2.2.0",
