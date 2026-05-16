@@ -132,6 +132,8 @@ def build_executable_rebalance_plan(
     min_buy_rank_score: float = 0.50,
     lot_size: int = 100,
     estimated_fee_rate: float = 0.0015,
+    max_buy_positions: int | None = None,
+    existing_position_count: int | None = None,
 ) -> pd.DataFrame:
     """
     将研究信号转成账户规模约束下的可执行调仓草案。
@@ -147,7 +149,7 @@ def build_executable_rebalance_plan(
     columns = [
         "symbol", "side", "current_weight", "target_weight", "delta_weight",
         "action", "executable", "reason", "price", "quantity", "order_value",
-        "estimated_fee", "cash_after", "score", "confidence",
+        "estimated_fee", "cash_after", "score", "confidence", "min_lot_value", "funding_gap",
     ]
     if signals.empty:
         return pd.DataFrame(columns=columns)
@@ -276,6 +278,13 @@ def build_executable_rebalance_plan(
         ["_rank_score", "confidence", "score"],
         ascending=[False, False, False],
     )
+    held_symbols = {symbol for symbol, weight in current_weights.items() if _safe_float(weight, 0.0) > 0}
+    position_count = (
+        max(int(existing_position_count), 0)
+        if existing_position_count is not None
+        else len(held_symbols)
+    )
+    max_positions = int(max_buy_positions) if max_buy_positions is not None else None
 
     for _, row in buy_signals.iterrows():
         symbol = str(row["symbol"])
@@ -304,6 +313,8 @@ def build_executable_rebalance_plan(
         order_value = 0.0
         estimated_fee = 0.0
         executable = False
+        min_lot_value = price * lot_size if price > 0 else 0.0
+        funding_gap = 0.0
 
         if price <= 0:
             reason = "缺少最新价格"
@@ -315,6 +326,12 @@ def build_executable_rebalance_plan(
             reason = "信号未给出有效仓位"
         elif desired_add_value <= 0:
             reason = "已达到目标仓位"
+        elif (
+            max_positions is not None
+            and symbol not in held_symbols
+            and position_count >= max_positions
+        ):
+            reason = "达到本档位持仓数量上限"
         elif remaining_budget <= 0:
             reason = "可用预算不足"
         else:
@@ -327,8 +344,13 @@ def build_executable_rebalance_plan(
                 reason = "可执行"
                 remaining_budget -= order_value + estimated_fee
                 cash_after -= order_value + estimated_fee
+                if symbol not in held_symbols:
+                    held_symbols.add(symbol)
+                    position_count += 1
             else:
-                reason = "不足一手或预算不足"
+                min_lot_cash_required = min_lot_value * (1 + estimated_fee_rate)
+                funding_gap = max(min_lot_cash_required - max_order_value, 0.0)
+                reason = f"不足一手，需至少 {min_lot_cash_required:,.0f}，还差 {funding_gap:,.0f}"
                 quantity = 0
                 order_value = 0.0
                 estimated_fee = 0.0
@@ -351,6 +373,8 @@ def build_executable_rebalance_plan(
             "cash_after": cash_after,
             "score": score,
             "confidence": confidence,
+            "min_lot_value": min_lot_value,
+            "funding_gap": funding_gap,
         })
 
     return pd.DataFrame(rows, columns=columns)

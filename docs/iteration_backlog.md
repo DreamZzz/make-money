@@ -61,8 +61,8 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 
 | ID | Item | Status | Owner | Next Action | Acceptance |
 |---|---|---|---|---|---|
-| P3-04 | Small-account risk profiles | Proposed | Codex | Design profile interaction with allocator, lot-size skips, and max holdings | 50k/100k/300k modes produce realistic position counts and explicit one-lot funding hints |
-| P3-05 | Weekly operation summary card | Proposed | Codex | Add weekly suggested actions count, required cash, and estimated manual time to the weekly report | Retail user can see "operate N times / need cash Y / expected time T" before reading individual signals |
+| P3-04 | Small-account risk profiles | Done | Codex | Monitor next paper-trade and weekly-report run for skipped_profile and one-lot funding hints | 50k/100k/300k modes produce realistic position counts and explicit one-lot funding hints |
+| P3-05 | Weekly operation summary card | Done | Codex | Monitor whether the weekly summary matches the executable plan after the next signal batch | Retail user can see "operate N times / need cash Y / expected time T" before reading individual signals |
 | P3-06 | Retail user manual | Proposed | Codex | Draft after P0-08 and P1-06 stabilize | `docs/user_guide.md` explains weekly workflow, follow/ignore rules, failure modes, and manual execution discipline in <= 20 pages |
 | P3-07 | Strategy math unit tests expansion | Proposed | Codex | Add direct tests for ATR, RSI, Bollinger bands, and IC edge cases | Focused tests cover warmup, gaps, flat series, NaN handling, and known toy examples |
 
@@ -200,6 +200,15 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 - Landed: `config/settings.dev.yaml` and `config/settings.prod.yaml` provide minimal opt-in overlays for development and production runs.
 - Verification evidence: focused config tests passed; full verification is recorded with this commit.
 
+### 2026-05-16 P3-04/P3-05 Retail Account Usability
+
+- Landed: `portfolio.risk_profile` supports `auto/small/medium/large`; auto maps roughly to 50k/300k/800k account bands, and the selected profile overlays stock count, single-name cap, overweight cap, and operation-time assumptions.
+- Landed: small-account profile limits stock holdings to 5 names while raising single-name capacity, so 50k/100k accounts avoid too many unusable dust positions.
+- Landed: paper trading enforces `max_stock_positions`; new-stock BUY signals beyond the profile limit are marked `NO_ACTION` with `skipped_profile` and an explicit profile reason.
+- Landed: executable rebalance plans expose `min_lot_value` and `funding_gap`; unaffordable candidates now show the approximate one-lot funding gap instead of only saying "不足一手".
+- Landed: Weekly Report shows a top operation-summary card with operation count, required cash, estimated manual minutes, candidate count, released cash, active risk profile, and one-lot funding gap notice.
+- Verification evidence: focused risk-profile, optimizer, paper-engine, and weekly-summary tests passed; full verification is recorded with this commit.
+
 ## P1 Candidates
 
 | ID | Item | Status | Owner | Next Action | Acceptance |
@@ -215,7 +224,7 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 |---|---|---|---|---|---|
 | P2-01 | Qlib PortAna report artifacts | Done | Codex | Superseded by current priority item P2-07 | Each successful Qlib run can produce a linked position/attribution report |
 | P2-02 | Environment-specific config loading | Done | Codex | Superseded by current priority item P2-08 | `config/settings.dev.yaml` and `config/settings.prod.yaml` override safely |
-| P2-03 | Small-account risk profiles | Proposed | Codex | Design profile interaction with allocator | 50k/100k/300k modes show realistic lot and concentration constraints |
+| P2-03 | Small-account risk profiles | Done | Codex | Superseded by P3-04 | 50k/100k/300k modes show realistic lot and concentration constraints |
 
 ## P3 Hygiene
 

@@ -392,8 +392,38 @@ def test_rebalance_plan_marks_unaffordable_lot_as_candidate():
         estimated_fee_rate=0.0,
     )
     assert plan.iloc[0]["action"] == "候选"
-    assert plan.iloc[0]["reason"] == "不足一手或预算不足"
+    assert "不足一手" in plan.iloc[0]["reason"]
+    assert plan.iloc[0]["min_lot_value"] == pytest.approx(100000)
+    assert plan.iloc[0]["funding_gap"] == pytest.approx(95000)
     assert plan.iloc[0]["order_value"] == pytest.approx(0)
+
+
+def test_rebalance_plan_respects_small_account_position_count_limit():
+    signals = pd.DataFrame({
+        "symbol": ["A", "B", "C"],
+        "side": ["BUY", "BUY", "BUY"],
+        "score": [1.0, 0.9, 0.8],
+        "confidence": [0.95, 0.90, 0.85],
+        "max_position_pct": [0.20, 0.20, 0.20],
+    })
+    plan = build_executable_rebalance_plan(
+        signals=signals,
+        current_weights={"X": 0.20, "Y": 0.20, "Z": 0.20, "W": 0.20},
+        latest_prices={"A": 10, "B": 10, "C": 10},
+        available_cash=50_000,
+        total_value=50_000,
+        cash_reserve_pct=0.0,
+        max_gross_exposure_pct=1.0,
+        max_single_position_pct=0.20,
+        overweight_single_position_pct=0.25,
+        min_buy_confidence=0.75,
+        min_buy_rank_score=0.50,
+        estimated_fee_rate=0.0,
+        max_buy_positions=5,
+    )
+
+    assert (plan["action"] == "买入").sum() == 1
+    assert (plan["reason"] == "达到本档位持仓数量上限").sum() == 2
 
 
 def test_rebalance_plan_does_not_fill_cash_with_weak_signal():

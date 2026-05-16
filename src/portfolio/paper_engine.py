@@ -191,6 +191,26 @@ def _load_latest_satellite_budget(conn: duckdb.DuckDBPyConnection) -> float | No
         return None
 
 
+def _load_active_position_symbols(conn: duckdb.DuckDBPyConnection) -> set[str]:
+    """Return symbols with positive latest paper-trade quantity across strategies."""
+    try:
+        rows = conn.execute("""
+            WITH latest AS (
+                SELECT strategy_name, symbol, quantity,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY strategy_name, symbol ORDER BY trade_date DESC
+                       ) AS rn
+                FROM paper_positions
+            )
+            SELECT DISTINCT symbol
+            FROM latest
+            WHERE rn = 1 AND COALESCE(quantity, 0) > 0
+        """).fetchall()
+    except Exception:
+        return set()
+    return {str(row[0]) for row in rows if row and row[0]}
+
+
 def _new_result(total: int = 0) -> dict:
     return {
         "executed": 0,
@@ -205,6 +225,7 @@ def _new_result(total: int = 0) -> dict:
         "skipped_untradeable": 0,
         "skipped_budget": 0,
         "skipped_turnover": 0,
+        "skipped_profile": 0,
     }
 
 
@@ -253,6 +274,11 @@ def _run_signal_batch(
 
         satellite_budget = _load_latest_satellite_budget(conn)
         satellite_budget_remaining = satellite_budget
+        from src.portfolio.risk_profile import apply_risk_profile_to_portfolio_config
+
+        portfolio_cfg, risk_profile = apply_risk_profile_to_portfolio_config(config, total_value=current_total)
+        active_symbols = _load_active_position_symbols(conn)
+        max_stock_positions = int(portfolio_cfg.get("max_stock_positions", 10) or 10)
         max_daily_turnover_pct = float(portfolio_cfg.get("max_daily_turnover_pct", 0.30) or 0.0)
         buy_turnover_cap = max(current_total * max_daily_turnover_pct, 0.0)
         buy_turnover_remaining_by_date: dict[date, float] = {}
@@ -344,6 +370,20 @@ def _run_signal_batch(
                         f"  跳过 {sym} BUY：低于执行门槛 "
                         f"(confidence={confidence:.2f}, rank_score={rank_score:.2f})"
                     )
+                    continue
+
+                if sym not in active_symbols and len(active_symbols) >= max_stock_positions:
+                    stats["skipped_profile"] += 1
+                    reason = f"{risk_profile.label}持仓数量上限: 当前 {len(active_symbols)} 只 / 上限 {max_stock_positions} 只"
+                    _mark_signal_handled(
+                        conn,
+                        sig["signal_id"],
+                        next_day,
+                        status="NO_ACTION",
+                        status_reason=reason,
+                    )
+                    stats["handled_without_order"] += 1
+                    logger.info(f"  跳过 {sym} BUY：{reason}")
                     continue
 
                 normal_cap = float(portfolio_cfg.get("max_single_position_pct", 0.10))
@@ -440,6 +480,8 @@ def _run_signal_batch(
 
             _mark_signal_handled(conn, sig["signal_id"], next_day, price)
             stats["executed"] += 1
+            if order_side == "BUY":
+                active_symbols.add(sym)
 
         conn.execute("COMMIT")
         in_transaction = False

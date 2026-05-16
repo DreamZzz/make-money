@@ -11,6 +11,8 @@ import streamlit as st
 
 from src.config import load_config
 from src.dashboard.db import DuckDBError, db_error_widget, query_df
+from src.dashboard.weekly_report_service import build_weekly_operation_summary
+from src.portfolio.risk_profile import apply_risk_profile_to_portfolio_config
 
 
 @st.cache_data(ttl=3600)
@@ -256,9 +258,7 @@ def _display_stock_name(row: pd.Series, name_map: dict) -> str:
     return name_map.get(symbol, (symbol, "—"))[0]
 
 
-def _render_rebalance_plan(df: pd.DataFrame, name_map: dict, positions: pd.DataFrame):
-    st.subheader("调仓计划")
-
+def _build_rebalance_context(df: pd.DataFrame, positions: pd.DataFrame) -> dict:
     current_weights = _positions_to_weights(positions)
     current_quantities = _positions_to_quantities(positions)
     from src.portfolio.cashbook import get_account_summary
@@ -269,14 +269,20 @@ def _render_rebalance_plan(df: pd.DataFrame, name_map: dict, positions: pd.DataF
     if total_value <= 0:
         total_value = available_cash
 
-    st.caption(f"当前可用资金：{available_cash:,.0f}；账户总资产：{total_value:,.0f}")
     if total_value <= 0:
-        st.info("账户暂无可用资产。请先在组合监控页记录初始入金。")
-        return
+        return {
+            "plan": pd.DataFrame(),
+            "available_cash": available_cash,
+            "total_value": total_value,
+            "portfolio_cfg": load_config().get("portfolio", {}),
+            "risk_profile": None,
+            "summary": build_weekly_operation_summary(pd.DataFrame()),
+        }
 
     from src.portfolio.optimizer import build_executable_rebalance_plan
 
-    cfg = load_config().get("portfolio", {})
+    app_config = load_config()
+    cfg, risk_profile = apply_risk_profile_to_portfolio_config(app_config, total_value=total_value)
     symbols = tuple(sorted(set(df["symbol"].astype(str)) | set(current_weights)))
     latest_prices = _load_latest_prices(symbols)
 
@@ -296,7 +302,57 @@ def _render_rebalance_plan(df: pd.DataFrame, name_map: dict, positions: pd.DataF
         min_buy_confidence=float(cfg.get("min_rebalance_buy_confidence", 0.75)),
         min_buy_rank_score=float(cfg.get("min_rebalance_buy_rank_score", 0.50)),
         estimated_fee_rate=float(cfg.get("estimated_trade_fee_rate", 0.0015)),
+        max_buy_positions=int(cfg.get("max_stock_positions", 10)),
+        existing_position_count=sum(1 for weight in current_weights.values() if float(weight or 0) > 0),
     )
+    summary = build_weekly_operation_summary(
+        plan,
+        minutes_per_operation=int(cfg.get("estimated_minutes_per_operation", 3)),
+    )
+    return {
+        "plan": plan,
+        "available_cash": available_cash,
+        "total_value": total_value,
+        "portfolio_cfg": cfg,
+        "risk_profile": risk_profile,
+        "summary": summary,
+    }
+
+
+def _render_operation_summary_card(context: dict):
+    summary = context.get("summary", {})
+    profile = context.get("risk_profile")
+    label = profile.label if profile else "未识别档位"
+    max_positions = profile.max_stock_positions if profile else "—"
+
+    st.subheader("本周操作量")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("需操作", f"{int(summary.get('operation_count', 0))} 次")
+    c2.metric("需要现金", f"{float(summary.get('required_cash', 0.0)):,.0f}")
+    c3.metric("预计耗时", f"{int(summary.get('estimated_minutes', 0))} 分钟")
+    c4.metric("候选暂缓", f"{int(summary.get('candidate_count', 0))} 条")
+    st.caption(
+        f"当前风险档位：{label}；股票持仓上限：{max_positions} 只；"
+        f"预计释放资金：{float(summary.get('released_cash', 0.0)):,.0f}。"
+    )
+    gap = float(summary.get("one_lot_funding_gap", 0.0) or 0.0)
+    if gap > 0:
+        st.info(f"候选买入中存在不足一手项目，按当前计划约还差 {gap:,.0f} 元才能凑齐最小交易单位。")
+
+
+def _render_rebalance_plan(df: pd.DataFrame, name_map: dict, positions: pd.DataFrame, context: dict | None = None):
+    st.subheader("调仓计划")
+    context = context or _build_rebalance_context(df, positions)
+    available_cash = float(context.get("available_cash") or 0)
+    total_value = float(context.get("total_value") or 0)
+    cfg = context.get("portfolio_cfg", {})
+    profile = context.get("risk_profile")
+    plan = context.get("plan", pd.DataFrame())
+
+    st.caption(f"当前可用资金：{available_cash:,.0f}；账户总资产：{total_value:,.0f}")
+    if total_value <= 0:
+        st.info("账户暂无可用资产。请先在组合监控页记录初始入金。")
+        return
 
     if plan.empty:
         st.success("当前没有可生成调仓草案的信号。")
@@ -340,11 +396,14 @@ def _render_rebalance_plan(df: pd.DataFrame, name_map: dict, positions: pd.DataF
         "estimated_fee": "预计费用",
         "cash_after": "执行后现金",
         "confidence": "置信度",
+        "min_lot_value": "一手金额",
+        "funding_gap": "一手资金缺口",
     })
 
     table_cols = [
         "代码", "名称", "市场", "动作", "状态", "当前权重", "计划后权重",
-        "本次变化", "参考价", "预计数量", "预计金额", "预计费用", "执行后现金", "置信度",
+        "本次变化", "参考价", "预计数量", "预计金额", "预计费用", "执行后现金",
+        "一手金额", "一手资金缺口", "置信度",
     ]
     fmt = {
         "当前权重": "{:.1%}",
@@ -355,6 +414,8 @@ def _render_rebalance_plan(df: pd.DataFrame, name_map: dict, positions: pd.DataF
         "预计金额": "{:,.0f}",
         "预计费用": "{:,.0f}",
         "执行后现金": "{:,.0f}",
+        "一手金额": "{:,.0f}",
+        "一手资金缺口": "{:,.0f}",
         "置信度": "{:.0%}",
     }
 
@@ -379,7 +440,9 @@ def _render_rebalance_plan(df: pd.DataFrame, name_map: dict, positions: pd.DataF
         f"排序分 ≥ {float(cfg.get('min_rebalance_buy_rank_score', 0.50)):.2f}；"
         f"高置信超配门槛为置信度 ≥ {float(cfg.get('overweight_min_confidence', 0.90)):.0%}，"
         f"排序分 ≥ {float(cfg.get('overweight_min_rank_score', 0.85)):.2f}，"
-        f"单票上限可放宽至 {float(cfg.get('overweight_single_position_pct', 0.15)):.0%}。"
+        f"单票上限可放宽至 {float(cfg.get('overweight_single_position_pct', 0.15)):.0%}；"
+        f"当前档位最多持有 {int(cfg.get('max_stock_positions', 10))} 只股票"
+        f"{f'（{profile.label}）' if profile else ''}。"
         "未进入可执行区的买入信号保留为候选，不计入预计买入金额。"
     )
 
@@ -415,7 +478,10 @@ df_view = df_all[df_all["trade_date"].dt.date == selected_date]
 conflicted_symbols = _find_conflicted_symbols(df_view)
 df_conflicts = df_view[df_view["symbol"].astype(str).isin(conflicted_symbols)]
 df_actionable = df_view[~df_view["symbol"].astype(str).isin(conflicted_symbols)]
+rebalance_context = _build_rebalance_context(df_view, current_positions)
 
+_render_operation_summary_card(rebalance_context)
+st.divider()
 _render_summary_metrics(df_view)
 st.divider()
 
@@ -445,4 +511,4 @@ with col_right:
     _render_confidence_chart(df_actionable, name_map)
 
 st.divider()
-_render_rebalance_plan(df_view, name_map, current_positions)
+_render_rebalance_plan(df_view, name_map, current_positions, context=rebalance_context)

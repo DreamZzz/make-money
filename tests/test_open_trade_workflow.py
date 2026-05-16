@@ -163,6 +163,67 @@ def test_paper_engine_marks_unaffordable_lot_as_no_action(monkeypatch, tmp_path)
     assert row[3] == date(2024, 1, 3)
 
 
+def test_paper_engine_respects_small_account_stock_count_limit(monkeypatch, tmp_path):
+    db_path = _patch_temp_db(monkeypatch, tmp_path, {"risk_profile": "small"})
+    conn = duckdb.connect(db_path)
+    init_db(conn)
+    rows = ", ".join([f"('00000{i}', 'CN', '持仓{i}')" for i in range(1, 7)])
+    conn.execute(f"INSERT INTO stock_info (symbol, country, name) VALUES {rows}")
+    price_rows = ", ".join([
+        f"('00000{i}', DATE '2024-01-03', 10, 10, 10, 10, 1000)"
+        for i in range(1, 7)
+    ])
+    conn.execute(f"""
+        INSERT INTO daily_price (symbol, trade_date, open, high, low, close, volume)
+        VALUES {price_rows}
+    """)
+    conn.execute("""
+        INSERT INTO account_daily (
+            account_id, trade_date, cash, position_value, total_value,
+            net_contribution, nav, daily_return, drawdown
+        )
+        VALUES ('default', DATE '2024-01-02', 50000, 50000, 100000, 100000, 1, 0, 0)
+    """)
+    position_rows = ", ".join([
+        f"('alpha158', DATE '2024-01-02', '00000{i}', 1000, 10, 10, 10000)"
+        for i in range(1, 6)
+    ])
+    conn.execute(f"""
+        INSERT INTO paper_positions (
+            strategy_name, trade_date, symbol, quantity, avg_cost, current_price, market_value
+        )
+        VALUES {position_rows}
+    """)
+    conn.execute("""
+        INSERT INTO signals (
+            signal_id, model_name, model_version, symbol, signal_ts,
+            side, score, confidence, max_position_pct, executed, status
+        )
+        VALUES ('new_stock_buy', 'alpha158', '1.0', '000006',
+                TIMESTAMP '2024-01-02 15:00:00', 'BUY', 1, 1, 0.20, FALSE, 'ACTIVE')
+    """)
+    conn.close()
+
+    result = pe.run("alpha158", market="CN")
+
+    assert result["executed"] == 0
+    assert result["skipped_profile"] == 1
+    assert result["handled_without_order"] == 1
+
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        row = conn.execute("""
+            SELECT status, status_reason
+            FROM signals WHERE signal_id='new_stock_buy'
+        """).fetchone()
+    finally:
+        conn.close()
+
+    assert row[0] == "NO_ACTION"
+    assert "小资金档" in row[1]
+    assert "持仓数量上限" in row[1]
+
+
 def test_paper_engine_marks_cn_limit_open_as_no_action(monkeypatch, tmp_path):
     db_path = _patch_temp_db(monkeypatch, tmp_path)
     conn = duckdb.connect(db_path)
