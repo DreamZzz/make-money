@@ -18,7 +18,7 @@ This file is the durable project backlog. Keep it small enough to review every w
 
 ## Current Baseline
 
-- Latest pushed commit before P2-06 financials backfill: `4af0dbd` (`feat: add value quality research prototype`).
+- Latest local commit before P2-06 validation: `864df9b` (`feat: backfill cn financials from akshare`).
 - Review v2 baseline correction: the external v2 review used `origin/main` (`23b8178`) and did not include local commits `93e9995` and `9e000f4`.
 - Test baseline: `pytest -q` passed with 195 tests on 2026-05-16.
 - Lint baseline: `ruff check .` passed on 2026-05-16.
@@ -53,7 +53,7 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 |---|---|---|---|---|---|
 | P2-04 | Signal outcomes Dashboard | Done | Codex | Re-check after the next filled paper orders create READY outcome rows | Dashboard exposes T+1/T+5/T+20 realized signal performance with empty-state handling |
 | P2-05 | Extend signal outcomes to benchmark-relative returns | Done | Codex | Re-check alpha columns after the next READY outcome rows are produced | `signal_outcomes` can report raw return and benchmark-relative alpha per signal/horizon |
-| P2-06 | Value-quality fundamental factor prototype | In Progress | Codex | Run 2022-2025 standalone validation and measure correlation with Alpha158/technical sleeve | Free-source financials are backfilled for the priced research universe; final acceptance still requires standalone backtest and correlation evidence |
+| P2-06 | Value-quality fundamental factor prototype | Done | Codex | Keep research-only; improve historical valuation/size coverage before another promotion attempt | 2022-2025 standalone backtest and correlation evidence are recorded; current prototype is not approved for production |
 | P2-07 | Qlib PortAna artifact | Proposed | Codex | Verify installed Qlib report APIs and add optional HTML artifact output | Successful Qlib runs can link to a saved attribution/position report artifact |
 | P2-08 | Environment-specific config loading | Proposed | Codex | Design `MM_ENV` config merge order | `config/settings.dev.yaml` and `config/settings.prod.yaml` override safely without breaking default local runs |
 
@@ -171,8 +171,17 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 - Landed next: free-source AkShare financial backfill support via `src.data_pipeline.financials_backfill` and `scripts/backfill_cn_financials_akshare.py`; the script defaults to the local priced research universe and can opt into all `stock_info` CN symbols with `--all-stock-info`.
 - Real local backfill: `scripts/backfill_cn_financials_akshare.py --sleep 0.2` selected 708 priced CN symbols, skipped 25 existing symbols, fetched 683 symbols, inserted 49,353 rows, and reported `empty=0 / failed=0`.
 - Real local coverage after backfill: `financials=60,544` rows, `priced_with_financials=708/708`, report coverage spans `1989-12-31` to `2026-03-31`; value-quality CLI average coverage improved to 50.9%.
-- Status note: P2-06 is no longer blocked on financial history, but it is still research-only until 2022-2025 standalone backtest and correlation evidence are recorded.
+- Status note: P2-06 is no longer blocked on financial history; subsequent standalone validation kept it research-only because performance and diversification evidence were weak.
 - Verification evidence: focused value-quality tests passed; full verification is recorded with this commit.
+
+### 2026-05-16 P2-06 Standalone Validation
+
+- Landed: `src.research.strategies.value_quality_validation` and `scripts/validate_value_quality.py` for repeatable standalone validation.
+- Validation design: monthly Top-20, 20 trading-day hold, 60 calendar-day financial reporting lag, T+1 open execution, CN open-tradability guards, commission + stamp duty costs, benchmark `MIXED_EQUAL`.
+- Real local result: `BT-20260516152109-4094BE`, 2022-01-28 to 2025-12-31, annual return `-4.38%`, benchmark annual return `4.37%`, excess return `-8.75 pp`, max drawdown `-40.67%`, IR `-0.52`.
+- Correlation evidence: Alpha158 period-return correlation `0.69` over 23 common periods; benchmark correlation `0.90`.
+- Judgment: keep `value_quality` research-only and do not wire into production signal generation; current version does not provide a reliable standalone or diversifying alpha.
+- Details: `docs/value_quality_validation_2022_2025.md`.
 
 ## P1 Candidates
 

@@ -177,7 +177,7 @@ def measure_return_correlation(value_returns: pd.Series, reference_returns: pd.S
     aligned = pd.concat([
         pd.Series(value_returns, name="value_quality"),
         pd.Series(reference_returns, name="reference"),
-    ], axis=1).dropna()
+    ], axis=1, sort=False).dropna()
     if len(aligned) < 2:
         return 0.0
     corr = aligned["value_quality"].corr(aligned["reference"])
