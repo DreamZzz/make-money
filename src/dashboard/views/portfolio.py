@@ -12,7 +12,7 @@ import streamlit as st
 
 from src.config import load_config
 from src.dashboard.db import DuckDBError, db_error_widget, get_conn, query_df
-from src.portfolio.exposure_monitor import DEFAULT_BENCHMARK_INDEX, load_exposure_snapshot
+from src.portfolio.exposure_monitor import DEFAULT_BENCHMARK_INDEX, ExposureRiskThresholds, load_exposure_snapshot
 
 ACTION_LABELS = {
     "BUY": "买入",
@@ -201,7 +201,11 @@ def _load_portfolio_exposure() -> dict[str, pd.DataFrame]:
     benchmark_index = str(exposure_cfg.get("benchmark_index") or DEFAULT_BENCHMARK_INDEX)
     conn = get_conn()
     try:
-        return load_exposure_snapshot(conn, benchmark_index=benchmark_index)
+        return load_exposure_snapshot(
+            conn,
+            benchmark_index=benchmark_index,
+            thresholds=ExposureRiskThresholds.from_config(exposure_cfg),
+        )
     finally:
         conn.close()
 
@@ -231,6 +235,28 @@ def show_exposure_monitor():
     industry = snapshot["industry"].copy()
     size = snapshot["size"].copy()
     positions = snapshot["positions"].copy()
+    warnings = snapshot.get("warnings", pd.DataFrame()).copy()
+    if not warnings.empty:
+        active_warnings = warnings[warnings["status"] == "WARN"].copy()
+        if active_warnings.empty:
+            st.success("暴露质量阈值正常")
+        else:
+            st.warning(f"暴露质量触发 {len(active_warnings)} 项告警")
+            display = active_warnings.rename(columns={
+                "label": "指标",
+                "value": "当前值",
+                "threshold": "阈值",
+                "detail": "说明",
+            })
+            st.dataframe(
+                display[["指标", "当前值", "阈值", "说明"]],
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "当前值": st.column_config.NumberColumn(format="%.1%"),
+                    "阈值": st.column_config.NumberColumn(format="%.1%"),
+                },
+            )
 
     tab_industry, tab_size, tab_positions = st.tabs(["行业", "市值", "明细"])
     with tab_industry:

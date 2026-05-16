@@ -6,6 +6,7 @@ import pytest
 
 from src.data_pipeline.loader import init_db
 from src.portfolio.exposure_monitor import (
+    ExposureRiskThresholds,
     compute_exposure_snapshot,
     load_exposure_snapshot,
 )
@@ -65,6 +66,115 @@ def test_compute_exposure_snapshot_handles_empty_holdings():
     assert snapshot["industry"].empty
     assert snapshot["size"].empty
     assert snapshot["summary"].iloc[0]["position_count"] == 0
+    assert snapshot["warnings"].empty
+
+
+def test_compute_exposure_snapshot_flags_exposure_quality_warnings():
+    holdings = pd.DataFrame([
+        {
+            "symbol": "000001",
+            "name": "银行A",
+            "strategy_name": "alpha158",
+            "market_value": 60_000,
+            "industry": "银行",
+            "market_cap": 3_000,
+            "pe_ttm": 6,
+            "pb": 0.7,
+        },
+        {
+            "symbol": "000002",
+            "name": "未知B",
+            "strategy_name": "trend",
+            "market_value": 25_000,
+            "industry": "",
+            "market_cap": 0,
+            "pe_ttm": None,
+            "pb": None,
+        },
+        {
+            "symbol": "000003",
+            "name": "制造C",
+            "strategy_name": "trend",
+            "market_value": 15_000,
+            "industry": "制造",
+            "market_cap": 120,
+            "pe_ttm": None,
+            "pb": None,
+        },
+    ])
+
+    snapshot = compute_exposure_snapshot(
+        holdings,
+        pd.DataFrame(),
+        thresholds=ExposureRiskThresholds(
+            max_position_weight=0.50,
+            max_industry_weight=0.50,
+            max_top5_weight=0.80,
+            max_unknown_industry_weight=0.10,
+            min_pe_coverage=0.80,
+            min_pb_coverage=0.80,
+        ),
+    )
+    warnings = snapshot["warnings"].set_index("metric")
+
+    assert warnings.loc["top1_weight", "status"] == "WARN"
+    assert warnings.loc["max_industry_weight", "status"] == "WARN"
+    assert warnings.loc["top5_weight", "status"] == "WARN"
+    assert warnings.loc["unknown_industry_weight", "status"] == "WARN"
+    assert warnings.loc["pe_coverage", "status"] == "WARN"
+    assert warnings.loc["pb_coverage", "status"] == "WARN"
+    assert warnings.loc["unknown_industry_weight", "value"] == pytest.approx(0.25)
+    assert warnings.loc["pe_coverage", "value"] == pytest.approx(0.60)
+
+
+def test_compute_exposure_snapshot_marks_quality_checks_ok_within_thresholds():
+    holdings = pd.DataFrame([
+        {
+            "symbol": "000001",
+            "name": "银行A",
+            "strategy_name": "alpha158",
+            "market_value": 40_000,
+            "industry": "银行",
+            "market_cap": 3_000,
+            "pe_ttm": 6,
+            "pb": 0.7,
+        },
+        {
+            "symbol": "000002",
+            "name": "制造B",
+            "strategy_name": "trend",
+            "market_value": 35_000,
+            "industry": "制造",
+            "market_cap": 800,
+            "pe_ttm": 18,
+            "pb": 1.8,
+        },
+        {
+            "symbol": "000003",
+            "name": "消费C",
+            "strategy_name": "trend",
+            "market_value": 25_000,
+            "industry": "消费",
+            "market_cap": 300,
+            "pe_ttm": 22,
+            "pb": 2.2,
+        },
+    ])
+
+    snapshot = compute_exposure_snapshot(
+        holdings,
+        pd.DataFrame(),
+        thresholds=ExposureRiskThresholds(
+            max_position_weight=0.50,
+            max_industry_weight=0.50,
+            max_top5_weight=1.0,
+            max_unknown_industry_weight=0.10,
+            min_pe_coverage=0.80,
+            min_pb_coverage=0.80,
+        ),
+    )
+
+    assert set(snapshot["warnings"]["status"]) == {"OK"}
 
 
 def test_load_exposure_snapshot_uses_latest_holdings_and_active_benchmark_members():

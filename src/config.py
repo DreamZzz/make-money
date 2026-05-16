@@ -100,6 +100,10 @@ DEFAULT_CONFIG = {
             "benchmark_index": "000300",
             "max_industry_weight_warn": 0.30,
             "max_position_weight_warn": 0.15,
+            "max_top5_weight_warn": 0.70,
+            "max_unknown_industry_weight_warn": 0.05,
+            "min_pe_coverage": 0.80,
+            "min_pb_coverage": 0.80,
         },
     },
     "signals": {

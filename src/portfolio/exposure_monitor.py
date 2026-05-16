@@ -1,6 +1,7 @@
 """Portfolio exposure calculations for the satellite stock sleeve."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
@@ -11,14 +12,39 @@ UNKNOWN_INDUSTRY = "未知行业"
 UNKNOWN_SIZE = "未知市值"
 
 
+@dataclass(frozen=True)
+class ExposureRiskThresholds:
+    max_position_weight: float = 0.15
+    max_industry_weight: float = 0.30
+    max_top5_weight: float = 0.70
+    max_unknown_industry_weight: float = 0.05
+    min_pe_coverage: float = 0.80
+    min_pb_coverage: float = 0.80
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any] | None = None) -> ExposureRiskThresholds:
+        raw = config or {}
+        return cls(
+            max_position_weight=_safe_float(raw.get("max_position_weight_warn", cls.max_position_weight)),
+            max_industry_weight=_safe_float(raw.get("max_industry_weight_warn", cls.max_industry_weight)),
+            max_top5_weight=_safe_float(raw.get("max_top5_weight_warn", cls.max_top5_weight)),
+            max_unknown_industry_weight=_safe_float(
+                raw.get("max_unknown_industry_weight_warn", cls.max_unknown_industry_weight)
+            ),
+            min_pe_coverage=_safe_float(raw.get("min_pe_coverage", raw.get("min_pe_coverage_warn", cls.min_pe_coverage))),
+            min_pb_coverage=_safe_float(raw.get("min_pb_coverage", raw.get("min_pb_coverage_warn", cls.min_pb_coverage))),
+        )
+
+
 def load_exposure_snapshot(
     conn: Any,
     benchmark_index: str = DEFAULT_BENCHMARK_INDEX,
     as_of: date | None = None,
+    thresholds: ExposureRiskThresholds | dict[str, Any] | None = None,
 ) -> dict[str, pd.DataFrame]:
     holdings = load_current_stock_holdings(conn, as_of=as_of)
     benchmark = load_benchmark_members(conn, benchmark_index=benchmark_index, as_of=as_of)
-    return compute_exposure_snapshot(holdings, benchmark)
+    return compute_exposure_snapshot(holdings, benchmark, thresholds=thresholds)
 
 
 def load_current_stock_holdings(conn: Any, as_of: date | None = None) -> pd.DataFrame:
@@ -104,6 +130,7 @@ def load_benchmark_members(
 def compute_exposure_snapshot(
     holdings: pd.DataFrame,
     benchmark: pd.DataFrame | None = None,
+    thresholds: ExposureRiskThresholds | dict[str, Any] | None = None,
 ) -> dict[str, pd.DataFrame]:
     positions = _aggregate_positions(holdings)
     if positions.empty:
@@ -112,6 +139,7 @@ def compute_exposure_snapshot(
             "industry": _empty_industry_frame(),
             "size": _empty_size_frame(),
             "summary": _summary_frame(),
+            "warnings": _empty_warning_frame(),
         }
 
     total_value = float(positions["market_value"].sum())
@@ -140,7 +168,42 @@ def compute_exposure_snapshot(
         "industry": industry,
         "size": size,
         "summary": summary,
+        "warnings": evaluate_exposure_warnings(summary, thresholds),
     }
+
+
+def evaluate_exposure_warnings(
+    summary: pd.DataFrame | pd.Series | dict[str, Any],
+    thresholds: ExposureRiskThresholds | dict[str, Any] | None = None,
+) -> pd.DataFrame:
+    if isinstance(summary, pd.DataFrame):
+        if summary.empty or int(summary.iloc[0].get("position_count") or 0) <= 0:
+            return _empty_warning_frame()
+        values = summary.iloc[0].to_dict()
+    elif isinstance(summary, pd.Series):
+        if int(summary.get("position_count") or 0) <= 0:
+            return _empty_warning_frame()
+        values = summary.to_dict()
+    else:
+        if int(summary.get("position_count") or 0) <= 0:
+            return _empty_warning_frame()
+        values = dict(summary)
+
+    cfg = _coerce_thresholds(thresholds)
+    checks = [
+        _max_check("top1_weight", "最大单票", values.get("top1_weight"), cfg.max_position_weight),
+        _max_check("max_industry_weight", "最大行业", values.get("max_industry_weight"), cfg.max_industry_weight),
+        _max_check("top5_weight", "Top5集中度", values.get("top5_weight"), cfg.max_top5_weight),
+        _max_check(
+            "unknown_industry_weight",
+            "未知行业占比",
+            values.get("unknown_industry_weight"),
+            cfg.max_unknown_industry_weight,
+        ),
+        _min_check("pe_coverage", "PE覆盖率", values.get("pe_coverage"), cfg.min_pe_coverage),
+        _min_check("pb_coverage", "PB覆盖率", values.get("pb_coverage"), cfg.min_pb_coverage),
+    ]
+    return pd.DataFrame(checks, columns=_warning_columns())
 
 
 def size_bucket(market_cap: Any) -> str:
@@ -272,6 +335,52 @@ def _empty_industry_frame() -> pd.DataFrame:
 
 def _empty_size_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=["size_bucket", "market_value", "weight", "position_count"])
+
+
+def _empty_warning_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=_warning_columns())
+
+
+def _warning_columns() -> list[str]:
+    return ["metric", "label", "value", "threshold", "status", "severity", "detail"]
+
+
+def _coerce_thresholds(thresholds: ExposureRiskThresholds | dict[str, Any] | None) -> ExposureRiskThresholds:
+    if isinstance(thresholds, ExposureRiskThresholds):
+        return thresholds
+    if isinstance(thresholds, dict):
+        return ExposureRiskThresholds.from_config(thresholds)
+    return ExposureRiskThresholds()
+
+
+def _max_check(metric: str, label: str, value: Any, threshold: float) -> dict[str, Any]:
+    value_float = _safe_float(value)
+    threshold_float = _safe_float(threshold)
+    status = "WARN" if value_float > threshold_float else "OK"
+    return {
+        "metric": metric,
+        "label": label,
+        "value": value_float,
+        "threshold": threshold_float,
+        "status": status,
+        "severity": "WARN" if status == "WARN" else "OK",
+        "detail": f"{label} {value_float:.1%}，上限 {threshold_float:.1%}",
+    }
+
+
+def _min_check(metric: str, label: str, value: Any, threshold: float) -> dict[str, Any]:
+    value_float = _safe_float(value)
+    threshold_float = _safe_float(threshold)
+    status = "WARN" if value_float < threshold_float else "OK"
+    return {
+        "metric": metric,
+        "label": label,
+        "value": value_float,
+        "threshold": threshold_float,
+        "status": status,
+        "severity": "WARN" if status == "WARN" else "OK",
+        "detail": f"{label} {value_float:.1%}，下限 {threshold_float:.1%}",
+    }
 
 
 def _safe_float(value: Any) -> float:
