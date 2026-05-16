@@ -104,9 +104,11 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 
 - Landed: `scripts/fetch_index_membership_baostock.py` converts free Baostock monthly snapshots for `000300` and `000905` into the existing `index_code,symbol,start_date,end_date,source` archive format.
 - Landed: pure tests cover month-end snapshot generation, Baostock result conversion, exchange-prefix symbol normalization, and add/remove/re-entry interval construction.
+- Landed: `scripts/backfill_index_membership.py --replace-indexes` can replace synthetic current snapshot rows when importing an authoritative historical archive, preventing duplicated active member counts.
 - Dependency stance: `baostock>=0.9.1` is recorded as a free data dependency, but local Homebrew Python blocks global pip installs; use a project environment or temporary target install before running the real fetch.
-- Verification evidence: `pytest tests/test_baostock_membership_fetcher.py tests/test_index_membership_backfill.py -q` passed with 6 tests; `ruff check scripts/fetch_index_membership_baostock.py tests/test_baostock_membership_fetcher.py pyproject.toml docs/iteration_backlog.md` passed.
-- Remaining: run the real Baostock fetch for 2020-01-01 through current date, import the generated CSV, and compare at least two known semiannual adjustment periods against official public announcements.
+- Real fetch/import: Baostock monthly snapshots for 2020-01-01 through 2026-05-16 generated 1,621 interval rows. Imported rows produce active counts `000300=300` and `000905=500`; Qlib `csi300/csi500/csi800` dynamic instrument checks pass after `prepare-data`.
+- Verification evidence: `pytest tests/test_baostock_membership_fetcher.py tests/test_index_membership_backfill.py -q` passed; `ruff check scripts/fetch_index_membership_baostock.py tests/test_baostock_membership_fetcher.py pyproject.toml docs/iteration_backlog.md` passed; full `pytest -q` passed with 164 tests before the import-replace fix.
+- Remaining: compare at least two known semiannual adjustment periods against official public announcements, then run survivorship impact v2.
 
 ## P1 Candidates
 

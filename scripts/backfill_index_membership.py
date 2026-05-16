@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data_pipeline.index_membership_backfill import build_membership_coverage_report, import_membership_archive
 from src.data_pipeline.loader import get_connection, init_db
@@ -14,12 +18,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("paths", nargs="+", help="CSV/XLS/XLSX files with index_code,symbol,start_date,end_date columns")
     parser.add_argument("--source", default="manual_archive", help="Source label used when a file has no source column")
     parser.add_argument("--report", default="docs/index_membership_coverage.md", help="Markdown coverage report path")
+    parser.add_argument(
+        "--replace-indexes",
+        action="store_true",
+        help="Delete existing rows for indexes present in the archive before importing. Use for authoritative history backfills.",
+    )
     args = parser.parse_args(argv)
 
     conn = get_connection()
     try:
         init_db(conn)
-        stats = import_membership_archive(conn, args.paths, source=args.source)
+        stats = import_membership_archive(
+            conn,
+            args.paths,
+            source=args.source,
+            replace_existing_indexes=args.replace_indexes,
+        )
         report = build_membership_coverage_report(conn)
     finally:
         conn.close()

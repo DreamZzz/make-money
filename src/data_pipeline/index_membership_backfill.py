@@ -44,6 +44,7 @@ def import_membership_archive(
     conn: duckdb.DuckDBPyConnection,
     paths: Iterable[str | Path],
     source: str = "manual_archive",
+    replace_existing_indexes: bool = False,
 ) -> dict[str, int]:
     """Import one or more CSV/XLS/XLSX membership interval archives."""
     frames: list[pd.DataFrame] = []
@@ -58,6 +59,10 @@ def import_membership_archive(
         if not normalized.empty:
             frames.append(normalized)
     merged = merge_membership_ranges(pd.concat(frames, ignore_index=True)) if frames else pd.DataFrame(columns=MEMBERSHIP_COLUMNS)
+    if replace_existing_indexes and not merged.empty:
+        index_codes = sorted(merged["index_code"].dropna().astype(str).unique().tolist())
+        placeholders = ",".join(["?"] * len(index_codes))
+        conn.execute(f"DELETE FROM index_member_history WHERE index_code IN ({placeholders})", index_codes)
     written = upsert_index_member_history(conn, merged) if not merged.empty else 0
     return {"files": files, "input_rows": int(input_rows), "written_rows": int(written)}
 
