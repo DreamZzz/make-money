@@ -4,6 +4,13 @@ __pycache__/
 *.pyo
 .pytest_cache/
 
+# Frontend
+node_modules/
+frontend/dashboard-v2/dist/
+frontend/dashboard-v2/coverage/
+frontend/dashboard-v2/.vite/
+frontend/dashboard-v2/tsconfig.tsbuildinfo
+
 # 数据文件（体积大，本地维护）
 data/
 qlib_data/

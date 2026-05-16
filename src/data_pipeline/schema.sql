@@ -669,3 +669,17 @@ CREATE TABLE IF NOT EXISTS allocation_plan_items (
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (plan_id, sleeve, instrument_type, instrument_id, action)
 );
+
+-- ============================================
+-- 20. Dashboard V2 安全写入审计表
+-- ============================================
+CREATE TABLE IF NOT EXISTS dashboard_audit_log (
+    audit_id        VARCHAR NOT NULL,
+    action          VARCHAR NOT NULL,
+    payload_json    TEXT,
+    status          VARCHAR NOT NULL,        -- ok / failed / rejected
+    result_json     TEXT,
+    error_message   VARCHAR,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (audit_id)
+);
