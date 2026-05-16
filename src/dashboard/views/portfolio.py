@@ -27,6 +27,12 @@ SLEEVE_LABELS = {
     "satellite": "Satellite 个股策略",
 }
 
+EXECUTION_MODE_LABELS = {
+    "ADVISORY": "建议",
+    "BUDGET": "预算",
+    "MANUAL": "手动",
+}
+
 
 def show_cash_account():
     """全局资金账户：出入金、现金和净投入。"""
@@ -148,8 +154,23 @@ def show_allocation_plan():
     if core_items.empty:
         st.caption("暂无基金级 core 执行计划")
         return
+    for column, default in [
+        ("execution_mode", "ADVISORY"),
+        ("expected_cash", 0.0),
+        ("cash_effect", 0.0),
+        ("budget_consumption", 0.0),
+    ]:
+        if column not in core_items.columns:
+            core_items[column] = default
+    budget_delta = pd.to_numeric(core_items["budget_delta"], errors="coerce").fillna(0.0)
+    expected_cash = pd.to_numeric(core_items["expected_cash"], errors="coerce").fillna(budget_delta.abs())
+    cash_effect = pd.to_numeric(core_items["cash_effect"], errors="coerce").fillna(0.0)
+    budget_consumption = pd.to_numeric(core_items["budget_consumption"], errors="coerce").fillna(0.0)
     core_items["动作"] = core_items["action"].map(ACTION_LABELS).fillna(core_items["action"])
-    core_items["计划金额"] = core_items["budget_delta"]
+    core_items["执行方式"] = core_items["execution_mode"].map(EXECUTION_MODE_LABELS).fillna(core_items["execution_mode"])
+    core_items["预计操作金额"] = expected_cash
+    core_items["现金影响"] = cash_effect
+    core_items["消耗Core预算"] = budget_consumption
     core_display = core_items.rename(columns={
         "instrument_id": "基金代码",
         "current_value": "当前市值",
@@ -158,13 +179,18 @@ def show_allocation_plan():
     })
     st.markdown("**Core 执行计划**")
     st.dataframe(
-        core_display[["基金代码", "动作", "当前市值", "目标市值", "计划金额", "说明"]],
+        core_display[[
+            "基金代码", "动作", "执行方式", "当前市值", "目标市值",
+            "预计操作金额", "现金影响", "消耗Core预算", "说明",
+        ]],
         hide_index=True,
         width="stretch",
         column_config={
             "当前市值": st.column_config.NumberColumn(format="%.0f"),
             "目标市值": st.column_config.NumberColumn(format="%.0f"),
-            "计划金额": st.column_config.NumberColumn(format="%.0f"),
+            "预计操作金额": st.column_config.NumberColumn(format="%.0f"),
+            "现金影响": st.column_config.NumberColumn(format="%+.0f"),
+            "消耗Core预算": st.column_config.NumberColumn(format="%.0f"),
         },
     )
 

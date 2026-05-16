@@ -18,9 +18,9 @@ This file is the durable project backlog. Keep it small enough to review every w
 
 ## Current Baseline
 
-- Latest pushed commit: `067c19d` (`docs: add survivorship impact report`); local `main` is ahead until the P0-09/P1-05 work is pushed.
+- Latest pushed commit before P1-06: `05bdefa` (`feat: refresh holding fundamentals coverage`).
 - Review v2 baseline correction: the external v2 review used `origin/main` (`23b8178`) and did not include local commits `93e9995` and `9e000f4`.
-- Test baseline: `pytest -q` passed with 177 tests on 2026-05-16.
+- Test baseline: `pytest -q` passed with 179 tests on 2026-05-16.
 - Lint baseline: `ruff check .` passed on 2026-05-16.
 - Durable rule: before starting new alpha work, finish the survivorship-bias impact report so future backtests have a trust anchor.
 - Validation-period data stance: do not assume Tushare or other paid data sources are available; prefer Baostock snapshots plus official public adjustment announcements for index membership history.
@@ -43,7 +43,7 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 | ID | Item | Status | Owner | Next Action | Acceptance |
 |---|---|---|---|---|---|
 | P1-05 | Automate current-holding fundamentals coverage | Done | Codex | Monitor the next daily close run for the new non-blocking fundamentals step | Current holdings have 0 missing values for the four fields after daily close; failures are logged per symbol without blocking the close |
-| P1-06 | Core fund execution planning v2 | Ready | Codex | Convert allocator core advisory items into a manual execution plan with expected cash, action, and reason; do not auto-fill orders yet | Dashboard shows actionable core fund BUY/ADD/REDUCE plan with budget consumption and no mutation of paper orders |
+| P1-06 | Core fund execution planning v2 | Done | Codex | Monitor the next allocation plan output in Dashboard before any manual core fund operation | Dashboard shows actionable core fund BUY/ADD/REDUCE plan with budget consumption and no mutation of paper orders |
 | P1-07 | Exposure monitor quality thresholds | Proposed | Codex | Define warning bands for unknown industry, max industry weight, top5 concentration, PE/PB coverage | Dashboard flags exposure risks with deterministic thresholds and tests for each warning state |
 | P1-08 | Daily close failure diagnostics | Proposed | Codex | Persist per-step close status and stderr excerpts to a durable job run table/file | Dashboard can show latest failed step, command, return code, and last log excerpt without reading terminal history |
 
@@ -120,6 +120,14 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 - Operational behavior: `scripts/daily_close.sh` runs the updater 在行情更新后、信号生成前 with `|| true`; Dashboard `daily_close_workflow` has a matching `fundamentals_coverage` step before `generate_signals`.
 - Real local check: `python -m src.portfolio.fundamentals_coverage update` returned `status=OK` for 13 current holdings with 0 missing `industry/market_cap/pe_ttm/pb` fields and no external fetch needed.
 - Verification evidence: `pytest tests/test_fundamentals_coverage.py tests/test_dashboard_job_manager.py tests/test_dashboard_runtime_scripts.py -q` passed; `bash -n scripts/daily_close.sh` passed; targeted `ruff check` passed.
+
+### 2026-05-16 P1-06 Core Fund Manual Execution Plan
+
+- Landed: `allocation_plan_items` now records `execution_mode`, `expected_cash`, `cash_effect`, and `budget_consumption` for each plan item.
+- Landed: core index-fund BUY/ADD/REDUCE rows are explicit `MANUAL` execution plans; BUY/ADD consume core budget and show cash outflow, REDUCE shows expected cash inflow without consuming budget.
+- Landed: Portfolio Dashboard `Core 执行计划` shows execution mode, expected manual amount, cash effect, and core budget consumption.
+- Guardrail: allocator still does not write index-fund rows into `paper_orders`; core fund execution remains a manual plan until a dedicated executor is designed.
+- Verification evidence: `pytest tests/test_allocator.py -q` passed with 8 tests; full `pytest -q` passed with 179 tests; `ruff check .` passed.
 
 ## P1 Candidates
 

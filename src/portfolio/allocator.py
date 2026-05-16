@@ -78,6 +78,10 @@ class AllocationPlanItem:
     budget_delta: float
     priority: int
     reason: str
+    execution_mode: str = "ADVISORY"
+    expected_cash: float = 0.0
+    cash_effect: float = 0.0
+    budget_consumption: float = 0.0
 
     def to_row(self) -> dict[str, Any]:
         return self.__dict__.copy()
@@ -348,6 +352,7 @@ def attach_core_execution_plan(
             if abs(budget_delta) < cfg.min_trade_amount:
                 budget_delta = 0.0
 
+        expected_cash, cash_effect, budget_consumption = _manual_execution_amounts(action, budget_delta)
         items.append(AllocationPlanItem(
             plan_id=plan.plan_id,
             sleeve="core",
@@ -359,6 +364,10 @@ def attach_core_execution_plan(
             budget_delta=round(budget_delta, 2),
             priority=11 + idx,
             reason=_core_fund_reason(action, budget_delta, row["thesis"]),
+            execution_mode="MANUAL",
+            expected_cash=round(expected_cash, 2),
+            cash_effect=round(cash_effect, 2),
+            budget_consumption=round(budget_consumption, 2),
         ))
 
     return replace(plan, items=items)
@@ -390,10 +399,12 @@ def persist_allocation_plan(conn: Any, plan: AllocationPlan) -> None:
         conn.execute("""
             INSERT INTO allocation_plan_items (
                 plan_id, sleeve, instrument_type, instrument_id, action,
-                current_value, target_value, budget_delta, priority, reason
+                current_value, target_value, budget_delta, execution_mode,
+                expected_cash, cash_effect, budget_consumption, priority, reason
             )
             SELECT plan_id, sleeve, instrument_type, instrument_id, action,
-                   current_value, target_value, budget_delta, priority, reason
+                   current_value, target_value, budget_delta, execution_mode,
+                   expected_cash, cash_effect, budget_consumption, priority, reason
             FROM _tmp_allocation_plan_items_df
         """)
 
@@ -476,6 +487,8 @@ def _build_item(
     else:
         action = "HOLD"
         reason = f"{_sleeve_label(sleeve)}在目标容忍区间内"
+    budget_delta = round(delta if action == "REDUCE" else budget, 2)
+    expected_cash, cash_effect, budget_consumption = _budget_execution_amounts(action, budget_delta)
     return AllocationPlanItem(
         plan_id=plan_id,
         sleeve=sleeve,
@@ -484,10 +497,36 @@ def _build_item(
         action=action,
         current_value=round(current, 2),
         target_value=round(target, 2),
-        budget_delta=round(delta if action == "REDUCE" else budget, 2),
+        budget_delta=budget_delta,
         priority=priority,
         reason=reason,
+        execution_mode="BUDGET",
+        expected_cash=round(expected_cash, 2),
+        cash_effect=round(cash_effect, 2),
+        budget_consumption=round(budget_consumption, 2),
     )
+
+
+def _manual_execution_amounts(action: str, budget_delta: float) -> tuple[float, float, float]:
+    action = str(action or "").upper()
+    delta = float(budget_delta or 0.0)
+    if action in {"BUY", "ADD"} and delta > 0:
+        return delta, -delta, delta
+    if action == "REDUCE" and delta < 0:
+        amount = abs(delta)
+        return amount, amount, 0.0
+    return 0.0, 0.0, 0.0
+
+
+def _budget_execution_amounts(action: str, budget_delta: float) -> tuple[float, float, float]:
+    action = str(action or "").upper()
+    delta = float(budget_delta or 0.0)
+    if action == "ADD" and delta > 0:
+        return delta, -delta, delta
+    if action == "REDUCE" and delta < 0:
+        amount = abs(delta)
+        return amount, amount, 0.0
+    return 0.0, 0.0, 0.0
 
 
 def _core_holding_values(holdings: pd.DataFrame | None) -> dict[str, float]:

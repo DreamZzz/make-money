@@ -1,6 +1,7 @@
 from datetime import date
 
 import duckdb
+import pandas as pd
 import pytest
 
 from src.data_pipeline.loader import init_db
@@ -148,6 +149,107 @@ def test_create_allocation_plan_allocates_core_budget_to_latest_buy_add_fund_sig
     assert fund_items["action"].tolist() == ["BUY", "ADD"]
     assert fund_items["target_value"].tolist() == pytest.approx([50_400, 33_600])
     assert fund_items["budget_delta"].tolist() == pytest.approx([50_400, 33_600])
+    conn.close()
+
+
+def test_core_fund_items_are_manual_execution_plan_and_do_not_create_orders():
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    conn.execute("""
+        INSERT INTO account_daily (
+            account_id, trade_date, cash, position_value, total_value,
+            net_contribution, nav, daily_return, drawdown
+        )
+        VALUES ('default', DATE '2026-05-15', 100000, 40000, 140000, 140000, 1, 0, 0)
+    """)
+    conn.execute("""
+        INSERT INTO index_fund_signals (
+            signal_id, fund_code, index_code, signal_date, action,
+            target_weight, confidence, thesis, risk_tags
+        )
+        VALUES
+            ('IFS-1', '510300', '000300', DATE '2026-05-15', 'BUY', 0.60, 0.80, 'core buy', ['underweight']),
+            ('IFS-2', '513130', 'HSTECH', DATE '2026-05-15', 'ADD', 0.40, 0.70, 'core add', ['underweight'])
+    """)
+
+    plan = create_allocation_plan(
+        conn,
+        config=AllocationConfig(
+            core_target_pct=0.60,
+            satellite_target_pct=0.40,
+            rebalance_tolerance_pct=0.05,
+            min_trade_amount=1000,
+            core_cash_priority=True,
+        ),
+        persist=True,
+    )
+
+    rows = conn.execute("""
+        SELECT instrument_id, action, execution_mode, expected_cash, cash_effect, budget_consumption
+        FROM allocation_plan_items
+        WHERE plan_id = ? AND instrument_type = 'index_fund'
+        ORDER BY priority
+    """, [plan.plan_id]).fetchall()
+    order_count = conn.execute("SELECT COUNT(*) FROM paper_orders").fetchone()[0]
+
+    assert [row[:3] for row in rows] == [
+        ("510300", "BUY", "MANUAL"),
+        ("513130", "ADD", "MANUAL"),
+    ]
+    assert [row[3:] for row in rows] == pytest.approx([
+        (50_400, -50_400, 50_400),
+        (33_600, -33_600, 33_600),
+    ])
+    assert order_count == 0
+    conn.close()
+
+
+def test_reduce_core_fund_manual_plan_has_positive_expected_cash_and_cash_inflow():
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    conn.execute("""
+        INSERT INTO account_daily (
+            account_id, trade_date, cash, position_value, total_value,
+            net_contribution, nav, daily_return, drawdown
+        )
+        VALUES ('default', DATE '2026-05-15', 10000, 40000, 50000, 50000, 1, 0, 0)
+    """)
+    conn.execute("""
+        INSERT INTO index_fund_signals (
+            signal_id, fund_code, index_code, signal_date, action,
+            target_weight, confidence, thesis, risk_tags
+        )
+        VALUES ('IFS-1', '510300', '000300', DATE '2026-05-15', 'REDUCE', 1.0, 0.90, 'overweight', ['overweight'])
+    """)
+    holdings = pd.DataFrame([{"fund_code": "510300", "market_value": 60_000}])
+    base_plan = compute_allocation_plan(
+        AllocationInputs(
+            plan_date=date(2026, 5, 15),
+            account_id="default",
+            cash=10_000,
+            core_value=60_000,
+            satellite_value=20_000,
+        ),
+        AllocationConfig(core_target_pct=0.60, satellite_target_pct=0.40, min_trade_amount=1000),
+    )
+    signals = conn.execute("SELECT * FROM index_fund_signals").fetchdf()
+
+    from src.portfolio.allocator import attach_core_execution_plan
+
+    plan = attach_core_execution_plan(
+        base_plan,
+        signals,
+        holdings=holdings,
+        config=AllocationConfig(core_target_pct=0.60, satellite_target_pct=0.40, min_trade_amount=1000),
+    )
+    item = [item for item in plan.items if item.instrument_type == "index_fund"][0]
+
+    assert item.action == "REDUCE"
+    assert item.execution_mode == "MANUAL"
+    assert item.budget_delta == pytest.approx(-6_000)
+    assert item.expected_cash == pytest.approx(6_000)
+    assert item.cash_effect == pytest.approx(6_000)
+    assert item.budget_consumption == pytest.approx(0)
     conn.close()
 
 

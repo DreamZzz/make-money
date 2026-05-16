@@ -657,6 +657,10 @@ CREATE TABLE IF NOT EXISTS allocation_plan_items (
     current_value    DOUBLE,
     target_value     DOUBLE,
     budget_delta     DOUBLE,
+    execution_mode   VARCHAR DEFAULT 'ADVISORY', -- ADVISORY / BUDGET / MANUAL
+    expected_cash    DOUBLE DEFAULT 0,           -- 手动执行时预计操作金额，始终为正
+    cash_effect      DOUBLE DEFAULT 0,           -- 买入为负，赎回/减仓为正
+    budget_consumption DOUBLE DEFAULT 0,         -- 消耗的 sleeve 预算，减仓/暂停为 0
     priority         INTEGER,
     reason           VARCHAR,
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
