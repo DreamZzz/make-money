@@ -731,6 +731,212 @@ def test_qlib_publish_gate_requires_positive_excess_icir_floor_and_reasonable_dr
     assert "最大回撤" in reason
 
 
+def test_qlib_publish_gate_accepts_retail_low_turnover_candidate_metrics():
+    ok, reason = _passes_publish_gate({
+        "ic_mean": 0.005,
+        "icir": 0.048,
+        "rank_ic_positive_rate": 0.535,
+        "annual_return": 0.178,
+        "sharpe_ratio": 0.968,
+        "max_drawdown": -0.111,
+        "turnover": 8.49,
+        "benchmark_return": 0.049,
+        "excess_return": 0.129,
+        "best_benchmark": "MIXED_EQUAL",
+        "best_rebalance_freq": "monthly",
+        "best_constraint_profile": "small_account_100k",
+        "avg_selected_count": 15,
+        "avg_cash_drag": 0.228,
+        "max_actual_position_pct": 0.06,
+    })
+
+    assert ok
+    assert reason == ""
+
+
+def test_qlib_publish_gate_rejects_retail_candidate_with_poor_execution_shape():
+    ok, reason = _passes_publish_gate({
+        "ic_mean": 0.005,
+        "icir": 0.048,
+        "rank_ic_positive_rate": 0.535,
+        "annual_return": 0.178,
+        "sharpe_ratio": 0.968,
+        "max_drawdown": -0.111,
+        "turnover": 36.0,
+        "excess_return": 0.129,
+        "best_benchmark": "000300",
+        "best_rebalance_freq": "weekly",
+        "best_constraint_profile": "small_account_100k",
+        "avg_selected_count": 8,
+        "avg_cash_drag": 0.42,
+        "max_actual_position_pct": 0.11,
+    })
+
+    assert not ok
+    assert "MIXED_EQUAL" in reason
+    assert "低换手" in reason
+    assert "月频" in reason
+    assert "分散度" in reason
+    assert "现金拖累" in reason
+    assert "单票仓位" in reason
+
+
+def test_qlib_publish_gate_metrics_prefer_candidate_grid_over_experiment_metrics():
+    experiment_metrics = {
+        "ic_mean": 0.005,
+        "icir": 0.048,
+        "annual_return": 0.039,
+        "sharpe_ratio": 0.036,
+        "max_drawdown": -0.292,
+        "turnover": 134.1,
+        "benchmark_return": 0.236,
+        "excess_return": -0.197,
+    }
+    candidate_metrics = {
+        "annual_return": 0.178,
+        "sharpe_ratio": 0.968,
+        "max_drawdown": -0.111,
+        "turnover": 8.49,
+        "benchmark_return": 0.049,
+        "excess_return": 0.129,
+        "best_benchmark": "MIXED_EQUAL",
+        "rank_ic_positive_rate": 0.535,
+        "best_rebalance_freq": "monthly",
+        "best_constraint_profile": "small_account_100k",
+        "avg_selected_count": 15,
+        "avg_cash_drag": 0.228,
+        "max_actual_position_pct": 0.06,
+    }
+
+    merged = qlib_runner._publish_gate_metrics(experiment_metrics, candidate_metrics)
+    ok, reason = _passes_publish_gate(merged)
+
+    assert ok
+    assert reason == ""
+    assert merged["excess_return"] == pytest.approx(0.129)
+    assert merged["turnover"] == pytest.approx(8.49)
+    assert merged["best_benchmark"] == "MIXED_EQUAL"
+    assert merged["publish_metric_source"] == "candidate_best_grid"
+
+
+def test_qlib_publish_gate_rejects_inconsistent_excess_return_formula():
+    ok, reason = _passes_publish_gate({
+        "ic_mean": 0.005,
+        "icir": 0.048,
+        "rank_ic_positive_rate": 0.535,
+        "annual_return": 0.178,
+        "benchmark_return": 0.049,
+        "excess_return": 0.20,
+        "sharpe_ratio": 0.968,
+        "max_drawdown": -0.111,
+        "turnover": 8.49,
+        "best_benchmark": "MIXED_EQUAL",
+        "best_rebalance_freq": "monthly",
+        "best_constraint_profile": "small_account_100k",
+        "avg_selected_count": 15,
+        "avg_cash_drag": 0.228,
+        "max_actual_position_pct": 0.06,
+    })
+
+    assert not ok
+    assert "超额收益口径" in reason
+
+
+def test_publish_model_uses_candidate_best_grid_metrics_for_gate(monkeypatch, tmp_path):
+    import json
+
+    import duckdb
+
+    from src.data_pipeline import loader
+
+    db_path = tmp_path / "publish_gate.duckdb"
+    conn = duckdb.connect(str(db_path))
+    init_db(conn)
+    experiment_metrics = {
+        "ic_mean": 0.005,
+        "icir": 0.048,
+        "annual_return": 0.039,
+        "sharpe_ratio": 0.036,
+        "max_drawdown": -0.292,
+        "turnover": 134.1,
+        "benchmark_return": 0.236,
+        "excess_return": -0.197,
+    }
+    conn.execute(
+        """
+        INSERT INTO qlib_experiments (
+            experiment_id, model_name, model_version, mode, status, metrics_json
+        )
+        VALUES ('E_FAST', 'alpha158', 'alpha158-fast', 'walk_forward', 'SUCCEEDED', ?)
+        """,
+        [json.dumps(experiment_metrics)],
+    )
+    save_candidate_result(
+        conn,
+        {
+            "candidate_id": "lgb_fast_shallow",
+            "batch_id": "B_RETAIL",
+            "experiment_id": "E_FAST",
+            "model_name": "alpha158",
+            "model_family": "lgbm",
+            "model_variant": "fast_shallow",
+            "status": "SUCCEEDED",
+            "mode": "walk_forward",
+            "params_json": "{}",
+            "grid_json": "{}",
+            "best_benchmark": "MIXED_EQUAL",
+            "best_top_n": 15,
+            "best_holding_days": 15,
+            "best_rebalance_freq": "monthly",
+            "best_constraint_profile": "small_account_100k",
+            "best_account_capital": 100000,
+            "avg_selected_count": 15,
+            "avg_cash_drag": 0.228,
+            "max_actual_position_pct": 0.06,
+            "annual_return": 0.178,
+            "sharpe_ratio": 0.968,
+            "max_drawdown": -0.111,
+            "turnover": 8.49,
+            "benchmark_return": 0.049,
+            "excess_return": 0.129,
+            "ic_mean": 0.005,
+            "icir": 0.048,
+            "rank_ic_mean": 0.006,
+            "rank_ic_positive_rate": 0.535,
+            "score": 0.158,
+        },
+    )
+    conn.close()
+
+    monkeypatch.setattr(loader, "get_connection", lambda *args, **kwargs: duckdb.connect(str(db_path)))
+    captured = {}
+
+    def fake_manifest(model_version, payload):
+        captured["model_version"] = model_version
+        captured["payload"] = payload
+        return tmp_path / "manifest.json"
+
+    monkeypatch.setattr(qlib_runner, "_write_production_manifest", fake_manifest)
+
+    result = qlib_runner.publish_model("E_FAST")
+
+    check = duckdb.connect(str(db_path))
+    stored = check.execute("""
+        SELECT metrics_json
+        FROM qlib_model_registry
+        WHERE model_version = 'alpha158-fast' AND status = 'production'
+    """).fetchone()[0]
+    check.close()
+    metrics = json.loads(stored)
+
+    assert result["status"] == "production"
+    assert captured["payload"]["metrics"]["publish_metric_source"] == "candidate_best_grid"
+    assert metrics["publish_metric_source"] == "candidate_best_grid"
+    assert metrics["best_benchmark"] == "MIXED_EQUAL"
+    assert metrics["excess_return"] == pytest.approx(0.129)
+    assert metrics["turnover"] == pytest.approx(8.49)
+
+
 def test_qlib_universe_checks_reject_current_snapshot_only_membership():
     current_only = pd.DataFrame({
         "index_code": ["000300", "000905"],

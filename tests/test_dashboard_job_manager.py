@@ -221,3 +221,16 @@ def test_daily_close_workflow_updates_signal_outcomes_after_nav_and_performance(
         "src.signals.outcome_tracker",
         "update",
     ]
+
+
+def test_daily_close_workflow_runs_model_monitor_after_signal_outcomes():
+    step_keys = [step.key for step in jm.JOB_DEFINITIONS["daily_close_workflow"].steps]
+
+    assert "model_monitor" in step_keys
+    assert step_keys.index("signal_outcomes") < step_keys.index("model_monitor")
+    assert jm.SINGLE_STEPS["model_monitor"].cmd == [
+        jm.PYTHON,
+        "-m",
+        "src.monitoring.model_monitor",
+        "update",
+    ]

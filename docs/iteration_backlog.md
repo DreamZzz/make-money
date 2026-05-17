@@ -56,6 +56,7 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 | P2-06 | Value-quality fundamental factor prototype | Done | Codex | Keep research-only; improve historical valuation/size coverage before another promotion attempt | 2022-2025 standalone backtest and correlation evidence are recorded; current prototype is not approved for production |
 | P2-07 | Qlib PortAna artifact | Done | Codex | Re-check after the next successful Qlib run that Dashboard exposes the artifact status/path | Successful Qlib runs can link to a saved attribution/position report artifact |
 | P2-08 | Environment-specific config loading | Done | Codex | Use `MM_ENV=dev` or `MM_ENV=prod` only when an explicit environment overlay is needed | `config/settings.dev.yaml` and `config/settings.prod.yaml` override safely without breaking default local runs |
+| P2-09 | Production model monitoring loop | Done | Codex | Run `predict-latest`, then monitor the next close-run transition from prediction alerts to realized outcome metrics | Published Qlib production models write local monitor alerts for prediction freshness, signal generation, paper execution, and benchmark-relative outcome drift |
 
 ### P3 - Retail Usability And Hygiene
 
@@ -161,6 +162,15 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 - Empty/partial-data behavior: if a signal return is READY but benchmark data is missing, raw return remains READY while benchmark return and alpha stay empty.
 - Real local check: `python -m src.signals.outcome_tracker update` returned `updated=0`, and production DuckDB has the three new benchmark columns with no current outcome rows.
 - Verification evidence: focused signal outcome and Dashboard tests passed; full verification is recorded with this commit.
+
+### 2026-05-17 P2-09 Production Model Monitoring Loop
+
+- Landed: `model_monitor_alerts` persists active/resolved production model alerts keyed by model/version/date/metric.
+- Landed: `src.monitoring.model_monitor update` evaluates the active Qlib production model across production inference freshness, signal generation, paper execution status, and realized `signal_outcomes` alpha/hit-rate drift.
+- Landed: daily close and Dashboard job workflows now run model monitoring after `signal_outcomes`, so alerts are generated after prediction, paper trading, NAV, and outcome updates.
+- Landed: Dashboard V2 `today` and `health` include `health.model_monitor` with active alert counts and current alert details.
+- Current local check: the newly published `alpha158-20260517160658-74b46e` has active WARN alerts for missing production inference and missing production signals until the next `predict-latest` / close loop writes them.
+- Verification evidence: `pytest tests/test_model_monitor.py tests/test_dashboard_v2_service.py tests/test_dashboard_job_manager.py tests/test_dashboard_runtime_scripts.py -q` passed; targeted Ruff and `bash -n scripts/daily_close.sh` passed.
 
 ### 2026-05-16 P2-06 Value-Quality Prototype
 

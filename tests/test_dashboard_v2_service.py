@@ -43,6 +43,18 @@ def _seed_dashboard_v2_db(db_path) -> None:
                 10000, 'MANUAL', 10000, -10000, 10000, 1, 'core补仓'
             )
         """)
+        conn.execute("""
+            INSERT INTO model_monitor_alerts (
+                alert_id, model_name, model_version, experiment_id, alert_date,
+                severity, metric_name, observed_value, threshold_value, status,
+                message, context_json
+            )
+            VALUES (
+                'ALERT-1', 'alpha158', 'alpha158-prod', 'EXP-PROD', DATE '2026-05-15',
+                'WARN', 'production_prediction_missing', NULL, NULL, 'ACTIVE',
+                'production 模型尚未生成生产预测截面', '{}'
+            )
+        """)
     finally:
         conn.close()
 
@@ -59,6 +71,8 @@ def test_dashboard_v2_service_builds_today_from_local_db(tmp_path) -> None:
     assert snapshot["account"]["total_value"] == 300000
     assert snapshot["operation_summary"]["operation_count"] == 1
     assert snapshot["next_action"]["label"] == "查看调仓计划"
+    assert snapshot["health"]["model_monitor"]["status"] == "degraded"
+    assert snapshot["health"]["model_monitor"]["active_alert_count"] == 1
 
 
 def test_dashboard_v2_safe_writes_persist_audit_log(tmp_path) -> None:

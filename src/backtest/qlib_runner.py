@@ -41,6 +41,24 @@ DEFAULT_PUBLISH_GATE = {
     "min_icir": 0.30,
     "min_excess_return": 0.0,
     "max_drawdown_floor": -0.35,
+    "retail_min_icir": 0.0,
+    "retail_min_rank_ic_positive_rate": 0.52,
+    "retail_min_excess_return": 0.05,
+    "retail_min_sharpe_ratio": 0.80,
+    "retail_max_drawdown_floor": -0.20,
+    "retail_max_turnover": 12.0,
+    "retail_min_avg_selected_count": 10.0,
+    "retail_max_cash_drag": 0.35,
+    "retail_max_actual_position_pct": 0.08,
+}
+RETAIL_PUBLISH_REBALANCE_FREQS = {"monthly"}
+PUBLISH_GATE_CANDIDATE_METRICS = {
+    "annual_return", "sharpe_ratio", "max_drawdown", "turnover",
+    "benchmark_return", "excess_return", "ic_mean", "icir",
+    "rank_ic_mean", "rank_ic_positive_rate",
+    "best_benchmark", "best_top_n", "best_holding_days", "best_rebalance_freq",
+    "best_constraint_profile", "best_account_capital", "avg_selected_count",
+    "avg_cash_drag", "max_actual_position_pct",
 }
 DEFAULT_SMALL_ACCOUNT_PROFILES = [
     {
@@ -183,6 +201,35 @@ def _publish_gate_thresholds() -> dict[str, float]:
         except (TypeError, ValueError):
             thresholds[key] = float(default)
     return thresholds
+
+
+def _publish_gate_metrics(
+    experiment_metrics: dict[str, Any] | None,
+    candidate_metrics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return metrics used by production gates.
+
+    Candidate batch rows represent the execution rule that will be used after
+    publishing, so their portfolio metrics should override the raw experiment
+    metrics. IC fields remain available from the experiment when the candidate
+    row only contains portfolio-level diagnostics.
+    """
+    metrics = dict(experiment_metrics or {})
+    clean_candidate = {
+        key: value
+        for key, value in (candidate_metrics or {}).items()
+        if key in PUBLISH_GATE_CANDIDATE_METRICS and value is not None
+    }
+    if clean_candidate:
+        metrics.update(clean_candidate)
+        metrics["publish_metric_source"] = "candidate_best_grid"
+    else:
+        metrics.setdefault("publish_metric_source", "experiment_metrics")
+    return metrics
+
+
+def _has_retail_publish_shape(metrics: dict[str, Any]) -> bool:
+    return bool(metrics.get("best_rebalance_freq") or metrics.get("best_constraint_profile"))
 
 
 def _dynamic_membership_history_check(
@@ -1622,11 +1669,62 @@ def _passes_publish_gate(metrics: dict[str, Any]) -> tuple[bool, str]:
     excess = metrics.get("excess_return")
     failures = []
     min_ic = thresholds["min_ic_mean"]
+    if ic is None or ic <= min_ic:
+        failures.append(f"IC Mean <= {min_ic:.3f}")
+
+    if _has_retail_publish_shape(metrics):
+        min_icir = thresholds["retail_min_icir"]
+        min_rank_ic_positive_rate = thresholds["retail_min_rank_ic_positive_rate"]
+        min_excess = thresholds["retail_min_excess_return"]
+        min_sharpe = thresholds["retail_min_sharpe_ratio"]
+        max_dd_floor = thresholds["retail_max_drawdown_floor"]
+        max_turnover = thresholds["retail_max_turnover"]
+        min_avg_selected = thresholds["retail_min_avg_selected_count"]
+        max_cash_drag = thresholds["retail_max_cash_drag"]
+        max_actual_position = thresholds["retail_max_actual_position_pct"]
+        annual_return = metrics.get("annual_return")
+        benchmark_return = metrics.get("benchmark_return")
+        rank_ic_positive_rate = metrics.get("rank_ic_positive_rate")
+        sharpe = metrics.get("sharpe_ratio")
+        turnover = metrics.get("turnover")
+        benchmark = str(metrics.get("best_benchmark") or "").upper()
+        rebalance_freq = str(metrics.get("best_rebalance_freq") or "").lower()
+        avg_selected = metrics.get("avg_selected_count")
+        cash_drag = metrics.get("avg_cash_drag")
+        max_weight = metrics.get("max_actual_position_pct")
+
+        if benchmark != "MIXED_EQUAL":
+            failures.append("散户发布超额必须对比 MIXED_EQUAL")
+        if annual_return is None or benchmark_return is None or excess is None:
+            failures.append("超额收益口径缺失")
+        elif abs(float(excess) - (float(annual_return) - float(benchmark_return))) > 1e-6:
+            failures.append("超额收益口径必须等于年化收益 - MIXED_EQUAL 基准收益")
+        if icir is None or icir < min_icir:
+            failures.append(f"ICIR < {min_icir:.2f}")
+        if rank_ic_positive_rate is None or rank_ic_positive_rate < min_rank_ic_positive_rate:
+            failures.append(f"RankIC 正向率 < {min_rank_ic_positive_rate:.0%}")
+        if excess is None or excess < min_excess:
+            failures.append(f"散户执行超额 < {min_excess:.1%}")
+        if sharpe is None or sharpe < min_sharpe:
+            failures.append(f"Sharpe < {min_sharpe:.2f}")
+        if max_dd is None or max_dd < max_dd_floor:
+            failures.append(f"最大回撤低于 {max_dd_floor:.0%}")
+        if turnover is None or turnover > max_turnover:
+            failures.append(f"低换手要求: turnover > {max_turnover:.1f}")
+        if rebalance_freq not in RETAIL_PUBLISH_REBALANCE_FREQS:
+            allowed = "/".join(sorted(RETAIL_PUBLISH_REBALANCE_FREQS))
+            failures.append(f"调仓频率必须为月频({allowed})")
+        if avg_selected is None or avg_selected < min_avg_selected:
+            failures.append(f"分散度不足: 平均持仓数 < {min_avg_selected:.0f}")
+        if cash_drag is None or cash_drag > max_cash_drag:
+            failures.append(f"现金拖累 > {max_cash_drag:.0%}")
+        if max_weight is None or max_weight > max_actual_position:
+            failures.append(f"单票仓位 > {max_actual_position:.0%}")
+        return not failures, "；".join(failures)
+
     min_icir = thresholds["min_icir"]
     min_excess = thresholds["min_excess_return"]
     max_dd_floor = thresholds["max_drawdown_floor"]
-    if ic is None or ic <= min_ic:
-        failures.append(f"IC Mean <= {min_ic:.3f}")
     if icir is None or icir < min_icir:
         failures.append(f"ICIR < {min_icir:.2f}")
     if max_dd is None or max_dd < max_dd_floor:
@@ -2214,7 +2312,12 @@ def publish_model(experiment_id: str, force: bool = False) -> dict[str, Any]:
             SELECT e.experiment_id, e.model_version, e.status, e.metrics_json, r.model_path,
                    e.mode, e.train_start, e.train_end, e.valid_start, e.valid_end,
                    e.test_start, e.test_end, e.config_snapshot, c.params_json,
-                   c.best_top_n, c.best_holding_days, c.best_rebalance_freq
+                   c.best_benchmark, c.best_top_n, c.best_holding_days, c.best_rebalance_freq,
+                   c.annual_return, c.sharpe_ratio, c.max_drawdown, c.turnover,
+                   c.benchmark_return, c.excess_return, c.ic_mean, c.icir,
+                   c.rank_ic_mean, c.rank_ic_positive_rate,
+                   c.best_constraint_profile, c.best_account_capital,
+                   c.avg_selected_count, c.avg_cash_drag, c.max_actual_position_pct
             FROM qlib_experiments e
             LEFT JOIN qlib_model_registry r ON e.experiment_id = r.experiment_id
             LEFT JOIN qlib_candidate_results c
@@ -2229,7 +2332,29 @@ def publish_model(experiment_id: str, force: bool = False) -> dict[str, Any]:
         if row[2] != "SUCCEEDED":
             raise ValueError(f"实验未成功，不能发布: {row[2]}")
         model_version = row[1] or _model_version(experiment_id)
-        metrics = json.loads(row[3] or "{}")
+        experiment_metrics = json.loads(row[3] or "{}")
+        candidate_metrics = {
+            "best_benchmark": row[14],
+            "best_top_n": row[15],
+            "best_holding_days": row[16],
+            "best_rebalance_freq": row[17],
+            "annual_return": row[18],
+            "sharpe_ratio": row[19],
+            "max_drawdown": row[20],
+            "turnover": row[21],
+            "benchmark_return": row[22],
+            "excess_return": row[23],
+            "ic_mean": row[24],
+            "icir": row[25],
+            "rank_ic_mean": row[26],
+            "rank_ic_positive_rate": row[27],
+            "best_constraint_profile": row[28],
+            "best_account_capital": row[29],
+            "avg_selected_count": row[30],
+            "avg_cash_drag": row[31],
+            "max_actual_position_pct": row[32],
+        }
+        metrics = _publish_gate_metrics(experiment_metrics, candidate_metrics)
         ok, reason = _passes_publish_gate(metrics)
         if not ok and not force:
             raise ValueError(f"未通过发布门槛: {reason}")
@@ -2249,10 +2374,13 @@ def publish_model(experiment_id: str, force: bool = False) -> dict[str, Any]:
                 },
                 "params": _safe_json_dict(row[13]) or _safe_json_dict(_safe_json_dict(row[12]).get("lgb")),
                 "model_path": row[4],
-                "best_top_n": row[14],
-                "best_holding_days": row[15],
-                "best_rebalance_freq": row[16],
+                "best_benchmark": row[14],
+                "best_top_n": row[15],
+                "best_holding_days": row[16],
+                "best_rebalance_freq": row[17],
                 "metrics": metrics,
+                "experiment_metrics": experiment_metrics,
+                "candidate_metrics": candidate_metrics,
                 "publish_gate": {
                     "passed": ok,
                     "reason": reason,
@@ -2261,7 +2389,7 @@ def publish_model(experiment_id: str, force: bool = False) -> dict[str, Any]:
                 },
             },
         )
-        production_path = row[4] or manifest_path
+        production_path = str(row[4] or manifest_path)
 
         conn.execute("""
             UPDATE qlib_model_registry

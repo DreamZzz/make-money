@@ -178,6 +178,28 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
 );
 
 -- ============================================
+-- 5c. 生产模型监控告警表
+-- ============================================
+CREATE TABLE IF NOT EXISTS model_monitor_alerts (
+    alert_id        VARCHAR NOT NULL,
+    model_name      VARCHAR,
+    model_version   VARCHAR,
+    experiment_id   VARCHAR,
+    alert_date      DATE NOT NULL,
+    severity        VARCHAR NOT NULL,        -- INFO / WARN / CRITICAL
+    metric_name     VARCHAR NOT NULL,
+    observed_value  DOUBLE,
+    threshold_value DOUBLE,
+    status          VARCHAR DEFAULT 'ACTIVE',-- ACTIVE / RESOLVED
+    message         VARCHAR,
+    context_json    TEXT,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    resolved_at     TIMESTAMP,
+    PRIMARY KEY (alert_id)
+);
+
+-- ============================================
 -- 8. 纸交易持仓表
 -- ============================================
 CREATE TABLE IF NOT EXISTS paper_positions (

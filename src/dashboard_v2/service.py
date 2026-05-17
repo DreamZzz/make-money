@@ -32,6 +32,7 @@ SAFE_JOB_KEYS = {
     "qlib_predict",
     "allocation_plan",
     "signal_outcomes",
+    "model_monitor",
 }
 
 
@@ -445,13 +446,45 @@ def _build_health_status(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     latest_run = _job_to_dict(job_manager.latest_run())
     if latest_run and latest_run.get("status") == "FAILED":
         messages.append(f"最近任务失败：{latest_run.get('job_label') or latest_run.get('job_key')}")
+    model_monitor = _load_model_monitor_health(conn)
+    if model_monitor["active_alert_count"]:
+        messages.append(f"模型监控告警：{model_monitor['active_alert_count']} 条")
     status = "ok" if not messages else ("failed" if any("失败" in msg for msg in messages) else "degraded")
+    if model_monitor["status"] == "failed":
+        status = "failed"
+    elif model_monitor["status"] == "degraded" and status == "ok":
+        status = "degraded"
     return {
         "status": status,
         "label": {"ok": "数据可用", "degraded": "数据需确认", "failed": "任务失败"}[status],
         "blocking": status == "failed" or latest_date is None,
         "messages": messages,
+        "model_monitor": model_monitor,
     }
+
+
+def _load_model_monitor_health(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+    if not _table_exists(conn, "model_monitor_alerts"):
+        return {"status": "ok", "active_alert_count": 0, "alerts": []}
+    df = conn.execute("""
+        SELECT alert_id, model_name, model_version, experiment_id, alert_date,
+               severity, metric_name, observed_value, threshold_value, status,
+               message, context_json, updated_at
+        FROM model_monitor_alerts
+        WHERE status = 'ACTIVE'
+        ORDER BY CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'WARN' THEN 1 ELSE 2 END,
+                 updated_at DESC NULLS LAST
+        LIMIT 20
+    """).fetchdf()
+    alerts = _records(df)
+    for alert in alerts:
+        alert["context"] = _loads_json(alert.pop("context_json", None))
+    status = "ok"
+    if any(alert.get("severity") == "CRITICAL" for alert in alerts):
+        status = "failed"
+    elif alerts:
+        status = "degraded"
+    return {"status": status, "active_alert_count": len(alerts), "alerts": alerts}
 
 
 def _build_blockers(health: dict[str, Any], account: dict[str, Any], plan: dict[str, Any]) -> list[dict[str, Any]]:
