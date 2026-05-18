@@ -1,11 +1,20 @@
 import type { RebalanceGroups, RebalanceItem } from "../types";
-import { formatCurrency, text } from "../utils";
+import {
+  formatCurrency,
+  formatInstrumentLabel,
+  text,
+  translateAction,
+  translateBudgetAction,
+  translateInstrumentType,
+  translateSleeve,
+} from "../utils";
 
 type Props = {
   groups: RebalanceGroups;
 };
 
 const GROUP_LABELS: Array<[keyof RebalanceGroups, string]> = [
+  ["budget", "资金分配"],
   ["executable", "可执行"],
   ["confirm", "需人工确认"],
   ["deferred", "暂缓"],
@@ -33,7 +42,7 @@ export function RebalancePlanTable({ groups }: Props) {
             </thead>
             <tbody>
               {(groups[key] || []).length ? (
-                groups[key].map((item, index) => <RebalanceRow item={item} key={`${key}-${item.instrument_id}-${index}`} />)
+                (groups[key] || []).map((item, index) => <RebalanceRow item={item} key={`${key}-${item.instrument_id}-${index}`} />)
               ) : (
                 <tr className="empty-row">
                   <td colSpan={6}>暂无{label}项目</td>
@@ -51,16 +60,23 @@ function RebalanceRow({ item }: { item: RebalanceItem }) {
   return (
     <tr>
       <td>
-        <strong>{item.display_name || item.instrument_id}</strong>
-        <span className="muted-line">{text(item.instrument_type)}</span>
+        <strong>{formatInstrumentLabel(item as unknown as Record<string, unknown>, "instrument_id")}</strong>
+        <span className="muted-line">{translateInstrumentType(item.instrument_type)}</span>
       </td>
-      <td>{text(item.sleeve)}</td>
+      <td>{translateSleeve(item.sleeve)}</td>
       <td>
-        <span className={`action-pill action-pill--${String(item.action).toLowerCase()}`}>{item.action}</span>
+        <span className={`action-pill action-pill--${String(item.action).toLowerCase()}`}>{displayAction(item)}</span>
       </td>
       <td>{formatCurrency(item.expected_cash ?? item.budget_delta)}</td>
       <td>{formatCurrency(item.budget_consumption)}</td>
       <td>{item.bucket_reason || item.reason || "-"}</td>
     </tr>
   );
+}
+
+function displayAction(item: RebalanceItem): string {
+  if (item.instrument_type === "sleeve" || String(item.execution_mode || "").toUpperCase() === "BUDGET") {
+    return translateBudgetAction(item.action);
+  }
+  return translateAction(item.action);
 }

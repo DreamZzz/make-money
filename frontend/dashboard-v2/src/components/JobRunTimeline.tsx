@@ -14,7 +14,9 @@ export function JobRunTimeline({ job, failure }: Props) {
     <section className="timeline" aria-label="任务步骤">
       <div className="timeline__summary">
         <strong>{text(job.job_label || job.job_key)}</strong>
-        <span className={`status-chip status-chip--${cssStatus(String(job.status))}`}>{text(job.status)}</span>
+        <span className={`status-chip status-chip--${cssStatus(String(job.status))}`}>
+          {text(job.status_label || job.status)}
+        </span>
       </div>
       <ol>
         {steps.map((step) => (
@@ -22,7 +24,7 @@ export function JobRunTimeline({ job, failure }: Props) {
             <span className={`timeline-dot timeline-dot--${cssStatus(String(step.status))}`} />
             <div>
               <strong>{text(step.label)}</strong>
-              <span>{text(step.status)}</span>
+              <span>{text(step.status_label || step.status)}</span>
             </div>
           </li>
         ))}

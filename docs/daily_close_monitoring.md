@@ -22,8 +22,9 @@ P0-09 tracks one week of daily close workflow health. The goal is not just "job 
 | Date | Counted | Run ID | Status | Step Summary | Paper Engine | Allocation Budget | Signal Outcomes | Notes |
 |---|---|---|---|---|---|---|---|---|
 | 2026-05-16 | No | `JOB-DAILY_CLOSE_WORKFLOW-20260516085129-2666B2` | SUCCEEDED | 11/11 succeeded | executed 0/261; no_trading_day 261; untradeable 0; budget 0; turnover 0 | core 96,421; satellite 26,648 | updated 0; ready 0; pending 0 | Weekend baseline. The paper engine could not find a trading day after 2026-05-15, which is expected for a Saturday run with no 2026-05-18 data yet. |
+| 2026-05-18 | Yes | `JOB-DAILY_CLOSE_WORKFLOW-20260518185840-1E97A8` | FAILED | 0/13 succeeded; `update` failed (exit 1) | not reached (workflow stopped at step 1) | latest persisted plan: core 96,421; satellite 26,648 (plan_date 2026-05-15) | not reached (step not executed) | Trigger command `/opt/homebrew/bin/python3.12 -m src.dashboard.job_manager run --job-key daily_close_workflow` failed first (CLI now requires `--run-id`, exit 2). Fallback sync run via `run_job(\"daily_close_workflow\")` started, then `update` failed: `Error: 增量更新存在 1 个失败项，超过阈值 0。` with Sina DNS resolution failure for `finance.sina.com.cn`. |
 
 ## Acceptance Progress
 
-- Trading-day successful/diagnosed runs: 0/5.
-- Current status: monitoring started; next checks should run after each trading day close.
+- Trading-day successful/diagnosed runs: 1/5.
+- Current status: 2026-05-18 close run diagnosed with actionable upstream data-source/DNS failure; continue next close checks.

@@ -1,5 +1,6 @@
+import { DataTable } from "../components/DataTable";
 import type { ResearchSummary } from "../types";
-import { text } from "../utils";
+import { formatNumber, text } from "../utils";
 
 type Props = {
   data: ResearchSummary;
@@ -35,32 +36,18 @@ export function ResearchPage({ data }: Props) {
           <h2>IC / ICIR</h2>
           <dl className="account-dl">
             <dt>IC</dt>
-            <dd>{text(data.ic.ic)}</dd>
+            <dd>{formatNumber(data.ic.ic, 4)}</dd>
             <dt>RankIC</dt>
-            <dd>{text(data.ic.rank_ic)}</dd>
+            <dd>{formatNumber(data.ic.rank_ic, 4)}</dd>
             <dt>ICIR</dt>
-            <dd>{text(data.ic.icir)}</dd>
+            <dd>{formatNumber(data.ic.icir, 4)}</dd>
           </dl>
         </div>
       </section>
       <section className="panel">
         <h2>最近实验</h2>
-        <DataTable rows={data.recent_experiments} columns={["experiment_id", "model_name", "model_version", "mode", "status", "started_at"]} />
+        <DataTable empty="暂无实验记录" rows={data.recent_experiments} columns={["experiment_id", "model_name", "model_version", "mode", "status", "started_at"]} />
       </section>
     </section>
-  );
-}
-
-function DataTable({ rows, columns }: { rows: Record<string, unknown>[]; columns: string[] }) {
-  if (!rows.length) return <div className="empty-panel">暂无实验记录</div>;
-  return (
-    <table className="data-table">
-      <thead><tr>{columns.map((col) => <th key={col}>{col}</th>)}</tr></thead>
-      <tbody>
-        {rows.slice(0, 12).map((row, index) => (
-          <tr key={index}>{columns.map((col) => <td key={col}>{text(row[col])}</td>)}</tr>
-        ))}
-      </tbody>
-    </table>
   );
 }

@@ -404,6 +404,77 @@ def test_paper_engine_allows_sells_when_satellite_budget_is_zero(monkeypatch, tm
     assert order == ("sell_with_zero_budget", "SELL", 10000.0)
 
 
+def test_paper_engine_adds_sell_proceeds_to_satellite_buy_budget(monkeypatch, tmp_path):
+    db_path = _patch_temp_db(monkeypatch, tmp_path)
+    conn = duckdb.connect(db_path)
+    init_db(conn)
+    conn.execute("""
+        INSERT INTO stock_info (symbol, country, name)
+        VALUES ('000001', 'CN', '卖出释放'), ('000002', 'CN', '买入承接')
+    """)
+    conn.execute("""
+        INSERT INTO daily_price (symbol, trade_date, open, high, low, close, pre_close, volume)
+        VALUES
+          ('000001', DATE '2024-01-03', 11, 11, 11, 11, 11, 1000),
+          ('000002', DATE '2024-01-03', 10, 10, 10, 10, 10, 1000)
+    """)
+    conn.execute("""
+        INSERT INTO account_daily (
+            account_id, trade_date, cash, position_value, total_value,
+            net_contribution, nav, daily_return, drawdown
+        )
+        VALUES ('default', DATE '2024-01-02', 0, 11000, 100000, 100000, 1, 0, 0)
+    """)
+    conn.execute("""
+        INSERT INTO paper_positions (
+            strategy_name, trade_date, symbol, quantity, avg_cost, current_price, market_value
+        )
+        VALUES ('alpha158', DATE '2024-01-02', '000001', 1000, 10, 11, 11000)
+    """)
+    conn.execute("""
+        INSERT INTO allocation_plans (
+            plan_id, plan_date, account_id, total_value, cash,
+            core_target_pct, satellite_target_pct, core_value, satellite_value,
+            core_budget, satellite_budget, core_drift_pct, satellite_drift_pct, status
+        )
+        VALUES (
+            'ALLOC-DEFAULT-20240102', DATE '2024-01-02', 'default', 100000, 0,
+            0.6, 0.4, 0, 11000, 0, 0, -0.6, -0.29, 'ACTIVE'
+        )
+    """)
+    conn.execute("""
+        INSERT INTO signals (
+            signal_id, model_name, model_version, symbol, signal_ts,
+            side, score, confidence, max_position_pct, executed, status
+        )
+        VALUES
+          ('sell_to_fund_buy', 'alpha158', '1.0', '000001',
+           TIMESTAMP '2024-01-02 15:00:00', 'SELL', 1, 1, 0, FALSE, 'ACTIVE'),
+          ('buy_after_sell', 'alpha158', '1.0', '000002',
+           TIMESTAMP '2024-01-02 15:01:00', 'BUY', 1, 0.95, 0.10, FALSE, 'ACTIVE')
+    """)
+    conn.close()
+
+    result = pe.run("alpha158", market="CN")
+
+    assert result["executed"] == 2
+    assert result["skipped_budget"] == 0
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        orders = conn.execute("""
+            SELECT signal_id, side, order_value
+            FROM paper_orders
+            ORDER BY order_ts
+        """).fetchall()
+    finally:
+        conn.close()
+
+    assert orders == [
+        ("sell_to_fund_buy", "SELL", 11000.0),
+        ("buy_after_sell", "BUY", 10000.0),
+    ]
+
+
 def test_paper_engine_caps_buys_by_daily_turnover_and_keeps_high_confidence(monkeypatch, tmp_path):
     db_path = _patch_temp_db(monkeypatch, tmp_path, {"max_daily_turnover_pct": 0.15})
     conn = duckdb.connect(db_path)

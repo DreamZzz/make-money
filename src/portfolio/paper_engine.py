@@ -460,7 +460,10 @@ def _run_signal_batch(
                     satellite_budget_remaining -= required
                 buy_turnover_remaining_by_date[next_day] = remaining_turnover - required
             else:
-                session_cash += execution_value - execution_cost
+                released_cash = execution_value - execution_cost
+                session_cash += released_cash
+                if satellite_budget_remaining is not None:
+                    satellite_budget_remaining += released_cash
                 position_cache[(strategy, sym)] = 0.0
             cash_after = session_cash
 

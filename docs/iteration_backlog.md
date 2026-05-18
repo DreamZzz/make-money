@@ -1,7 +1,7 @@
 # make-money Iteration Backlog
 
 Review date: 2026-05-16
-Last reviewed: 2026-05-16
+Last reviewed: 2026-05-18
 Review cadence: weekly after Friday close, plus ad-hoc review after any P0 production change
 
 This file is the durable project backlog. Keep it small enough to review every week, and link each active item to a design, implementation plan, test evidence, and final outcome.
@@ -37,6 +37,7 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 | P0-07 | Import reliable historical index membership archives | Done | Codex | Re-run after each future membership refresh or source change | `build_membership_coverage_report` shows earliest coverage <= 2020-01-01 and active counts of 300/500; sample validation against public adjustment announcements is recorded in `docs/index_membership_sample_validation.md` |
 | P0-08 | Produce survivorship impact report v2 | Done | Codex | Use PIT universe as the default trust anchor for future model PK and promotion discussions | `docs/survivorship_impact_v2.md` reports annual return, excess return, Sharpe, max drawdown, and turnover delta between static and point-in-time universes |
 | P0-09 | One-week daily close monitoring | In Progress | Codex | Continue the 2026-05-18 to 2026-05-22 close-run checks in `docs/daily_close_monitoring.md` | 5 consecutive close runs complete or produce actionable failure notes; track `skipped_untradeable`, `skipped_turnover`, `skipped_budget`, signal outcome updates |
+| P0-10 | Replace calendar-triggered task scheduling with an interval watchdog | Done | Codex | Monitor the next 20:00 close run and next 09:40 open run from Dashboard V2 Health | Open and close workflows no longer depend on `StartCalendarInterval`; a persisted run-state lock prevents duplicate runs; missed/due/running/succeeded/failed states are visible in Dashboard V2; tests cover idempotency, missed-run recovery, and failure surfacing |
 
 ### P1 - Execution And Risk Loop
 
@@ -46,6 +47,8 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 | P1-06 | Core fund execution planning v2 | Done | Codex | Monitor the next allocation plan output in Dashboard before any manual core fund operation | Dashboard shows actionable core fund BUY/ADD/REDUCE plan with budget consumption and no mutation of paper orders |
 | P1-07 | Exposure monitor quality thresholds | Done | Codex | Monitor exposure warnings during the next paper-trade cycle | Dashboard flags exposure risks with deterministic thresholds and tests for each warning state |
 | P1-08 | Daily close failure diagnostics | Done | Codex | Use the failure diagnostic card for the next failed close run before opening raw logs | Dashboard can show latest failed step, command, return code, and last log excerpt without reading terminal history |
+| P1-09 | Free-source data probe layer | Done | Codex | Use probe output to choose the first production-safe fallback/backfill target | Tencent daily, Eastmoney reports, THS theme, and optional mootdx probes normalize source output, record `data_source_health`, and do not change trading decisions |
+| P1-10 | Target-universe field coverage backfill via free sources | In Progress | Codex | Find a reliable free industry-mapping source; do not use Eastmoney per-symbol metadata as the main route while it is unstable locally | `industry`, `market_cap`, `pe_ttm`, and `pb` coverage reaches >=80% for the target universe; failures are cached and surfaced without blocking daily close |
 
 ### P2 - Feedback And Alpha Expansion
 
@@ -57,6 +60,8 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 | P2-07 | Qlib PortAna artifact | Done | Codex | Re-check after the next successful Qlib run that Dashboard exposes the artifact status/path | Successful Qlib runs can link to a saved attribution/position report artifact |
 | P2-08 | Environment-specific config loading | Done | Codex | Use `MM_ENV=dev` or `MM_ENV=prod` only when an explicit environment overlay is needed | `config/settings.dev.yaml` and `config/settings.prod.yaml` override safely without breaking default local runs |
 | P2-09 | Production model monitoring loop | Done | Codex | Run `predict-latest`, then monitor the next close-run transition from prediction alerts to realized outcome metrics | Published Qlib production models write local monitor alerts for prediction freshness, signal generation, paper execution, and benchmark-relative outcome drift |
+| P2-10 | Fundamental alpha sprint and shadow-mode gate | Ready | Codex | Produce `docs/fundamental_alpha_diagnosis.md` for the current `value_quality` failure, then design `value_quality_v2` with sector-neutral ranking, coverage gates, and shadow-mode monitoring | Fundamental signals stay research-only/shadow-only until validation passes: 2022-2025 excess return > 0, IR >= 0.30, MaxDD no worse than MIXED_EQUAL by more than 3pp, annual turnover <= 12, correlation vs Alpha158 < 0.50, monthly selectable count >= 10, and factor coverage >= 80%; only after this gate may it be wired into `signals.generate_all()` or consume `satellite_budget` |
+| P2-11 | Report/theme shadow features from free sources | Proposed | Codex | After P1-10 improves field coverage, design `research_reports` and `stock_theme_tags` staging tables | Eastmoney report and THS theme data enter Dashboard attribution and shadow monitoring first; they must not create BUY signals until a separate validation gate passes |
 
 ### P3 - Retail Usability And Hygiene
 
@@ -64,7 +69,7 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 |---|---|---|---|---|---|
 | P3-04 | Small-account risk profiles | Done | Codex | Monitor next paper-trade and weekly-report run for skipped_profile and one-lot funding hints | 50k/100k/300k modes produce realistic position counts and explicit one-lot funding hints |
 | P3-05 | Weekly operation summary card | Done | Codex | Monitor whether the weekly summary matches the executable plan after the next signal batch | Retail user can see "operate N times / need cash Y / expected time T" before reading individual signals |
-| P3-06 | Retail user manual | Proposed | Codex | Draft after P0-08 and P1-06 stabilize | `docs/user_guide.md` explains weekly workflow, follow/ignore rules, failure modes, and manual execution discipline in <= 20 pages |
+| P3-06 | Retail user manual | Done | Codex | Keep the Markdown manual and Dashboard V2 `/guide` page in sync when product flows change | `docs/dashboard_v2_user_guide.md` and Dashboard V2 `/guide` explain expectation management, onboarding, weekly review thresholds, signal outcome interpretation, emergency handling, privacy, and manual execution discipline |
 | P3-07 | Strategy math unit tests expansion | Proposed | Codex | Add direct tests for ATR, RSI, Bollinger bands, and IC edge cases | Focused tests cover warmup, gaps, flat series, NaN handling, and known toy examples |
 
 ## Active P0 Track
@@ -172,6 +177,47 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 - Current local check: the newly published `alpha158-20260517160658-74b46e` has active WARN alerts for missing production inference and missing production signals until the next `predict-latest` / close loop writes them.
 - Verification evidence: `pytest tests/test_model_monitor.py tests/test_dashboard_v2_service.py tests/test_dashboard_job_manager.py tests/test_dashboard_runtime_scripts.py -q` passed; targeted Ruff and `bash -n scripts/daily_close.sh` passed.
 
+### 2026-05-18 P0-10 Scheduler Reliability Diagnosis
+
+- Diagnosed missed 2026-05-18 09:40 open paper-trade run: `com.quant.open-paper-trade` was loaded, not disabled, and had no script/Python/DB-lock evidence around the scheduled time.
+- Root-cause probe: `StartCalendarInterval` test LaunchAgents failed to fire automatically in the current GUI session, while manual `launchctl kickstart` and `StartInterval` probes succeeded.
+- Judgment: the direct failure is macOS user-domain calendar-trigger delivery, not the make-money workflow script itself.
+- Follow-up: replace open/close `StartCalendarInterval` LaunchAgents with an interval watchdog that checks due windows, records state, avoids duplicate same-day execution, and exposes missed-run diagnostics to Dashboard V2.
+
+### 2026-05-18 P0-10 Scheduler Watchdog Implementation
+
+- Landed: `scripts/scheduler_watchdog.py` runs under a `StartInterval` LaunchAgent, evaluates local due windows in Python, persists `output/scheduler_state.json`, and prevents duplicate same-day runs with a RUNNING/SUCCEEDED/FAILED/MISSED state lock.
+- Landed: `scripts/install_scheduler_watchdog.sh` installs `com.quant.scheduler-watchdog`, disables the old `com.quant.daily-update` and `com.quant.open-paper-trade` calendar LaunchAgents, and keeps stdout/stderr in `output/scheduler_watchdog*.log`.
+- Landed: Dashboard V2 Health reads the watchdog state and shows the open/close job status, next due time, last execution date, and result; the old CalendarInterval labels are no longer the health source of truth.
+- Install evidence: `launchctl print gui/501/com.quant.scheduler-watchdog` shows `run interval = 300 seconds`, `runs = 1`, `last exit code = 0`; `launchctl list` only shows `com.quant.scheduler-watchdog` among the three scheduler labels.
+- Current state after install: open paper trade is `MISSED` for 2026-05-18 because the window had already passed; close workflow is `WAITING` for 2026-05-18 20:00; next open due is 2026-05-19 09:40.
+- Verification evidence: `pytest tests/test_scheduler_watchdog.py tests/test_dashboard_v2_service.py tests/test_dashboard_runtime_scripts.py -q` passed; `ruff check scripts/scheduler_watchdog.py src/dashboard_v2/service.py tests/test_scheduler_watchdog.py tests/test_dashboard_v2_service.py tests/test_dashboard_runtime_scripts.py` passed; Dashboard V2 `/api/v2/health` reports `WAITING`/`MISSED` watchdog states instead of 500 or stale calendar status.
+
+### 2026-05-18 P3-06 Dashboard V2 User Guide Iteration
+
+- Landed: `docs/dashboard_v2_user_guide.md` now includes investment philosophy and expectation management, first-use onboarding, quantitative weekly review thresholds, signal outcome interpretation, emergency playbooks, privacy notes, mobile/remote-access caveat, and retail-readable glossary thresholds.
+- Landed: Dashboard V2 now has a `/guide` route and primary navigation entry that renders the product manual as semantic HTML inside the app.
+- Landed: README points users to both the Markdown guide and in-app `/guide` manual.
+- Verification evidence: `npm --prefix frontend/dashboard-v2 test -- --run` passed with 10 tests; `npm --prefix frontend/dashboard-v2 run build` passed; Playwright smoke checks passed on desktop 1440x1000 and mobile 390x844 with no console errors and no mobile page-level horizontal overflow.
+
+### 2026-05-18 P1-09 Free-Source Data Probe Layer
+
+- Landed: `src.data_pipeline.fetchers.free_sources` normalizes Tencent daily bars, Eastmoney stock research reports, THS concept/theme summaries, and optional mootdx daily bars into stable DataFrame shapes with `source_status` metadata.
+- Landed: `src.data_pipeline.free_source_probe` and `scripts/probe_free_sources.py` can probe selected symbols/sources and convert results into existing `data_source_health` rows without mutating trading data or signal decisions.
+- Dependency boundary: `mootdx>=0.11.7` is recorded as optional `data-extra`; environments without mootdx report `source_error: mootdx is not installed` instead of failing the whole probe.
+- Real local probe: `000001` and `600519` passed Tencent daily and Eastmoney report probes, THS theme probe passed, and mootdx correctly reported missing dependency; 4 health rows were recorded under run `FREE-SOURCE-PROBE-bae462282699`.
+- Next step: use P1-10 to backfill field coverage in three scopes: current holdings first, latest signal candidates second, then the 708-symbol target universe.
+- Verification evidence: `pytest tests/test_free_source_fetchers.py tests/test_free_source_probe.py -q` passed; `ruff check src/data_pipeline/fetchers/free_sources.py src/data_pipeline/free_source_probe.py scripts/probe_free_sources.py tests/test_free_source_fetchers.py tests/test_free_source_probe.py` passed.
+
+### 2026-05-18 P1-10 Field Coverage Backfill
+
+- Landed: `src.data_pipeline.field_coverage_backfill` and `scripts/backfill_field_coverage_free_sources.py` backfill `stock_info.market_cap` plus latest `daily_price.pe_ttm/pb` by staged scope without touching signals, paper orders, or allocation decisions.
+- Landed: Tencent quote snapshot fallback fills PE/PB/market-cap when AkShare/Eastmoney all-market spot fails; `--skip-industry-fetch` prevents unstable per-symbol Eastmoney metadata calls from blocking valuation coverage.
+- Real local result: current holdings improved from PE/PB `0/13` to `13/13`; target universe improved to `market_cap=708/708`, `pb=708/708`, `pe_ttm=644/708`, while `industry` remains `13/708`.
+- Health rows were recorded for `field_coverage_current_holdings`, `field_coverage_target_universe`, and `field_coverage_signal_candidates`; failures/partial results are visible through `data_source_health`.
+- Remaining gap: industry coverage still needs a reliable free batch mapping source. THS industry list/summary is reachable, but local AkShare does not expose a THS industry constituents endpoint; Eastmoney industry constituents and per-symbol metadata are unstable locally.
+- Verification evidence: `pytest tests/test_field_coverage_backfill.py tests/test_free_source_fetchers.py tests/test_free_source_probe.py -q` passed; targeted Ruff passed for the new modules/scripts/tests.
+
 ### 2026-05-16 P2-06 Value-Quality Prototype
 
 - Landed: research-only `src.research.strategies.value_quality` with local value/quality/liquidity scoring from `daily_price.pe_ttm`, `daily_price.pb`, `financials.roe`, `financials.net_margin`, `financials.debt_ratio`, and `stock_info.market_cap`.
@@ -192,6 +238,14 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 - Correlation evidence: Alpha158 period-return correlation `0.69` over 23 common periods; benchmark correlation `0.90`.
 - Judgment: keep `value_quality` research-only and do not wire into production signal generation; current version does not provide a reliable standalone or diversifying alpha.
 - Details: `docs/value_quality_validation_2022_2025.md`.
+
+### 2026-05-18 P2-10 Fundamental Alpha Sprint
+
+- Decision: create a dedicated fundamental-alpha optimization track instead of directly wiring the current `value_quality` prototype into production.
+- Scope: diagnose the current failure by monthly factor coverage, value/quality/liquidity subfactor IC, industry and size-bucket contribution, turnover/cost attribution, and correlation versus Alpha158.
+- Next design direction: `value_quality_v2` should use sector-neutral valuation and quality ranks, explicit coverage gates, financial-sector handling, low-turnover monthly construction, and optional use as an Alpha158 priority/deferral overlay.
+- Production boundary: until the validation gate is met, fundamental signals may be generated only as research/shadow candidates for Dashboard monitoring and `signal_outcomes`; they must not enter `signals.generate_all()`, paper trading, or the unified `satellite_budget`.
+- Gate to main flow: 2022-2025 excess return > 0, IR >= 0.30, MaxDD no worse than `MIXED_EQUAL` by more than 3pp, annual turnover <= 12, correlation vs Alpha158 < 0.50, monthly selectable count >= 10, and factor coverage >= 80%.
 
 ### 2026-05-16 P2-07 Qlib PortAna Artifact
 
@@ -242,7 +296,7 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 |---|---|---|---|---|---|
 | P3-01 | Add direct ATR tests | Proposed | Codex | Export or test through trend helper boundary | ATR handles gaps and warmup consistently |
 | P3-02 | Add local pre-commit for Ruff and pytest smoke | Done | Codex | Local hook enabled via `core.hooksPath=.githooks` | Local hook runs `ruff check .` and a focused pytest smoke before commits |
-| P3-03 | Retail user manual | Proposed | Codex | Draft after P0/P1 behavior stabilizes | Manual explains weekly actions, ignore rules, and failure modes in under 20 pages |
+| P3-03 | Retail user manual | Done | Codex | Superseded by current priority item P3-06 | Manual explains weekly actions, ignore rules, expectation management, failure modes, and in-app reading path |
 
 ## Weekly Review Template
 

@@ -1,6 +1,6 @@
-import { RiskAlertStack } from "../components/RiskAlertStack";
-import type { PortfolioSnapshot } from "../types";
-import { formatCurrency, formatPercent, text } from "../utils";
+import { DataTable } from "../components/DataTable";
+import type { PortfolioSnapshot, RiskAlert } from "../types";
+import { fieldLabel, formatCurrency, formatPercent, formatValueForField, text } from "../utils";
 
 type Props = {
   data: PortfolioSnapshot;
@@ -19,12 +19,12 @@ export function PortfolioPage({ data }: Props) {
         <strong>总资产 {formatCurrency(data.account.total_value)}</strong>
         <span>现金 {formatCurrency(data.account.cash)}</span>
         <span>持仓 {formatCurrency(data.account.position_value)}</span>
-        <span>回撤 {text(data.account.drawdown)}</span>
+        <span>回撤 {formatPercent(data.account.drawdown)}</span>
       </div>
       <section className="two-column">
         <div className="panel">
-          <h2>风险警告</h2>
-          <RiskAlertStack alerts={data.risk_alerts} />
+          <h2>风险处置清单</h2>
+          <RiskActionList alerts={data.risk_alerts} />
         </div>
         <div className="panel">
           <h2>暴露摘要</h2>
@@ -41,29 +41,140 @@ export function PortfolioPage({ data }: Props) {
         </div>
       </section>
       <section className="panel">
+        <h2>暴露解释</h2>
+        <ExposureInsightCards insights={data.exposure.insights || []} />
+      </section>
+      <section className="panel">
         <h2>当前持仓</h2>
-        <DataTable rows={data.holdings} columns={["symbol", "name", "industry", "market_value", "weight", "pnl_pct"]} />
+        <DataTable
+          rows={data.holdings}
+          columns={[
+            "symbol",
+            "industry",
+            "market_value",
+            "weight",
+            "pnl_pct",
+            "holding_days",
+            "weight_change_7d",
+            "weight_change_20d",
+            "qlib_rank",
+            "qlib_confidence",
+            "latest_signal_side",
+          ]}
+        />
       </section>
       <section className="panel">
         <h2>信号收益跟踪</h2>
-        <DataTable rows={data.signal_outcomes.summary || []} columns={["model_name", "horizon_days", "sample_count", "hit_rate", "avg_return"]} />
+        <SignalOutcomePanel outcomes={data.signal_outcomes} />
       </section>
     </section>
   );
 }
 
-function DataTable({ rows, columns }: { rows: Record<string, unknown>[]; columns: string[] }) {
-  if (!rows.length) return <div className="empty-panel">暂无数据</div>;
+function RiskActionList({ alerts }: { alerts: RiskAlert[] }) {
+  if (!alerts.length) {
+    return <div className="empty-panel">暂无风险警告</div>;
+  }
   return (
-    <table className="data-table">
-      <thead>
-        <tr>{columns.map((col) => <th key={col}>{col}</th>)}</tr>
-      </thead>
-      <tbody>
-        {rows.slice(0, 12).map((row, index) => (
-          <tr key={index}>{columns.map((col) => <td key={col}>{text(row[col])}</td>)}</tr>
+    <div className="risk-action-list">
+      {alerts.map((alert, index) => (
+        <article className={`risk-action-card risk-action-card--${alert.level || "info"}`} key={`${alert.metric || alert.label}-${index}`}>
+          <div className="risk-action-card__head">
+            <div>
+              <strong>{alert.label || alert.title || alert.metric || "风险提示"}</strong>
+              <span>{alert.detail || alert.message || text(alert.value)}</span>
+            </div>
+            <span className="status-chip">{alert.severity || alert.level || "INFO"}</span>
+          </div>
+          <p>{alert.severity_reason || "请结合持仓和调仓计划确认处置动作。"}</p>
+          <HoldingMiniList title="影响标的" rows={alert.affected_holdings || []} />
+          <ul className="action-list">
+            {(alert.suggested_actions || ["先确认数据口径，再在下一次调仓计划中处理。"]).map((action) => (
+              <li key={action}>{action}</li>
+            ))}
+          </ul>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function ExposureInsightCards({ insights }: { insights: Record<string, unknown>[] }) {
+  if (!insights.length) {
+    return <div className="empty-panel">暂无暴露解释；请先确认持仓和 stock_info 覆盖。</div>;
+  }
+  return (
+    <div className="exposure-insights">
+      {insights.map((insight, index) => (
+        <article className="exposure-insight-card" key={`${text(insight.key, "insight")}-${index}`}>
+          <div>
+            <strong>{text(insight.title, "暴露提示")}</strong>
+            <p>{text(insight.message)}</p>
+          </div>
+          <dl className="mini-metrics">
+            {["value", "benchmark_value", "pe_coverage", "pb_coverage"].map((key) => (
+              insight[key] === undefined || insight[key] === null ? null : (
+                <div key={key}>
+                  <dt>{fieldLabel(key)}</dt>
+                  <dd>{formatPercent(insight[key])}</dd>
+                </div>
+              )
+            ))}
+          </dl>
+          <p className="muted-line">{text(insight.suggested_action)}</p>
+          <HoldingMiniList title="相关标的" rows={Array.isArray(insight.affected_holdings) ? insight.affected_holdings as Record<string, unknown>[] : []} />
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function HoldingMiniList({ title, rows }: { title: string; rows: Record<string, unknown>[] }) {
+  if (!rows.length) return null;
+  return (
+    <div className="holding-mini-list">
+      <span>{title}</span>
+      <ul>
+        {rows.slice(0, 5).map((row, index) => (
+          <li key={`${text(row.symbol, "holding")}-${index}`}>
+            <strong>{text(row.display_name || row.symbol)}</strong>
+            <small>
+              {formatValueForField("weight", row.weight, row)}
+              {row.pnl_pct !== undefined && row.pnl_pct !== null ? ` / ${formatValueForField("pnl_pct", row.pnl_pct, row)}` : ""}
+            </small>
+          </li>
         ))}
-      </tbody>
-    </table>
+      </ul>
+    </div>
+  );
+}
+
+function SignalOutcomePanel({
+  outcomes,
+}: {
+  outcomes: PortfolioSnapshot["signal_outcomes"];
+}) {
+  const rows = outcomes.summary || [];
+  const state = outcomes.state;
+  return (
+    <div className="signal-outcome-panel">
+      {state ? (
+        <div className={`signal-outcome-state signal-outcome-state--${state.status || "empty"}`}>
+          <strong>{text(state.message)}</strong>
+          <div>
+            <span>成熟样本 {formatValueForField("ready_count", state.ready_count)}</span>
+            <span>待成熟 {formatValueForField("pending_count", state.pending_count)}</span>
+            <span>总样本 {formatValueForField("total_count", state.total_count)}</span>
+            {state.next_ready_date ? <span>下次成熟 {formatValueForField("next_ready_date", state.next_ready_date)}</span> : null}
+          </div>
+        </div>
+      ) : null}
+      {rows.length ? (
+        <DataTable
+          rows={rows}
+          columns={["model_name", "horizon_days", "sample_count", "pending_count", "hit_rate", "avg_return", "avg_alpha_vs_benchmark"]}
+        />
+      ) : null}
+    </div>
   );
 }

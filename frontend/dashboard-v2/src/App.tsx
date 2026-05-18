@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { apiGet, apiPost } from "./api";
+import { apiGet } from "./api";
 import { AppShell, type RouteKey } from "./components/AppShell";
 import { ErrorPanel, LoadingPanel } from "./components/StatePanel";
 import { HealthPage } from "./pages/HealthPage";
@@ -8,13 +8,14 @@ import { PortfolioPage } from "./pages/PortfolioPage";
 import { RebalancePage } from "./pages/RebalancePage";
 import { ResearchPage } from "./pages/ResearchPage";
 import { TodayPage } from "./pages/TodayPage";
+import { UserGuidePage } from "./pages/UserGuidePage";
 import type { HealthSnapshot, PortfolioSnapshot, RebalanceSnapshot, ResearchSummary, TodaySnapshot } from "./types";
 
 const DEFAULT_HEALTH = { status: "degraded", label: "数据加载中", blocking: false, messages: ["正在连接 Dashboard V2 API"] };
 
 function currentRoute(): RouteKey {
   const path = window.location.pathname as RouteKey;
-  if (["/today", "/rebalance", "/portfolio", "/health", "/research"].includes(path)) return path;
+  if (["/today", "/rebalance", "/portfolio", "/health", "/research", "/guide"].includes(path)) return path;
   return "/today";
 }
 
@@ -26,7 +27,6 @@ export function App() {
   const [portfolio, setPortfolio] = useState<PortfolioSnapshot | null>(null);
   const [research, setResearch] = useState<ResearchSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [jobMessage, setJobMessage] = useState<string | null>(null);
 
   const healthState = useMemo(() => health || today?.health || DEFAULT_HEALTH, [health, today]);
 
@@ -49,30 +49,20 @@ export function App() {
       if (next === "/portfolio") setPortfolio(await apiGet<PortfolioSnapshot>("/api/v2/portfolio"));
       if (next === "/research") setResearch(await apiGet<ResearchSummary>("/api/v2/research/summary"));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  }
-
-  async function startJob(jobKey: string) {
-    try {
-      const result = await apiPost<{ run_id: string }>(`/api/v2/jobs/${jobKey}/start`);
-      setJobMessage(`任务已启动：${result.run_id}`);
-      navigate("/health");
-    } catch (err) {
+      if (next === "/guide") return;
       setError(err instanceof Error ? err.message : String(err));
     }
   }
 
   return (
     <AppShell route={route} health={healthState} onNavigate={navigate}>
-      {jobMessage ? <div className="job-toast">{jobMessage}</div> : null}
       {error ? <ErrorPanel message={error} /> : renderPage(route)}
     </AppShell>
   );
 
   function renderPage(next: RouteKey) {
     if (next === "/today") {
-      return today ? <TodayPage data={today} onNavigate={navigate} onStartJob={startJob} /> : <LoadingPanel message="正在加载今日行动" />;
+      return today ? <TodayPage data={today} onNavigate={navigate} /> : <LoadingPanel message="正在加载今日行动" />;
     }
     if (next === "/rebalance") {
       return rebalance ? <RebalancePage data={rebalance} /> : <LoadingPanel message="正在加载调仓计划" />;
@@ -82,6 +72,9 @@ export function App() {
     }
     if (next === "/health") {
       return health ? <HealthPage data={health} /> : <LoadingPanel message="正在加载数据健康" />;
+    }
+    if (next === "/guide") {
+      return <UserGuidePage />;
     }
     return research ? <ResearchPage data={research} /> : <LoadingPanel message="正在加载研究摘要" />;
   }

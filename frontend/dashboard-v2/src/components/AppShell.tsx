@@ -1,9 +1,9 @@
-import { Activity, Beaker, ClipboardList, HeartPulse, LayoutDashboard } from "lucide-react";
+import { Activity, Beaker, BookOpenText, ClipboardList, HeartPulse, LayoutDashboard } from "lucide-react";
 
 import type { HealthState } from "../types";
 import { DataHealthRibbon } from "./DataHealthRibbon";
 
-export type RouteKey = "/today" | "/rebalance" | "/portfolio" | "/health" | "/research";
+export type RouteKey = "/today" | "/rebalance" | "/portfolio" | "/health" | "/research" | "/guide";
 
 const NAV_ITEMS: Array<{ path: RouteKey; label: string; icon: React.ReactNode }> = [
   { path: "/today", label: "今日行动", icon: <LayoutDashboard size={18} /> },
@@ -11,6 +11,7 @@ const NAV_ITEMS: Array<{ path: RouteKey; label: string; icon: React.ReactNode }>
   { path: "/portfolio", label: "组合体检", icon: <Activity size={18} /> },
   { path: "/health", label: "市场与数据健康", icon: <HeartPulse size={18} /> },
   { path: "/research", label: "研究实验室", icon: <Beaker size={18} /> },
+  { path: "/guide", label: "使用手册", icon: <BookOpenText size={18} /> },
 ];
 
 type Props = {
