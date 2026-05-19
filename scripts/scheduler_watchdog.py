@@ -127,7 +127,7 @@ def tick(
             job_state["updated_at"] = _iso(now)
             continue
         if _is_stale_running_today(job_state, now, pid_checker):
-            _mark_failed(job_state, now, exit_code=-1, result="上次运行状态残留，但进程已不存在")
+            _mark_failed(job_state, finished_at=now, exit_code=-1, result="上次运行状态残留，但进程已不存在")
 
         if _already_final_today(job_state, now):
             job_state["updated_at"] = _iso(now)
@@ -148,12 +148,19 @@ def tick(
         _mark_running(job_state, now)
         save_state(state, state_path)
         result = runner(job)
+        finished_at = datetime.now()
         if result.exit_code == 0:
-            _mark_succeeded(job_state, now, result)
+            _mark_succeeded(job_state, run_date=now.date().isoformat(), finished_at=finished_at, result=result)
         else:
-            _mark_failed(job_state, now, exit_code=result.exit_code, result=result.result)
+            _mark_failed(
+                job_state,
+                run_date=now.date().isoformat(),
+                finished_at=finished_at,
+                exit_code=result.exit_code,
+                result=result.result,
+            )
 
-    state["updated_at"] = _iso(now)
+    state["updated_at"] = _latest_state_updated_at(state, now)
     save_state(state, state_path)
     return state
 
@@ -254,28 +261,49 @@ def _mark_running(job_state: dict[str, Any], now: datetime) -> None:
     })
 
 
-def _mark_succeeded(job_state: dict[str, Any], now: datetime, result: RunResult) -> None:
+def _mark_succeeded(job_state: dict[str, Any], *, run_date: str, finished_at: datetime, result: RunResult) -> None:
     job_state.update({
         "status": STATUS_SUCCEEDED,
-        "last_run_date": now.date().isoformat(),
-        "ended_at": _iso(now),
+        "last_run_date": run_date,
+        "ended_at": _iso(finished_at),
         "exit_code": 0,
         "pid": None,
         "result": result.result or "执行完成",
-        "updated_at": _iso(now),
+        "updated_at": _iso(finished_at),
     })
 
 
-def _mark_failed(job_state: dict[str, Any], now: datetime, *, exit_code: int, result: str) -> None:
+def _mark_failed(
+    job_state: dict[str, Any],
+    *,
+    run_date: str | None = None,
+    finished_at: datetime,
+    exit_code: int,
+    result: str,
+) -> None:
     job_state.update({
         "status": STATUS_FAILED,
-        "last_run_date": now.date().isoformat(),
-        "ended_at": _iso(now),
+        "last_run_date": run_date or finished_at.date().isoformat(),
+        "ended_at": _iso(finished_at),
         "exit_code": exit_code,
         "pid": None,
         "result": result,
-        "updated_at": _iso(now),
+        "updated_at": _iso(finished_at),
     })
+
+
+def _latest_state_updated_at(state: dict[str, Any], fallback: datetime) -> str:
+    latest = _iso(fallback)
+    jobs = state.get("jobs")
+    if not isinstance(jobs, dict):
+        return latest
+    for job_state in jobs.values():
+        if not isinstance(job_state, dict):
+            continue
+        updated_at = job_state.get("updated_at")
+        if isinstance(updated_at, str) and updated_at > latest:
+            latest = updated_at
+    return latest
 
 
 def _mark_missed(

@@ -284,6 +284,7 @@ def _run_signal_batch(
         buy_turnover_remaining_by_date: dict[date, float] = {}
         results: dict[str, dict] = {}
         position_cache: dict[tuple[str, str], float] = {}
+        handled_trade_keys: set[tuple[str, str, str, date]] = set()
 
         for _, sig in signals.iterrows():
             sig_date = sig["signal_date"]
@@ -301,6 +302,19 @@ def _run_signal_batch(
                 logger.warning(f"No trading day after {sig_date} for {sym}")
                 continue
 
+            trade_key = (strategy, sym, order_side, next_day)
+            if trade_key in handled_trade_keys:
+                _mark_signal_handled(
+                    conn,
+                    sig["signal_id"],
+                    next_day,
+                    status="NO_ACTION",
+                    status_reason="同日同标的同方向已有更高优先级信号处理",
+                )
+                stats["handled_without_order"] += 1
+                logger.info(f"  跳过 {sym} {side}：同日同标的同方向已有更高优先级信号处理")
+                continue
+
             held_qty = 0.0
             if side in {"SELL", "SHORT"}:
                 cache_key = (strategy, sym)
@@ -316,6 +330,7 @@ def _run_signal_batch(
                         status_reason="当前无持仓，无需卖出",
                     )
                     stats["handled_without_order"] += 1
+                    handled_trade_keys.add(trade_key)
                     logger.info(f"  跳过 {sym} {side}：当前无持仓，信号已按无需动作处理")
                     continue
 
@@ -342,6 +357,7 @@ def _run_signal_batch(
                     status_reason=tradeability.reason or "开盘不可成交",
                 )
                 stats["handled_without_order"] += 1
+                handled_trade_keys.add(trade_key)
                 logger.info(f"  跳过 {sym} {side}：{tradeability.reason}")
                 continue
 
@@ -366,6 +382,7 @@ def _run_signal_batch(
                         ),
                     )
                     stats["handled_without_order"] += 1
+                    handled_trade_keys.add(trade_key)
                     logger.info(
                         f"  跳过 {sym} BUY：低于执行门槛 "
                         f"(confidence={confidence:.2f}, rank_score={rank_score:.2f})"
@@ -383,6 +400,7 @@ def _run_signal_batch(
                         status_reason=reason,
                     )
                     stats["handled_without_order"] += 1
+                    handled_trade_keys.add(trade_key)
                     logger.info(f"  跳过 {sym} BUY：{reason}")
                     continue
 
@@ -411,6 +429,7 @@ def _run_signal_batch(
                         status_reason=reason,
                     )
                     stats["handled_without_order"] += 1
+                    handled_trade_keys.add(trade_key)
                     logger.info(
                         f"  跳过 {sym}：仓位 {max_position*100:.0f}% × 总资产 {current_total:,.0f} = "
                         f"{target_value:,.0f}，不足一手 ({price:.0f}×100={price*100:,.0f})"
@@ -483,6 +502,7 @@ def _run_signal_batch(
 
             _mark_signal_handled(conn, sig["signal_id"], next_day, price)
             stats["executed"] += 1
+            handled_trade_keys.add(trade_key)
             if order_side == "BUY":
                 active_symbols.add(sym)
 

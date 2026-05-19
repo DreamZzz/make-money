@@ -127,3 +127,34 @@ def test_watchdog_records_failed_job_result(tmp_path) -> None:
     assert state["jobs"]["daily_close"]["status"] == "FAILED"
     assert state["jobs"]["daily_close"]["exit_code"] == 2
     assert state["jobs"]["daily_close"]["result"] == "boom"
+
+
+def test_watchdog_records_finished_time_after_runner_returns(monkeypatch, tmp_path) -> None:
+    import scripts.scheduler_watchdog as watchdog
+    from scripts.scheduler_watchdog import RunResult, tick
+
+    state_path = tmp_path / "scheduler_state.json"
+    job = _job(tmp_path)
+    started_at = datetime(2026, 5, 18, 20, 1)
+    finished_at = datetime(2026, 5, 18, 20, 9, 30)
+    clock = iter([started_at, finished_at])
+
+    class FakeDateTime(datetime):
+        @classmethod
+        def now(cls):
+            return next(clock)
+
+    monkeypatch.setattr(watchdog, "datetime", FakeDateTime)
+
+    state = tick(
+        state_path=state_path,
+        jobs=[job],
+        runner=lambda _job_spec: RunResult(exit_code=0, result="ok"),
+        pid_checker=lambda _pid: False,
+    )
+
+    row = state["jobs"]["daily_close"]
+    assert row["started_at"] == "2026-05-18T20:01:00"
+    assert row["ended_at"] == "2026-05-18T20:09:30"
+    assert row["updated_at"] == "2026-05-18T20:09:30"
+    assert state["updated_at"] == "2026-05-18T20:09:30"

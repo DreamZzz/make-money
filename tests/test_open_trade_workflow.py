@@ -570,6 +570,116 @@ def test_paper_engine_allows_sells_when_buy_turnover_cap_is_low(monkeypatch, tmp
     assert result["skipped_turnover"] == 0
 
 
+def test_paper_engine_deduplicates_same_strategy_symbol_side_execution_day(monkeypatch, tmp_path):
+    db_path = _patch_temp_db(monkeypatch, tmp_path)
+    conn = duckdb.connect(db_path)
+    init_db(conn)
+    conn.execute("INSERT INTO stock_info (symbol, country, name) VALUES ('600808', 'CN', '马钢股份')")
+    conn.execute("""
+        INSERT INTO daily_price (symbol, trade_date, open, high, low, close, pre_close, volume)
+        VALUES ('600808', DATE '2024-01-03', 3.33, 3.33, 3.33, 3.33, 3.30, 1000)
+    """)
+    conn.execute("""
+        INSERT INTO account_daily (
+            account_id, trade_date, cash, position_value, total_value,
+            net_contribution, nav, daily_return, drawdown
+        )
+        VALUES ('default', DATE '2024-01-02', 100000, 0, 100000, 100000, 1, 0, 0)
+    """)
+    conn.execute("""
+        INSERT INTO signals (
+            signal_id, model_name, model_version, symbol, signal_ts,
+            side, score, confidence, max_position_pct, executed, status
+        )
+        VALUES
+          ('duplicate_lower', 'mean_reversion', '1.0', '600808',
+           TIMESTAMP '2024-01-02 15:00:00', 'BUY', 0.8, 0.85, 0.10, FALSE, 'ACTIVE'),
+          ('duplicate_best', 'mean_reversion', '1.0', '600808',
+           TIMESTAMP '2024-01-02 15:01:00', 'BUY', 1.0, 0.90, 0.10, FALSE, 'ACTIVE')
+    """)
+    conn.close()
+
+    result = pe.run("mean_reversion", market="CN")
+
+    assert result["executed"] == 1
+    assert result["handled_without_order"] == 1
+    assert result["pending"] == 0
+
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        orders = conn.execute("""
+            SELECT signal_id, symbol, side, order_value
+            FROM paper_orders
+            ORDER BY order_ts
+        """).fetchall()
+        statuses = {
+            row[0]: row[1:]
+            for row in conn.execute("""
+            SELECT signal_id, executed, status, status_reason
+            FROM signals
+            ORDER BY signal_id
+        """).fetchall()
+        }
+    finally:
+        conn.close()
+
+    assert orders == [("duplicate_best", "600808", "BUY", 9990.0)]
+    assert statuses["duplicate_best"] == (True, "FILLED", "成交")
+    assert statuses["duplicate_lower"][0] is True
+    assert statuses["duplicate_lower"][1] == "NO_ACTION"
+    assert "同日同标的同方向" in statuses["duplicate_lower"][2]
+
+
+def test_paper_engine_deduplicate_keeps_different_strategies_separate(monkeypatch, tmp_path):
+    db_path = _patch_temp_db(monkeypatch, tmp_path)
+    conn = duckdb.connect(db_path)
+    init_db(conn)
+    conn.execute("INSERT INTO stock_info (symbol, country, name) VALUES ('600808', 'CN', '马钢股份')")
+    conn.execute("""
+        INSERT INTO daily_price (symbol, trade_date, open, high, low, close, pre_close, volume)
+        VALUES ('600808', DATE '2024-01-03', 3.33, 3.33, 3.33, 3.33, 3.30, 1000)
+    """)
+    conn.execute("""
+        INSERT INTO account_daily (
+            account_id, trade_date, cash, position_value, total_value,
+            net_contribution, nav, daily_return, drawdown
+        )
+        VALUES ('default', DATE '2024-01-02', 100000, 0, 100000, 100000, 1, 0, 0)
+    """)
+    conn.execute("""
+        INSERT INTO signals (
+            signal_id, model_name, model_version, symbol, signal_ts,
+            side, score, confidence, max_position_pct, executed, status
+        )
+        VALUES
+          ('mean_reversion_buy', 'mean_reversion', '1.0', '600808',
+           TIMESTAMP '2024-01-02 15:00:00', 'BUY', 1, 0.90, 0.10, FALSE, 'ACTIVE'),
+          ('alpha158_buy', 'alpha158', '1.0', '600808',
+           TIMESTAMP '2024-01-02 15:01:00', 'BUY', 1, 0.90, 0.10, FALSE, 'ACTIVE')
+    """)
+    conn.close()
+
+    result = pe.run_all_strategies(initial_capital=100000)
+
+    assert result["mean_reversion"]["executed"] == 1
+    assert result["alpha158"]["executed"] == 1
+
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        orders = conn.execute("""
+            SELECT signal_id, symbol, side
+            FROM paper_orders
+            ORDER BY order_ts
+        """).fetchall()
+    finally:
+        conn.close()
+
+    assert orders == [
+        ("alpha158_buy", "600808", "BUY"),
+        ("mean_reversion_buy", "600808", "BUY"),
+    ]
+
+
 def test_prioritize_signals_releases_cash_before_older_buys():
     signals = pd.DataFrame({
         "signal_id": ["old_buy", "new_sell"],
