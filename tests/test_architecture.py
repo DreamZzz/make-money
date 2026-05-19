@@ -612,6 +612,40 @@ def test_signal_lifecycle_expires_after_t_plus_one_window():
     conn.close()
 
 
+def test_init_db_reconciles_terminal_signal_status_to_executed_true():
+    import duckdb
+
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    conn.execute("""
+        INSERT INTO signals (
+            signal_id, model_name, model_version, symbol, signal_ts,
+            side, score, confidence, executed, status
+        )
+        VALUES
+          ('filled_signal', 'mean_reversion', '1.0', '000001',
+           TIMESTAMP '2024-01-02 15:00:00', 'BUY', 1, 0.9, FALSE, 'FILLED'),
+          ('no_action_signal', 'trend_following', '1.0', '000002',
+           TIMESTAMP '2024-01-02 15:00:00', 'BUY', 1, 0.9, FALSE, 'NO_ACTION'),
+          ('active_signal', 'trend_following', '1.0', '000003',
+           TIMESTAMP '2024-01-02 15:00:00', 'BUY', 1, 0.9, FALSE, 'ACTIVE')
+    """)
+
+    init_db(conn)
+
+    rows = conn.execute("""
+        SELECT signal_id, executed
+        FROM signals
+        ORDER BY signal_id
+    """).fetchall()
+    assert rows == [
+        ("active_signal", False),
+        ("filled_signal", True),
+        ("no_action_signal", True),
+    ]
+    conn.close()
+
+
 def test_signal_lifecycle_supersedes_older_same_direction_signal():
     import duckdb
 

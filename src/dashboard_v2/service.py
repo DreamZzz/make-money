@@ -52,7 +52,7 @@ class DashboardV2Service:
             health = _build_health_status(conn)
             blockers = _build_blockers(health, account, plan)
             next_action = _next_action(health, operation_summary, blockers)
-            latest_job = _job_to_dict(job_manager.latest_run())
+            latest_job = _latest_operational_job_run()
             evidence = {
                 "data_date": latest_date,
                 "signal_date": _latest_signal_date(conn),
@@ -828,21 +828,18 @@ def _load_signal_conflicts(conn: duckdb.DuckDBPyConnection) -> list[dict[str, An
 def _load_active_holding_sell_signals(conn: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
     if not _table_exists(conn, "paper_positions") or not _table_exists(conn, "signals"):
         return []
+    from src.portfolio.current_holdings import current_positions_cte
+
+    current_positions, current_position_params = current_positions_cte()
     df = conn.execute(
-        """
+        f"""
         WITH latest_signal AS (
             SELECT MAX(CAST(signal_ts AS DATE)) AS signal_date FROM signals
         ),
-        latest_positions AS (
-            SELECT p.*,
-                   ROW_NUMBER() OVER (PARTITION BY p.strategy_name, p.symbol ORDER BY p.trade_date DESC) AS rn
-            FROM paper_positions p
-        ),
+        {current_positions},
         active_positions AS (
             SELECT strategy_name, symbol, quantity, market_value, pnl, pnl_pct
-            FROM latest_positions
-            WHERE rn = 1
-              AND COALESCE(quantity, 0) > 0
+            FROM current_positions
         ),
         sell_signals AS (
             SELECT s.symbol,
@@ -884,7 +881,8 @@ def _load_active_holding_sell_signals(conn: duckdb.DuckDBPyConnection) -> list[d
         LEFT JOIN stock_info si ON ap.symbol = si.symbol
         ORDER BY ap.pnl_pct ASC NULLS LAST, ss.confidence DESC, ap.market_value DESC
         LIMIT 50
-        """
+        """,
+        current_position_params,
     ).fetchdf()
     records = _records(df)
     for row in records:
@@ -1004,19 +1002,12 @@ def _load_threshold_filtered_buy_candidate_count(
 
 
 def _load_latest_holdings(conn: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
+    from src.portfolio.current_holdings import current_positions_cte
+
+    current_positions, current_position_params = current_positions_cte()
     df = conn.execute(
-        """
-        WITH latest AS (
-            SELECT strategy_name, MAX(trade_date) AS trade_date
-            FROM paper_positions
-            GROUP BY strategy_name
-        ),
-        current_positions AS (
-            SELECT p.*
-            FROM paper_positions p
-            JOIN latest ON p.strategy_name = latest.strategy_name AND p.trade_date = latest.trade_date
-            WHERE COALESCE(p.quantity, 0) > 0
-        ),
+        f"""
+        WITH {current_positions},
         first_positive AS (
             SELECT strategy_name, symbol, MIN(trade_date) AS first_trade_date
             FROM paper_positions
@@ -1121,7 +1112,8 @@ def _load_latest_holdings(conn: duckdb.DuckDBPyConnection) -> list[dict[str, Any
         LEFT JOIN latest_signal_meta lsm ON p.symbol = lsm.symbol
         ORDER BY p.market_value DESC, p.symbol
         LIMIT 100
-        """
+        """,
+        current_position_params,
     ).fetchdf()
     records = _records(df)
     for row in records:
@@ -1532,6 +1524,13 @@ def _latest_scheduled_job_run(history: list[dict[str, Any]]) -> dict[str, Any] |
     }
 
 
+def _latest_operational_job_run() -> dict[str, Any] | None:
+    scheduled = _latest_scheduled_job_run(_load_scheduled_job_history())
+    if scheduled:
+        return scheduled
+    return _job_to_dict(job_manager.latest_run())
+
+
 def _scheduled_failure_diagnostic(latest_run: dict[str, Any] | None) -> dict[str, Any] | None:
     if not latest_run:
         return None
@@ -1805,22 +1804,9 @@ def _load_field_coverage(conn: duckdb.DuckDBPyConnection) -> list[dict[str, Any]
 def _current_holding_symbols(conn: duckdb.DuckDBPyConnection) -> list[str]:
     if not _table_exists(conn, "paper_positions"):
         return []
-    rows = conn.execute("""
-        WITH latest_positions AS (
-            SELECT strategy_name, MAX(trade_date) AS trade_date
-            FROM paper_positions
-            GROUP BY strategy_name
-        )
-        SELECT DISTINCT p.symbol
-        FROM paper_positions p
-        JOIN latest_positions latest
-          ON p.strategy_name = latest.strategy_name
-         AND p.trade_date = latest.trade_date
-        WHERE COALESCE(p.quantity, 0) > 0
-          AND COALESCE(p.market_value, 0) > 0
-        ORDER BY p.symbol
-    """).fetchall()
-    return [str(row[0]) for row in rows if row and row[0]]
+    from src.portfolio.current_holdings import load_current_position_symbols
+
+    return load_current_position_symbols(conn)
 
 
 def _latest_active_signal_symbols(conn: duckdb.DuckDBPyConnection) -> list[str]:

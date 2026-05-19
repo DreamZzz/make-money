@@ -224,6 +224,41 @@ def test_backfill_field_coverage_scopes_deduplicates_symbols_across_priority_sco
     conn.close()
 
 
+def test_backfill_field_coverage_current_holdings_ignores_stale_flat_positions():
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    _seed_symbol(conn, "000001")
+    conn.execute(
+        """
+        INSERT INTO paper_positions (
+            strategy_name, trade_date, symbol, quantity, avg_cost, current_price, market_value
+        )
+        VALUES ('alpha158', DATE '2026-05-15', '000001', 100, 10, 10, 1000)
+        """
+    )
+    conn.execute("""
+        INSERT INTO portfolio_nav (
+            strategy_name, trade_date, nav, daily_return, cash, position_value,
+            total_value, external_flow, net_contribution, investment_nav, drawdown, sharpe_rolling
+        )
+        VALUES
+            ('alpha158', DATE '2026-05-15', 1, 0, 99000, 1000, 100000, 0, 100000, 1, 0, 0),
+            ('alpha158', DATE '2026-05-16', 1, 0, 100000, 0, 100000, 0, 100000, 1, 0, 0)
+    """)
+
+    result = backfill_field_coverage_scopes(
+        conn,
+        scopes=["current_holdings"],
+        as_of=date(2026, 5, 16),
+        fetch_cn_spot=lambda: pd.DataFrame(),
+        fetch_cn_individual=lambda _symbol: pd.DataFrame(),
+    )
+
+    assert result["scopes"][0]["symbols"] == 0
+    assert result["scopes"][0]["status"] == "OK"
+    conn.close()
+
+
 def test_load_field_coverage_reports_missing_counts_for_symbols():
     conn = duckdb.connect(":memory:")
     init_db(conn)

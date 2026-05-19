@@ -13,33 +13,23 @@ from loguru import logger
 
 def load_current_holding_coverage(conn: Any, as_of: date | None = None) -> pd.DataFrame:
     """Return latest positive paper holdings with metadata/valuation coverage flags."""
-    params: list[Any] = []
-    date_filter = ""
     price_date_filter = ""
     if as_of is not None:
-        date_filter = "WHERE trade_date <= ?"
         price_date_filter = "AND trade_date <= ?"
-        params.append(as_of)
+
+    from src.portfolio.current_holdings import current_positions_cte
+
+    current_positions, position_params = current_positions_cte(as_of=as_of)
     price_params = [as_of] if as_of is not None else []
     df = conn.execute(f"""
-        WITH latest_positions AS (
-            SELECT strategy_name, MAX(trade_date) AS trade_date
-            FROM paper_positions
-            {date_filter}
-            GROUP BY strategy_name
-        ),
+        WITH {current_positions},
         current_symbols AS (
             SELECT
                 p.symbol,
                 SUM(COALESCE(p.market_value, 0)) AS market_value,
                 MAX(COALESCE(si.country, 'CN')) AS country
-            FROM paper_positions p
-            JOIN latest_positions latest
-              ON p.strategy_name = latest.strategy_name
-             AND p.trade_date = latest.trade_date
+            FROM current_positions p
             LEFT JOIN stock_info si ON p.symbol = si.symbol
-            WHERE COALESCE(p.quantity, 0) > 0
-              AND COALESCE(p.market_value, 0) > 0
             GROUP BY p.symbol
         ),
         latest_price AS (
@@ -65,7 +55,7 @@ def load_current_holding_coverage(conn: Any, as_of: date | None = None) -> pd.Da
         LEFT JOIN stock_info si ON cs.symbol = si.symbol
         LEFT JOIN latest_price lp ON cs.symbol = lp.symbol
         ORDER BY cs.market_value DESC, cs.symbol
-    """, [*params, *price_params]).fetchdf()
+    """, [*position_params, *price_params]).fetchdf()
     if df.empty:
         return _empty_coverage_frame()
     return _add_missing_flags(df)

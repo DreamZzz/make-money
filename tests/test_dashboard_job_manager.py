@@ -38,6 +38,24 @@ def test_job_manager_single_success_persists_and_restores(monkeypatch, tmp_path)
     assert jm.latest_run("ok").run_id == run.run_id
 
 
+def test_job_manager_cli_run_creates_run_id_when_omitted(monkeypatch, tmp_path):
+    jobs = {
+        "ok": _job("ok", [
+            jm.JobStep("hello", "hello", [sys.executable, "-c", "print('hello cli')"]),
+        ])
+    }
+    _install_jobs(monkeypatch, tmp_path, jobs)
+
+    exit_code = jm.main(["run", "--job-key", "ok"])
+
+    latest = jm.latest_run("ok")
+    assert exit_code == 0
+    assert latest is not None
+    assert latest.status == jm.SUCCEEDED
+    assert latest.run_id.startswith("JOB-OK-")
+    assert "hello cli" in jm.tail_log(latest.run_id)
+
+
 def test_job_manager_workflow_stops_after_failed_step(monkeypatch, tmp_path):
     jobs = {
         "flow": _job("flow", [

@@ -144,6 +144,16 @@ def init_db(conn: duckdb.DuckDBPyConnection) -> None:
         """)
     except Exception:
         pass
+    try:
+        conn.execute("""
+            UPDATE signals
+            SET executed = TRUE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE COALESCE(executed, FALSE) = FALSE
+              AND COALESCE(status, 'ACTIVE') IN ('FILLED', 'NO_ACTION', 'EXPIRED', 'SUPERSEDED')
+        """)
+    except Exception:
+        pass
     logger.info("Database tables initialized")
 
 

@@ -668,7 +668,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     run_parser = sub.add_parser("run")
     run_parser.add_argument("--job-key", required=True)
-    run_parser.add_argument("--run-id", required=True)
+    run_parser.add_argument("--run-id")
     args = parser.parse_args(argv)
 
     if args.command == "run":

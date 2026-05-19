@@ -238,30 +238,9 @@ def build_field_coverage_health_rows(result: dict[str, Any], run_id: str | None 
 
 
 def _current_holding_symbols(conn: Any, as_of: date | None = None) -> list[str]:
-    date_filter = "WHERE trade_date <= ?" if as_of else ""
-    params = [as_of] if as_of else []
-    rows = conn.execute(
-        f"""
-        WITH latest_positions AS (
-            SELECT strategy_name, MAX(trade_date) AS trade_date
-            FROM paper_positions
-            {date_filter}
-            GROUP BY strategy_name
-        )
-        SELECT DISTINCT p.symbol
-        FROM paper_positions p
-        JOIN latest_positions latest
-          ON p.strategy_name = latest.strategy_name
-         AND p.trade_date = latest.trade_date
-        LEFT JOIN stock_info si ON si.symbol = p.symbol
-        WHERE COALESCE(p.quantity, 0) > 0
-          AND COALESCE(p.market_value, 0) > 0
-          AND COALESCE(si.country, 'CN') = 'CN'
-        ORDER BY p.symbol
-        """,
-        params,
-    ).fetchall()
-    return [str(row[0]) for row in rows if row and row[0]]
+    from src.portfolio.current_holdings import load_current_position_symbols
+
+    return load_current_position_symbols(conn, as_of=as_of, country="CN")
 
 
 def _latest_active_signal_symbols(conn: Any, as_of: date | None = None) -> list[str]:

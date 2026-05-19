@@ -48,22 +48,16 @@ def load_exposure_snapshot(
 
 
 def load_current_stock_holdings(conn: Any, as_of: date | None = None) -> pd.DataFrame:
-    params: list[Any] = []
-    date_filter = ""
     price_date_filter = ""
     if as_of is not None:
-        date_filter = "WHERE trade_date <= ?"
         price_date_filter = "AND trade_date <= ?"
-        params.append(as_of)
 
+    from src.portfolio.current_holdings import current_positions_cte
+
+    current_positions, position_params = current_positions_cte(as_of=as_of)
     price_params = [as_of] if as_of is not None else []
     return conn.execute(f"""
-        WITH latest_positions AS (
-            SELECT strategy_name, MAX(trade_date) AS trade_date
-            FROM paper_positions
-            {date_filter}
-            GROUP BY strategy_name
-        ),
+        WITH {current_positions},
         latest_price AS (
             SELECT symbol, pe_ttm, pb
             FROM daily_price
@@ -86,16 +80,11 @@ def load_current_stock_holdings(conn: Any, as_of: date | None = None) -> pd.Data
             si.market_cap,
             lp.pe_ttm,
             lp.pb
-        FROM paper_positions p
-        JOIN latest_positions latest
-          ON p.strategy_name = latest.strategy_name
-         AND p.trade_date = latest.trade_date
+        FROM current_positions p
         LEFT JOIN stock_info si ON p.symbol = si.symbol
         LEFT JOIN latest_price lp ON p.symbol = lp.symbol
-        WHERE COALESCE(p.quantity, 0) > 0
-          AND COALESCE(p.market_value, 0) > 0
         ORDER BY p.market_value DESC, p.symbol
-    """, [*params, *price_params, UNKNOWN_INDUSTRY]).fetchdf()
+    """, [*position_params, *price_params, UNKNOWN_INDUSTRY]).fetchdf()
 
 
 def load_benchmark_members(

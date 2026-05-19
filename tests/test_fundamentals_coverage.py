@@ -63,6 +63,26 @@ def test_load_current_holding_coverage_flags_missing_fields():
     conn.close()
 
 
+def test_load_current_holding_coverage_ignores_stale_positions_after_flat():
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    _seed_position(conn, industry=None, market_cap=None, pe_ttm=None, pb=None)
+    conn.execute("""
+        INSERT INTO portfolio_nav (
+            strategy_name, trade_date, nav, daily_return, cash, position_value,
+            total_value, external_flow, net_contribution, investment_nav, drawdown, sharpe_rolling
+        )
+        VALUES
+            ('alpha158', DATE '2026-05-15', 1, 0, 99000, 1000, 100000, 0, 100000, 1, 0, 0),
+            ('alpha158', DATE '2026-05-16', 1, 0, 100000, 0, 100000, 0, 100000, 1, 0, 0)
+    """)
+
+    coverage = load_current_holding_coverage(conn, as_of=date(2026, 5, 16))
+
+    assert coverage.empty
+    conn.close()
+
+
 def test_refresh_current_holding_fundamentals_fills_missing_stock_info_and_valuation():
     conn = duckdb.connect(":memory:")
     init_db(conn)

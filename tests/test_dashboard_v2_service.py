@@ -184,6 +184,32 @@ def test_dashboard_v2_portfolio_explains_risks_holdings_and_empty_outcomes(tmp_p
     }
 
 
+def test_dashboard_v2_portfolio_ignores_stale_positions_after_strategy_is_flat(tmp_path) -> None:
+    from src.dashboard_v2.service import DashboardV2Service
+
+    db_path = tmp_path / "dashboard_v2.duckdb"
+    _seed_dashboard_v2_db(db_path)
+    conn = duckdb.connect(str(db_path))
+    try:
+        conn.execute("""
+            INSERT INTO portfolio_nav (
+                strategy_name, trade_date, nav, daily_return, cash, position_value,
+                total_value, external_flow, net_contribution, investment_nav, drawdown, sharpe_rolling
+            )
+            VALUES
+                ('alpha158', DATE '2026-05-15', 1.0, 0.0, 170000, 10000, 180000, 0, 300000, 1.0, 0.0, 0.0),
+                ('alpha158', DATE '2026-05-16', 1.0, 0.0, 180000, 0, 180000, 0, 300000, 1.0, 0.0, 0.0)
+        """)
+    finally:
+        conn.close()
+
+    snapshot = DashboardV2Service(db_path=db_path).build_portfolio_snapshot()
+
+    assert snapshot["account"]["position_value"] == 180000
+    assert snapshot["holdings"] == []
+    assert snapshot["exposure"]["summary"]["position_count"] == 0
+
+
 def test_dashboard_v2_health_field_coverage_is_scoped_by_decision_context(tmp_path) -> None:
     from src.dashboard_v2.service import DashboardV2Service
 
@@ -378,6 +404,48 @@ def test_health_snapshot_uses_scheduler_latest_instead_of_legacy_job_manager(mon
     assert snapshot["latest_job"]["status_label"] == "成功"
     assert snapshot["failure_diagnostic"] is None
     assert not any("最近任务失败" in message for message in snapshot["messages"])
+
+
+def test_today_snapshot_uses_scheduler_latest_job_status(monkeypatch, tmp_path) -> None:
+    from src.dashboard_v2 import service as dashboard_service
+
+    db_path = tmp_path / "dashboard_v2.duckdb"
+    _seed_dashboard_v2_db(db_path)
+
+    class LegacyFailedRun:
+        data = {
+            "run_id": "JOB-DAILY_CLOSE_WORKFLOW-OLD",
+            "job_key": "daily_close_workflow",
+            "job_label": "日常收盘闭环",
+            "status": "FAILED",
+            "started_at": "2026-05-18T18:58:40",
+            "ended_at": "2026-05-18T19:14:30",
+            "steps": [{"key": "update", "label": "更新行情数据", "status": "FAILED"}],
+        }
+
+    monkeypatch.setattr(dashboard_service.job_manager, "latest_run", lambda job_key=None: LegacyFailedRun())
+    monkeypatch.setattr(
+        dashboard_service,
+        "_load_scheduled_job_history",
+        lambda limit=12: [{
+            "job_key": "daily_close",
+            "job_name": "收盘闭环",
+            "scheduled_time": "20:00",
+            "started_at": "2026-05-18 20:00:17",
+            "ended_at": "2026-05-18 20:10:43",
+            "duration_seconds": 626,
+            "source_log": "cron.log",
+            "status": "SUCCEEDED",
+            "status_label": "成功",
+            "result": "Paper engine: industry_rotation executed 0/8 signals",
+            "schedule_alignment": "按计划",
+            "schedule_note": "计划 20:00，实际 20:00",
+        }],
+    )
+
+    snapshot = dashboard_service.DashboardV2Service(db_path=db_path).build_today_snapshot()
+
+    assert snapshot["evidence"]["latest_job_status"] == "SUCCEEDED"
 
 
 def test_dashboard_v2_rebalance_adds_names_and_deduplicates_repeated_signal_rows(tmp_path) -> None:

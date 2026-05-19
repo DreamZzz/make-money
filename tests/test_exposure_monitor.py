@@ -219,3 +219,37 @@ def test_load_exposure_snapshot_uses_latest_holdings_and_active_benchmark_member
     assert "制造" in industry.index
     assert industry.loc["制造", "benchmark_weight"] == pytest.approx(0.0)
     conn.close()
+
+
+def test_load_exposure_snapshot_ignores_stale_positions_after_strategy_is_flat():
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    conn.execute("""
+        INSERT INTO stock_info (symbol, country, name, industry, market_cap)
+        VALUES ('000001', 'CN', '银行A', '银行', 3000)
+    """)
+    conn.execute("""
+        INSERT INTO daily_price (symbol, trade_date, close, pe_ttm, pb)
+        VALUES ('000001', DATE '2026-05-15', 10, 6, 0.7)
+    """)
+    conn.execute("""
+        INSERT INTO paper_positions (
+            strategy_name, trade_date, symbol, quantity, avg_cost, current_price, market_value
+        )
+        VALUES ('alpha158', DATE '2026-05-15', '000001', 1000, 10, 10, 10000)
+    """)
+    conn.execute("""
+        INSERT INTO portfolio_nav (
+            strategy_name, trade_date, nav, daily_return, cash, position_value,
+            total_value, external_flow, net_contribution, investment_nav, drawdown, sharpe_rolling
+        )
+        VALUES
+            ('alpha158', DATE '2026-05-15', 1.0, 0.0, 90000, 10000, 100000, 0, 100000, 1.0, 0.0, 0.0),
+            ('alpha158', DATE '2026-05-16', 1.0, 0.0, 100000, 0, 100000, 0, 100000, 1.0, 0.0, 0.0)
+    """)
+
+    snapshot = load_exposure_snapshot(conn, benchmark_index="000300", as_of=date(2026, 5, 16))
+
+    assert snapshot["positions"].empty
+    assert snapshot["summary"].iloc[0]["position_count"] == 0
+    conn.close()

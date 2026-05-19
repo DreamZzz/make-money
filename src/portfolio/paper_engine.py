@@ -115,13 +115,9 @@ def _prioritize_signals(signals: pd.DataFrame) -> pd.DataFrame:
 
 
 def _latest_position_qty(conn: duckdb.DuckDBPyConnection, strategy_name: str, symbol: str) -> float:
-    pos = conn.execute("""
-        SELECT quantity FROM paper_positions
-        WHERE strategy_name = ? AND symbol = ?
-        ORDER BY trade_date DESC
-        LIMIT 1
-    """, [strategy_name, symbol]).fetchone()
-    return float(pos[0]) if pos and pos[0] else 0.0
+    from src.portfolio.current_holdings import load_current_position_quantity
+
+    return load_current_position_quantity(conn, strategy_name, symbol)
 
 
 def _mark_signal_handled(
@@ -194,21 +190,11 @@ def _load_latest_satellite_budget(conn: duckdb.DuckDBPyConnection) -> float | No
 def _load_active_position_symbols(conn: duckdb.DuckDBPyConnection) -> set[str]:
     """Return symbols with positive latest paper-trade quantity across strategies."""
     try:
-        rows = conn.execute("""
-            WITH latest AS (
-                SELECT strategy_name, symbol, quantity,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY strategy_name, symbol ORDER BY trade_date DESC
-                       ) AS rn
-                FROM paper_positions
-            )
-            SELECT DISTINCT symbol
-            FROM latest
-            WHERE rn = 1 AND COALESCE(quantity, 0) > 0
-        """).fetchall()
+        from src.portfolio.current_holdings import load_current_position_symbols
+
+        return set(load_current_position_symbols(conn))
     except Exception:
         return set()
-    return {str(row[0]) for row in rows if row and row[0]}
 
 
 def _new_result(total: int = 0) -> dict:

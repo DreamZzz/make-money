@@ -69,24 +69,51 @@ def _seed_paper_engine_failure_db(db_path: str) -> None:
     conn.close()
 
 
-def test_latest_position_qty_uses_limit_query_instead_of_fragile_scalar_subquery():
-    class FakeConn:
-        def __init__(self):
-            self.sql = ""
+def test_current_position_helpers_ignore_stale_positions_after_strategy_is_flat():
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    conn.execute("""
+        INSERT INTO stock_info (symbol, country, name)
+        VALUES ('000001', 'CN', '已清仓')
+    """)
+    conn.execute("""
+        INSERT INTO paper_positions (
+            strategy_name, trade_date, symbol, quantity, avg_cost, current_price, market_value
+        )
+        VALUES ('alpha158', DATE '2024-01-02', '000001', 1000, 10, 10, 10000)
+    """)
+    conn.execute("""
+        INSERT INTO portfolio_nav (
+            strategy_name, trade_date, nav, daily_return, cash, position_value,
+            total_value, external_flow, net_contribution, investment_nav, drawdown, sharpe_rolling
+        )
+        VALUES
+            ('alpha158', DATE '2024-01-02', 1, 0, 90000, 10000, 100000, 0, 100000, 1, 0, 0),
+            ('alpha158', DATE '2024-01-03', 1, 0, 100000, 0, 100000, 0, 100000, 1, 0, 0)
+    """)
 
-        def execute(self, sql, _params):
-            self.sql = sql
-            if "SELECT MAX" in sql.upper():
-                raise AssertionError("fragile scalar subquery should not be used")
-            return self
+    assert pe._latest_position_qty(conn, "alpha158", "000001") == 0.0
+    assert pe._load_active_position_symbols(conn) == set()
+    conn.close()
 
-        def fetchone(self):
-            return (300.0,)
 
-    conn = FakeConn()
-    assert pe._latest_position_qty(conn, "trend_following", "000001") == 300.0
-    assert "ORDER BY trade_date DESC" in conn.sql
-    assert "LIMIT 1" in conn.sql
+def test_current_position_helpers_fallback_to_latest_position_without_nav():
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    conn.execute("""
+        INSERT INTO stock_info (symbol, country, name)
+        VALUES ('000001', 'CN', '持仓')
+    """)
+    conn.execute("""
+        INSERT INTO paper_positions (
+            strategy_name, trade_date, symbol, quantity, avg_cost, current_price, market_value
+        )
+        VALUES ('alpha158', DATE '2024-01-02', '000001', 1000, 10, 10, 10000)
+    """)
+
+    assert pe._latest_position_qty(conn, "alpha158", "000001") == 1000.0
+    assert pe._load_active_position_symbols(conn) == {"000001"}
+    conn.close()
 
 
 def test_paper_engine_rolls_back_signal_status_when_batch_fails(monkeypatch, tmp_path):
