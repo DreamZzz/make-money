@@ -390,6 +390,10 @@ describe("Dashboard V2 core components", () => {
             holding_days: 14,
             weight_change_7d: 0.0083,
             weight_change_20d: null,
+            entry_strategy_label: "趋势跟踪",
+            qlib_alignment: "Qlib共振",
+            qlib_alignment_reason: "规则策略买入，Alpha158 排名 4 且置信度 91.0%。",
+            qlib_prediction_date: "2026-05-15",
             qlib_rank: 4,
             qlib_confidence: 0.91,
             latest_signal_side: "BUY,SELL",
@@ -457,8 +461,62 @@ describe("Dashboard V2 core components", () => {
     expect(screen.getByText("已持有天数")).toBeInTheDocument();
     expect(screen.getByText("14")).toBeInTheDocument();
     expect(screen.getByText("7日仓位变化")).toBeInTheDocument();
+    expect(screen.getByText("买入来源")).toBeInTheDocument();
+    expect(screen.getByText("趋势跟踪")).toBeInTheDocument();
+    expect(screen.getByText("Qlib交叉验证")).toBeInTheDocument();
+    expect(screen.getByText("Qlib共振")).toBeInTheDocument();
     expect(screen.getByText("Qlib排名")).toBeInTheDocument();
     expect(screen.getByText("4")).toBeInTheDocument();
     expect(screen.getByText(/尚未产生可跟踪的纸交易成交/)).toBeInTheDocument();
+  });
+
+  it("explains signal outcome rows as strategy and horizon tracking rather than separate online models", () => {
+    render(
+      <PortfolioPage
+        data={{
+          account: { total_value: 300000, cash: 120000, position_value: 180000, drawdown: -0.03 },
+          holdings: [],
+          risk_alerts: [],
+          exposure: { industry: [], size: [], summary: {}, insights: [] },
+          signal_outcomes: {
+            summary: [{
+              model_name: "alpha158",
+              strategy_label: "Alpha158 多因子",
+              strategy_logic: "158 个价量因子 + LightGBM 排序选股",
+              online_scope: "线上生产模型",
+              trading_role: "会产生 BUY/SELL；依赖 production 预测成功",
+              horizon_days: 1,
+              horizon_label: "T+1",
+              horizon_meaning: "成交后 1 个交易日的短期验证",
+              sample_count: 26,
+              pending_count: 0,
+              hit_rate: 0.269,
+              avg_return: -0.024,
+              avg_alpha_vs_benchmark: -0.02,
+            }],
+            monthly: [],
+            detail: [],
+            state: {
+              status: "ready",
+              message: "已有成熟信号收益样本，可用于复盘模型效果。",
+              ready_count: 26,
+              pending_count: 0,
+              total_count: 26,
+              next_ready_date: null,
+            },
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByText(/这里展示的是“策略 × 跟踪周期”/)).toBeInTheDocument();
+    expect(screen.getByText("策略/信号来源")).toBeInTheDocument();
+    expect(screen.getByText("线上状态")).toBeInTheDocument();
+    expect(screen.getByText("是否参与交易")).toBeInTheDocument();
+    expect(screen.getByText("Alpha158 多因子")).toBeInTheDocument();
+    expect(screen.getByText("线上生产模型")).toBeInTheDocument();
+    expect(screen.getByText(/会产生 BUY\/SELL/)).toBeInTheDocument();
+    expect(screen.getByText("T+1")).toBeInTheDocument();
+    expect(screen.getByText(/LightGBM/)).toBeInTheDocument();
   });
 });

@@ -153,6 +153,31 @@ CREATE TABLE IF NOT EXISTS signals (
 );
 
 -- ============================================
+-- 5a. 全局信号仲裁决策表
+-- ============================================
+CREATE TABLE IF NOT EXISTS signal_decisions (
+    decision_id      VARCHAR NOT NULL,
+    signal_id        VARCHAR NOT NULL,
+    decision_date    DATE NOT NULL,
+    model_name       VARCHAR,
+    model_version    VARCHAR,
+    symbol           VARCHAR NOT NULL,
+    side             VARCHAR,
+    signal_ts        TIMESTAMP,
+    decision         VARCHAR NOT NULL,        -- ACCEPTED / REJECTED
+    decision_reason  VARCHAR,
+    consensus_status VARCHAR,                 -- QLIB_HOLDING / CONSENSUS / NEUTRAL / DIVERGENCE / STALE / MISSING / SELL
+    arbiter_version  VARCHAR DEFAULT 'signal_arbiter_v1',
+    qlib_prediction_date DATE,
+    qlib_rank        INTEGER,
+    qlib_confidence  DOUBLE,
+    priority_score   DOUBLE,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (signal_id)
+);
+
+-- ============================================
 -- 5b. 信号实际收益跟踪表
 -- ============================================
 CREATE TABLE IF NOT EXISTS signal_outcomes (

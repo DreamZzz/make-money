@@ -1,3 +1,4 @@
+import json
 from datetime import date
 
 import duckdb
@@ -38,6 +39,23 @@ def test_model_monitor_alerts_when_production_prediction_is_missing():
 
     assert result["status"] == "degraded"
     assert ("production_prediction_missing", "WARN", "ACTIVE", "production 模型尚未生成生产预测截面") in alerts
+    conn.close()
+
+
+def test_model_monitor_prediction_missing_includes_runtime_context():
+    conn = _conn()
+    _seed_production_model(conn)
+
+    update_production_model_monitor(conn, as_of=date(2026, 5, 15))
+    context_json = conn.execute("""
+        SELECT context_json
+        FROM model_monitor_alerts
+        WHERE metric_name = 'production_prediction_missing'
+    """).fetchone()[0]
+    context = json.loads(context_json)
+
+    assert "qlib_installed" in context
+    assert "python_version" in context
     conn.close()
 
 
@@ -162,4 +180,3 @@ def test_evaluate_production_model_reports_low_alpha_alert():
     assert result["status"] == "degraded"
     assert any(alert["metric_name"] == "alpha_h5" for alert in result["alerts"])
     conn.close()
-

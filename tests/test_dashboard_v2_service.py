@@ -171,6 +171,9 @@ def test_dashboard_v2_portfolio_explains_risks_holdings_and_empty_outcomes(tmp_p
     assert holding["qlib_rank"] == 4
     assert holding["qlib_confidence"] == 0.91
     assert holding["qlib_prediction_date"] == "2026-05-15"
+    assert holding["entry_strategy_label"] == "Alpha158 多因子"
+    assert holding["qlib_alignment"] == "Qlib持仓"
+    assert "Alpha158" in holding["qlib_alignment_reason"]
     assert holding["latest_signal_side"] == "BUY,SELL"
     assert holding["latest_signal_count"] == 3
 

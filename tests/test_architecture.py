@@ -9,6 +9,7 @@ from src.backtest.qlib_runner import (
     _dynamic_instrument_ranges_check,
     _dynamic_membership_history_check,
     _latest_covered_cn_data_date,
+    _load_alpha158_current_holdings,
     _passes_publish_gate,
     _persist_prediction_frame,
     _production_gate_failure,
@@ -1534,6 +1535,39 @@ def test_persist_prediction_frame_upserts_latest_production_scores():
     assert rows[2][5] is False
     assert {row[6] for row in rows} == {"alpha158-prod"}
     assert {row[7] for row in rows} == {"production_inference"}
+    conn.close()
+
+
+def test_alpha158_production_holdings_ignore_stale_positions_after_flat_nav():
+    import duckdb
+
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    conn.execute("""
+        INSERT INTO stock_info (symbol, country, name)
+        VALUES ('000001', 'CN', '已清仓'), ('000002', 'CN', '仍持有')
+    """)
+    conn.execute("""
+        INSERT INTO paper_positions (
+            strategy_name, trade_date, symbol, quantity, avg_cost, current_price, market_value
+        )
+        VALUES
+          ('alpha158', DATE '2026-05-15', '000001', 1000, 10, 10, 10000),
+          ('trend_following', DATE '2026-05-20', '000002', 1000, 10, 10, 10000)
+    """)
+    conn.execute("""
+        INSERT INTO portfolio_nav (
+            strategy_name, trade_date, nav, daily_return, cash, position_value,
+            total_value, external_flow, net_contribution, investment_nav, drawdown, sharpe_rolling
+        )
+        VALUES
+          ('alpha158', DATE '2026-05-20', 1, 0, 100000, 0, 100000, 0, 100000, 1, 0, 0),
+          ('trend_following', DATE '2026-05-20', 1, 0, 90000, 10000, 100000, 0, 100000, 1, 0, 0)
+    """)
+
+    holdings = _load_alpha158_current_holdings(conn)
+
+    assert holdings.empty
     conn.close()
 
 

@@ -155,6 +155,9 @@ def _load_pending_signals(
                s.expected_holding_days, s.max_position_pct, s.thesis,
                COALESCE(si.country, ?) AS market
         FROM signals s
+        JOIN signal_decisions d
+          ON d.signal_id = s.signal_id
+         AND d.decision = 'ACCEPTED'
         LEFT JOIN stock_info si ON s.symbol = si.symbol
         WHERE s.executed = FALSE
           AND COALESCE(s.status, 'ACTIVE') = 'ACTIVE'
@@ -237,6 +240,7 @@ def _run_signal_batch(
 
     from src.data_pipeline.loader import get_connection, init_db
     from src.portfolio.cashbook import get_account_summary, get_available_cash
+    from src.signals.arbiter import arbitrate_pending_signals
     from src.signals.lifecycle import expire_stale_signals
 
     account_summary = get_account_summary()
@@ -250,6 +254,7 @@ def _run_signal_batch(
         conn.execute("BEGIN TRANSACTION")
         in_transaction = True
         expire_stale_signals(conn)
+        arbitrate_pending_signals(conn, config=config)
         signals = _load_pending_signals(conn, strategy_name, market)
 
         if signals.empty:
@@ -444,6 +449,16 @@ def _run_signal_batch(
                 remaining_turnover = buy_turnover_remaining_by_date.setdefault(next_day, buy_turnover_cap)
                 if max_daily_turnover_pct > 0 and required > remaining_turnover + 1e-9:
                     stats["skipped_turnover"] += 1
+                    reason = f"日内换手预算不足: 剩余 {remaining_turnover:,.0f} < 需要 {required:,.0f}"
+                    _mark_signal_handled(
+                        conn,
+                        sig["signal_id"],
+                        next_day,
+                        status="NO_ACTION",
+                        status_reason=reason,
+                    )
+                    stats["handled_without_order"] += 1
+                    handled_trade_keys.add(trade_key)
                     logger.warning(
                         f"  跳过 {sym} BUY：日内换手预算不足 "
                         f"(剩余 {remaining_turnover:,.0f} < 需要 {required:,.0f})"

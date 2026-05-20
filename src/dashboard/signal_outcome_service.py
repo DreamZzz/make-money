@@ -7,7 +7,13 @@ import pandas as pd
 
 SUMMARY_COLUMNS = [
     "model_name",
+    "strategy_label",
+    "strategy_logic",
+    "online_scope",
+    "trading_role",
     "horizon_days",
+    "horizon_label",
+    "horizon_meaning",
     "sample_count",
     "pending_count",
     "hit_count",
@@ -18,8 +24,14 @@ SUMMARY_COLUMNS = [
 ]
 MONTHLY_COLUMNS = [
     "model_name",
+    "strategy_label",
+    "strategy_logic",
+    "online_scope",
+    "trading_role",
     "execution_month",
     "horizon_days",
+    "horizon_label",
+    "horizon_meaning",
     "sample_count",
     "pending_count",
     "hit_count",
@@ -46,6 +58,45 @@ DETAIL_COLUMNS = [
     "alpha_vs_benchmark",
     "status",
 ]
+
+STRATEGY_CATALOG: dict[str, dict[str, str]] = {
+    "alpha158": {
+        "strategy_label": "Alpha158 多因子",
+        "strategy_logic": "158 个价量因子 + LightGBM 排序选股；买入排名靠前标的，跌出持仓阈值时卖出。",
+        "online_scope": "线上生产模型",
+        "trading_role": "会产生 BUY/SELL；依赖 production 预测成功",
+    },
+    "trend_following": {
+        "strategy_label": "趋势跟踪",
+        "strategy_logic": "均线趋势 + 通道突破；顺势买入强势标的，趋势破坏时卖出。",
+        "online_scope": "线上规则策略",
+        "trading_role": "会产生 BUY/SELL",
+    },
+    "trend": {
+        "strategy_label": "趋势跟踪",
+        "strategy_logic": "均线趋势 + 通道突破；顺势买入强势标的，趋势破坏时卖出。",
+        "online_scope": "线上规则策略",
+        "trading_role": "会产生 BUY/SELL",
+    },
+    "mean_reversion": {
+        "strategy_label": "均值回归",
+        "strategy_logic": "RSI + 布林带位置；短期超跌时买入，反弹或过热时卖出。",
+        "online_scope": "线上规则策略",
+        "trading_role": "会产生 BUY/SELL",
+    },
+    "industry_rotation": {
+        "strategy_label": "行业轮动",
+        "strategy_logic": "按行业近期动量排序，优先选择强势行业内标的。",
+        "online_scope": "线上规则策略",
+        "trading_role": "当前主要产生 BUY 候选",
+    },
+    "value_quality": {
+        "strategy_label": "价值质量",
+        "strategy_logic": "低估值 + 盈利质量 + 成长稳定性打分；当前作为研究专项观察。",
+        "online_scope": "研究观察中",
+        "trading_role": "暂不进入主交易流",
+    },
+}
 
 
 def load_signal_outcome_snapshot(conn: Any, limit: int = 200) -> dict[str, pd.DataFrame]:
@@ -106,7 +157,9 @@ def _aggregate_summary(detail: pd.DataFrame) -> pd.DataFrame:
     for (model_name, horizon_days), group in detail.groupby(["model_name", "horizon_days"], dropna=False):
         rows.append(_aggregate_group(group, {
             "model_name": model_name,
+            **_strategy_metadata(str(model_name)),
             "horizon_days": int(horizon_days),
+            **_horizon_metadata(int(horizon_days)),
         }, include_median=True))
     return pd.DataFrame(rows, columns=SUMMARY_COLUMNS).sort_values(
         ["model_name", "horizon_days"]
@@ -123,8 +176,10 @@ def _aggregate_monthly(detail: pd.DataFrame) -> pd.DataFrame:
     ):
         rows.append(_aggregate_group(group, {
             "model_name": model_name,
+            **_strategy_metadata(str(model_name)),
             "execution_month": execution_month,
             "horizon_days": int(horizon_days),
+            **_horizon_metadata(int(horizon_days)),
         }, include_median=False))
     return pd.DataFrame(rows, columns=MONTHLY_COLUMNS).sort_values(
         ["execution_month", "model_name", "horizon_days"],
@@ -150,3 +205,20 @@ def _aggregate_group(group: pd.DataFrame, keys: dict[str, Any], include_median: 
     if include_median:
         row["median_return"] = float(returns.median()) if sample_count else 0.0
     return row
+
+
+def _strategy_metadata(model_name: str) -> dict[str, str]:
+    return STRATEGY_CATALOG.get(model_name, {
+        "strategy_label": model_name or "未知策略",
+        "strategy_logic": "未登记策略说明；请补充策略目录。",
+        "online_scope": "未知",
+        "trading_role": "需人工确认是否进入交易流",
+    })
+
+
+def _horizon_metadata(horizon_days: int) -> dict[str, str]:
+    label = f"T+{horizon_days}"
+    return {
+        "horizon_label": label,
+        "horizon_meaning": f"成交后 {horizon_days} 个交易日的信号效果跟踪；这是收益观察窗口，不是另一个模型。",
+    }

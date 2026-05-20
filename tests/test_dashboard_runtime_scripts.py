@@ -19,10 +19,16 @@ def test_daily_close_restarts_dashboard_even_when_a_step_fails():
 
     assert 'PYTHON="${PYTHON:-python3}"' not in script
     assert "_resolve_python" in script
+    assert "_resolve_qlib_python" in script
     assert "python3.12" in script
     assert "trap _restart_dashboard EXIT" in script
     assert "src.portfolio.fundamentals_coverage update || true" in script
+    assert "src.portfolio.paper_engine" not in script
+    assert "src.signals.arbiter" in script
+    assert "src.portfolio.nav_calculator" in script
     assert "src.monitoring.model_monitor update" in script
+    assert script.index("predict-latest --model production") < script.index("src.signals.arbiter")
+    assert script.index("src.signals.arbiter") < script.index("src.portfolio.allocator plan")
     assert script.index("src.signals.outcome_tracker update") < script.index("src.monitoring.model_monitor update")
 
 

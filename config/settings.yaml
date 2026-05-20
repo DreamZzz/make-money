@@ -33,6 +33,12 @@ index_funds:
 
 portfolio:
   max_daily_turnover_pct: 0.30
+  signal_arbiter:
+    enabled: true
+    max_prediction_stale_days: 3
+    max_rule_buy_rank: 500
+    min_rule_buy_confidence: 0.45
+    block_when_missing: true
   allocation:
     enabled: true
     core_target_pct: 0.60

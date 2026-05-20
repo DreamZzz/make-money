@@ -18,7 +18,13 @@ def test_signal_outcome_dashboard_returns_stable_empty_frames():
     assert snapshot["detail"].empty
     assert snapshot["summary"].columns.tolist() == [
         "model_name",
+        "strategy_label",
+        "strategy_logic",
+        "online_scope",
+        "trading_role",
         "horizon_days",
+        "horizon_label",
+        "horizon_meaning",
         "sample_count",
         "pending_count",
         "hit_count",
@@ -52,6 +58,12 @@ def test_signal_outcome_dashboard_aggregates_by_model_month_and_horizon():
     detail = snapshot["detail"]
 
     assert summary.loc[("alpha158", 1), "sample_count"] == 2
+    assert summary.loc[("alpha158", 1), "strategy_label"] == "Alpha158 多因子"
+    assert "LightGBM" in summary.loc[("alpha158", 1), "strategy_logic"]
+    assert summary.loc[("alpha158", 1), "online_scope"] == "线上生产模型"
+    assert summary.loc[("alpha158", 1), "trading_role"] == "会产生 BUY/SELL；依赖 production 预测成功"
+    assert summary.loc[("alpha158", 1), "horizon_label"] == "T+1"
+    assert "成交后 1 个交易日" in summary.loc[("alpha158", 1), "horizon_meaning"]
     assert summary.loc[("alpha158", 1), "pending_count"] == 0
     assert summary.loc[("alpha158", 1), "hit_count"] == 1
     assert summary.loc[("alpha158", 1), "hit_rate"] == pytest.approx(0.5)

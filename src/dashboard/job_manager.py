@@ -33,6 +33,20 @@ def _python_can_import(python: str, module: str) -> bool:
         return False
 
 
+def _python_is_project_compatible(python: str) -> bool:
+    try:
+        result = subprocess.run(
+            [python, "-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 def _resolve_project_python() -> str:
     return os.environ.get("PYTHON") or sys.executable
 
@@ -56,7 +70,7 @@ def _resolve_qlib_python(default_python: str, candidates: Optional[list[str]] = 
         if resolved in seen:
             continue
         seen.add(resolved)
-        if _python_can_import(resolved, "qlib"):
+        if _python_is_project_compatible(resolved) and _python_can_import(resolved, "qlib"):
             return resolved
     return default_python
 
@@ -161,6 +175,11 @@ SINGLE_STEPS: dict[str, JobStep] = {
         "Qlib production 日常预测",
         [QLIB_PYTHON, "-m", "src.backtest.qlib_runner", "predict-latest", "--model", "production"],
     ),
+    "signal_arbiter": _step(
+        "signal_arbiter",
+        "全局信号仲裁",
+        [PYTHON, "-m", "src.signals.arbiter"],
+    ),
     "qlib_rule_pk_ab": _step(
         "qlib_rule_pk_ab",
         "记录规则/Qlib A-B影子样本",
@@ -238,7 +257,7 @@ JOB_DEFINITIONS: dict[str, JobDefinition] = {
     "daily_close_workflow": JobDefinition(
         key="daily_close_workflow",
         label="日常收盘闭环",
-        desc="行情、基金、信号、预测、纸交易、净值和阶段评估的一站式收盘链路。",
+        desc="行情、基金、信号、预测、资金计划、净值和阶段评估的一站式收盘链路；纸交易只在开盘交易闭环执行。",
         kind="workflow",
         category="scenario",
         steps=(
@@ -248,9 +267,9 @@ JOB_DEFINITIONS: dict[str, JobDefinition] = {
             SINGLE_STEPS["index_funds_signals"],
             SINGLE_STEPS["generate_signals"],
             SINGLE_STEPS["qlib_predict"],
+            SINGLE_STEPS["signal_arbiter"],
             SINGLE_STEPS["qlib_rule_pk_ab"],
             SINGLE_STEPS["allocation_plan"],
-            SINGLE_STEPS["paper_trade"],
             SINGLE_STEPS["recalculate_nav"],
             SINGLE_STEPS["performance_review"],
             SINGLE_STEPS["signal_outcomes"],

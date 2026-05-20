@@ -50,6 +50,7 @@ export function PortfolioPage({ data }: Props) {
           rows={data.holdings}
           columns={[
             "symbol",
+            "entry_strategy_label",
             "industry",
             "market_value",
             "weight",
@@ -57,6 +58,9 @@ export function PortfolioPage({ data }: Props) {
             "holding_days",
             "weight_change_7d",
             "weight_change_20d",
+            "qlib_alignment",
+            "qlib_alignment_reason",
+            "qlib_prediction_date",
             "qlib_rank",
             "qlib_confidence",
             "latest_signal_side",
@@ -169,10 +173,24 @@ function SignalOutcomePanel({
           </div>
         </div>
       ) : null}
+      <div className="signal-outcome-note">
+        这里展示的是“策略 × 跟踪周期”的收益复盘，不是线上模型数量。T+1/T+5/T+20 分别表示成交后 1、5、20 个交易日的效果观察窗口。
+      </div>
       {rows.length ? (
         <DataTable
           rows={rows}
-          columns={["model_name", "horizon_days", "sample_count", "pending_count", "hit_rate", "avg_return", "avg_alpha_vs_benchmark"]}
+          columns={[
+            "strategy_label",
+            "online_scope",
+            "trading_role",
+            "horizon_label",
+            "sample_count",
+            "pending_count",
+            "hit_rate",
+            "avg_return",
+            "avg_alpha_vs_benchmark",
+            "strategy_logic",
+          ]}
         />
       ) : null}
     </div>

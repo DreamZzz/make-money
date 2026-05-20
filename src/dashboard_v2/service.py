@@ -1118,6 +1118,10 @@ def _load_latest_holdings(conn: duckdb.DuckDBPyConnection) -> list[dict[str, Any
     records = _records(df)
     for row in records:
         row["qlib_prediction_date"] = _date_only_iso(row.get("qlib_prediction_date"))
+        row["entry_strategy_label"] = _strategy_label(row.get("strategy_name"))
+        alignment, reason = _qlib_alignment_for_holding(row)
+        row["qlib_alignment"] = alignment
+        row["qlib_alignment_reason"] = reason
     return records
 
 
@@ -1336,6 +1340,46 @@ def _holding_brief(row: dict[str, Any]) -> dict[str, Any]:
         "holding_days": row.get("holding_days"),
         "latest_signal_side": row.get("latest_signal_side"),
     }
+
+
+def _strategy_label(strategy_name: Any) -> str:
+    labels = {
+        "alpha158": "Alpha158 多因子",
+        "trend_following": "趋势跟踪",
+        "mean_reversion": "均值回归",
+        "industry_rotation": "行业轮动",
+        "value_quality": "价值质量",
+    }
+    name = str(strategy_name or "")
+    return labels.get(name, name or "未知策略")
+
+
+def _qlib_alignment_for_holding(row: dict[str, Any]) -> tuple[str, str]:
+    strategy_name = str(row.get("strategy_name") or "")
+    if strategy_name == "alpha158":
+        return "Qlib持仓", "该持仓由 Alpha158/Qlib 策略自身产生。"
+
+    prediction_date = _date_only_iso(row.get("qlib_prediction_date"))
+    trade_date = _date_only_iso(row.get("trade_date"))
+    if not prediction_date:
+        return "Qlib缺失", "没有可用的 Alpha158 production 预测，不能用 Qlib 排名判断这笔持仓。"
+
+    stale_days = 0
+    if trade_date:
+        try:
+            stale_days = max((date.fromisoformat(trade_date) - date.fromisoformat(prediction_date)).days, 0)
+        except ValueError:
+            stale_days = 0
+    if stale_days > 3:
+        return "Qlib过期", f"Qlib 预测日期 {prediction_date}，距离持仓日期 {trade_date} 已 {stale_days} 天。"
+
+    rank = _safe_float(row.get("qlib_rank"))
+    confidence = _safe_float(row.get("qlib_confidence"))
+    if rank <= 100 and confidence >= 0.45:
+        return "Qlib共振", f"规则策略买入，Alpha158 排名 {int(rank)} 且置信度 {confidence:.1%}。"
+    if rank > 500 or confidence < 0.45:
+        return "Qlib背离", f"规则策略买入，但 Alpha158 排名 {int(rank)}、置信度 {confidence:.1%}。"
+    return "Qlib中性", f"规则策略买入，Alpha158 排名 {int(rank)}、置信度 {confidence:.1%}。"
 
 
 def _build_signal_outcome_state(conn: duckdb.DuckDBPyConnection, detail: pd.DataFrame) -> dict[str, Any]:

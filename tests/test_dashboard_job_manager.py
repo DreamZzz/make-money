@@ -191,8 +191,19 @@ def test_resolve_qlib_python_prefers_explicit_env(monkeypatch):
 def test_resolve_qlib_python_finds_candidate_that_imports_qlib(monkeypatch):
     monkeypatch.delenv("QLIB_PYTHON", raising=False)
     monkeypatch.setattr(jm, "_python_can_import", lambda python, module: python == "/usr/bin/python3" and module == "qlib")
+    monkeypatch.setattr(jm, "_python_is_project_compatible", lambda python: python == "/usr/bin/python3")
     result = jm._resolve_qlib_python("/opt/python3.12", candidates=["/opt/python3.12", "/usr/bin/python3"])
     assert result == "/usr/bin/python3"
+
+
+def test_resolve_qlib_python_rejects_qlib_python_that_cannot_run_project(monkeypatch):
+    monkeypatch.delenv("QLIB_PYTHON", raising=False)
+    monkeypatch.setattr(jm, "_python_can_import", lambda python, module: python == "/usr/bin/python3" and module == "qlib")
+    monkeypatch.setattr(jm, "_python_is_project_compatible", lambda python: python != "/usr/bin/python3")
+
+    result = jm._resolve_qlib_python("/opt/python3.12", candidates=["/usr/bin/python3", "/opt/python3.12"])
+
+    assert result == "/opt/python3.12"
 
 
 def test_qlib_job_steps_use_qlib_capable_python_when_available():
@@ -204,13 +215,26 @@ def test_qlib_job_steps_use_qlib_capable_python_when_available():
         assert jm.SINGLE_STEPS[key].cmd[0] == jm.QLIB_PYTHON
 
 
-def test_daily_close_workflow_plans_allocation_before_paper_trade():
+def test_daily_close_workflow_plans_allocation_without_paper_trade():
     step_keys = [step.key for step in jm.JOB_DEFINITIONS["daily_close_workflow"].steps]
 
     assert "allocation_plan" in step_keys
+    assert "signal_arbiter" in step_keys
+    assert "paper_trade" not in step_keys
+    assert step_keys.index("qlib_predict") < step_keys.index("signal_arbiter")
+    assert step_keys.index("signal_arbiter") < step_keys.index("allocation_plan")
     assert step_keys.index("qlib_rule_pk_ab") < step_keys.index("allocation_plan")
-    assert step_keys.index("allocation_plan") < step_keys.index("paper_trade")
+    assert step_keys.index("allocation_plan") < step_keys.index("recalculate_nav")
+    assert jm.SINGLE_STEPS["signal_arbiter"].cmd == [jm.PYTHON, "-m", "src.signals.arbiter"]
     assert jm.SINGLE_STEPS["allocation_plan"].cmd[:3] == [jm.PYTHON, "-m", "src.portfolio.allocator"]
+
+
+def test_open_trade_workflow_is_the_only_workflow_that_executes_paper_trade():
+    open_step_keys = [step.key for step in jm.JOB_DEFINITIONS["open_trade_workflow"].steps]
+
+    assert "paper_trade" in open_step_keys
+    assert open_step_keys.index("open_target_update") < open_step_keys.index("paper_trade")
+    assert open_step_keys.index("paper_trade") < open_step_keys.index("recalculate_nav")
 
 
 def test_daily_close_workflow_refreshes_holding_fundamentals_before_signals():

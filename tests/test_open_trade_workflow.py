@@ -56,6 +56,14 @@ def _seed_paper_engine_failure_db(db_path: str) -> None:
         VALUES ('default', DATE '2024-01-02', 100000, 0, 100000, 100000, 1, 0, 0)
     """)
     conn.execute("""
+        INSERT INTO qlib_predictions (
+            experiment_id, model_name, model_version, mode, prediction_date,
+            symbol, score, rank, confidence, selected
+        )
+        VALUES ('EXP-PROD', 'alpha158', 'alpha158-prod', 'production_inference',
+                DATE '2024-01-02', '000002', 0.8, 10, 0.80, TRUE)
+    """)
+    conn.execute("""
         INSERT INTO signals (
             signal_id, model_name, model_version, symbol, signal_ts,
             side, score, confidence, max_position_pct, executed, status
@@ -540,6 +548,8 @@ def test_paper_engine_caps_buys_by_daily_turnover_and_keeps_high_confidence(monk
 
     assert result["executed"] == 1
     assert result["skipped_turnover"] == 1
+    assert result["handled_without_order"] == 1
+    assert result["pending"] == 0
     conn = duckdb.connect(db_path, read_only=True)
     try:
         orders = conn.execute("""
@@ -547,16 +557,21 @@ def test_paper_engine_caps_buys_by_daily_turnover_and_keeps_high_confidence(monk
             FROM paper_orders
             ORDER BY order_ts
         """).fetchall()
-        statuses = dict(conn.execute("""
-            SELECT signal_id, status
+        statuses = {
+            signal_id: (status, reason)
+            for signal_id, status, reason in conn.execute("""
+            SELECT signal_id, status, status_reason
             FROM signals
             ORDER BY signal_id
-        """).fetchall())
+        """).fetchall()
+        }
     finally:
         conn.close()
 
     assert orders == [("high_conf_newer", "BUY", 10000.0)]
-    assert statuses == {"high_conf_newer": "FILLED", "low_conf_older": "ACTIVE"}
+    assert statuses["high_conf_newer"][0] == "FILLED"
+    assert statuses["low_conf_older"][0] == "NO_ACTION"
+    assert "日内换手预算不足" in statuses["low_conf_older"][1]
 
 
 def test_paper_engine_allows_sells_when_buy_turnover_cap_is_low(monkeypatch, tmp_path):
@@ -614,6 +629,14 @@ def test_paper_engine_deduplicates_same_strategy_symbol_side_execution_day(monke
         VALUES ('default', DATE '2024-01-02', 100000, 0, 100000, 100000, 1, 0, 0)
     """)
     conn.execute("""
+        INSERT INTO qlib_predictions (
+            experiment_id, model_name, model_version, mode, prediction_date,
+            symbol, score, rank, confidence, selected
+        )
+        VALUES ('EXP-DUP', 'alpha158', 'alpha158-prod', 'production_inference',
+                DATE '2024-01-02', '600808', 0.8, 10, 0.80, TRUE)
+    """)
+    conn.execute("""
         INSERT INTO signals (
             signal_id, model_name, model_version, symbol, signal_ts,
             side, score, confidence, max_position_pct, executed, status
@@ -629,7 +652,7 @@ def test_paper_engine_deduplicates_same_strategy_symbol_side_execution_day(monke
     result = pe.run("mean_reversion", market="CN")
 
     assert result["executed"] == 1
-    assert result["handled_without_order"] == 1
+    assert result["handled_without_order"] == 0
     assert result["pending"] == 0
 
     conn = duckdb.connect(db_path, read_only=True)
@@ -654,10 +677,10 @@ def test_paper_engine_deduplicates_same_strategy_symbol_side_execution_day(monke
     assert statuses["duplicate_best"] == (True, "FILLED", "成交")
     assert statuses["duplicate_lower"][0] is True
     assert statuses["duplicate_lower"][1] == "NO_ACTION"
-    assert "同日同标的同方向" in statuses["duplicate_lower"][2]
+    assert "同标的同方向" in statuses["duplicate_lower"][2]
 
 
-def test_paper_engine_deduplicate_keeps_different_strategies_separate(monkeypatch, tmp_path):
+def test_paper_engine_executes_only_arbiter_winner_across_strategies(monkeypatch, tmp_path):
     db_path = _patch_temp_db(monkeypatch, tmp_path)
     conn = duckdb.connect(db_path)
     init_db(conn)
@@ -674,6 +697,14 @@ def test_paper_engine_deduplicate_keeps_different_strategies_separate(monkeypatc
         VALUES ('default', DATE '2024-01-02', 100000, 0, 100000, 100000, 1, 0, 0)
     """)
     conn.execute("""
+        INSERT INTO qlib_predictions (
+            experiment_id, model_name, model_version, mode, prediction_date,
+            symbol, score, rank, confidence, selected
+        )
+        VALUES ('EXP-PROD', 'alpha158', 'alpha158-prod', 'production_inference',
+                DATE '2024-01-02', '600808', 0.8, 10, 0.80, TRUE)
+    """)
+    conn.execute("""
         INSERT INTO signals (
             signal_id, model_name, model_version, symbol, signal_ts,
             side, score, confidence, max_position_pct, executed, status
@@ -688,8 +719,8 @@ def test_paper_engine_deduplicate_keeps_different_strategies_separate(monkeypatc
 
     result = pe.run_all_strategies(initial_capital=100000)
 
-    assert result["mean_reversion"]["executed"] == 1
     assert result["alpha158"]["executed"] == 1
+    assert "mean_reversion" not in result
 
     conn = duckdb.connect(db_path, read_only=True)
     try:
@@ -698,13 +729,65 @@ def test_paper_engine_deduplicate_keeps_different_strategies_separate(monkeypatc
             FROM paper_orders
             ORDER BY order_ts
         """).fetchall()
+        decisions = dict(conn.execute("""
+            SELECT signal_id, decision
+            FROM signal_decisions
+        """).fetchall())
     finally:
         conn.close()
 
-    assert orders == [
-        ("alpha158_buy", "600808", "BUY"),
-        ("mean_reversion_buy", "600808", "BUY"),
-    ]
+    assert orders == [("alpha158_buy", "600808", "BUY")]
+    assert decisions == {"alpha158_buy": "ACCEPTED", "mean_reversion_buy": "REJECTED"}
+
+
+def test_paper_engine_allows_rule_buy_when_fresh_qlib_prediction_agrees(monkeypatch, tmp_path):
+    db_path = _patch_temp_db(monkeypatch, tmp_path)
+    conn = duckdb.connect(db_path)
+    init_db(conn)
+    conn.execute("INSERT INTO stock_info (symbol, country, name) VALUES ('000001', 'CN', '高共识')")
+    conn.execute("""
+        INSERT INTO daily_price (symbol, trade_date, open, high, low, close, pre_close, volume)
+        VALUES ('000001', DATE '2024-01-03', 10, 10, 10, 10, 10, 1000)
+    """)
+    conn.execute("""
+        INSERT INTO account_daily (
+            account_id, trade_date, cash, position_value, total_value,
+            net_contribution, nav, daily_return, drawdown
+        )
+        VALUES ('default', DATE '2024-01-02', 100000, 0, 100000, 100000, 1, 0, 0)
+    """)
+    conn.execute("""
+        INSERT INTO qlib_predictions (
+            experiment_id, model_name, model_version, mode, prediction_date,
+            symbol, score, rank, confidence, selected
+        )
+        VALUES ('EXP-PROD', 'alpha158', 'alpha158-prod', 'production_inference',
+                DATE '2024-01-02', '000001', 0.8, 10, 0.80, TRUE)
+    """)
+    conn.execute("""
+        INSERT INTO signals (
+            signal_id, model_name, model_version, symbol, signal_ts,
+            side, score, confidence, max_position_pct, executed, status
+        )
+        VALUES ('rule_buy_high_qlib', 'trend_following', '1.0', '000001',
+                TIMESTAMP '2024-01-02 15:00:00', 'BUY', 1, 0.95, 0.10, FALSE, 'ACTIVE')
+    """)
+    conn.close()
+
+    result = pe.run("trend_following", market="CN")
+
+    assert result["executed"] == 1
+
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        orders = conn.execute("""
+            SELECT signal_id, symbol, side, order_value
+            FROM paper_orders
+        """).fetchall()
+    finally:
+        conn.close()
+
+    assert orders == [("rule_buy_high_qlib", "000001", "BUY", 10000.0)]
 
 
 def test_prioritize_signals_releases_cash_before_older_buys():

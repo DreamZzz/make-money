@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
+import sys
 from datetime import date, datetime
 from typing import Any
 
@@ -188,6 +190,8 @@ def _prediction_alerts(
     prediction: dict[str, Any],
 ) -> list[dict[str, Any]]:
     if prediction["latest_date"] is None:
+        context = {"latest_data_date": _date_to_iso(latest_data)}
+        context.update(_qlib_runtime_context())
         return [
             _alert(
                 production=production,
@@ -195,7 +199,7 @@ def _prediction_alerts(
                 severity="WARN",
                 metric_name="production_prediction_missing",
                 message="production 模型尚未生成生产预测截面",
-                context={"latest_data_date": _date_to_iso(latest_data)},
+                context=context,
             )
         ]
     if latest_data is not None and prediction["latest_date"] < _date_to_iso(latest_data):
@@ -212,6 +216,14 @@ def _prediction_alerts(
             )
         ]
     return []
+
+
+def _qlib_runtime_context() -> dict[str, Any]:
+    return {
+        "python_executable": sys.executable,
+        "python_version": sys.version.split()[0],
+        "qlib_installed": importlib.util.find_spec("qlib") is not None,
+    }
 
 
 def _signal_alerts(production: dict[str, Any], alert_date: date, signals: dict[str, Any]) -> list[dict[str, Any]]:
@@ -445,4 +457,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

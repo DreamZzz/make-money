@@ -1787,6 +1787,23 @@ def _should_skip_rebalance_signal_write(
     return True, f"{freq} rebalance period {period} already has {count} production signals; latest={existing[1]}"
 
 
+def _load_alpha158_current_holdings(conn: Any) -> pd.DataFrame:
+    """Load current alpha158 holdings using the shared point-in-time holding semantics."""
+    from src.portfolio.current_holdings import current_positions_cte
+
+    cte, params = current_positions_cte()
+    return conn.execute(
+        f"""
+        WITH {cte}
+        SELECT symbol, quantity
+        FROM current_positions
+        WHERE strategy_name = ?
+        ORDER BY symbol
+        """,
+        [*params, MODEL_NAME],
+    ).fetchdf()
+
+
 def _production_inference_segments(
     mode: str,
     base_segments: dict[str, Any],
@@ -2511,19 +2528,7 @@ def predict_latest(model: str = "production", top_n: int | None = None) -> dict[
             WHERE experiment_id = ? AND prediction_date = ?
             ORDER BY score DESC
         """, [prod[1], latest_pred]).fetchdf()
-        holdings = conn.execute("""
-            WITH latest_pos AS (
-                SELECT symbol, quantity,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY symbol ORDER BY trade_date DESC
-                       ) AS rn
-                FROM paper_positions
-                WHERE strategy_name = ?
-            )
-            SELECT symbol, quantity
-            FROM latest_pos
-            WHERE rn = 1 AND COALESCE(quantity, 0) > 0
-        """, [MODEL_NAME]).fetchdf()
+        holdings = _load_alpha158_current_holdings(conn)
     finally:
         conn.close()
 

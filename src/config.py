@@ -94,6 +94,13 @@ DEFAULT_CONFIG = {
         "min_rebalance_buy_rank_score": 0.50,
         "estimated_trade_fee_rate": 0.0015,
         "max_daily_turnover_pct": 0.30,
+        "signal_arbiter": {
+            "enabled": True,
+            "max_prediction_stale_days": 3,
+            "max_rule_buy_rank": 500,
+            "min_rule_buy_confidence": 0.45,
+            "block_when_missing": True,
+        },
         "risk_profile": "auto",
         "risk_profiles": {
             "small": {

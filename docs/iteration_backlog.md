@@ -49,6 +49,7 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 | P1-08 | Daily close failure diagnostics | Done | Codex | Use the failure diagnostic card for the next failed close run before opening raw logs | Dashboard can show latest failed step, command, return code, and last log excerpt without reading terminal history |
 | P1-09 | Free-source data probe layer | Done | Codex | Use probe output to choose the first production-safe fallback/backfill target | Tencent daily, Eastmoney reports, THS theme, and optional mootdx probes normalize source output, record `data_source_health`, and do not change trading decisions |
 | P1-10 | Target-universe field coverage backfill via free sources | In Progress | Codex | Find a reliable free industry-mapping source; do not use Eastmoney per-symbol metadata as the main route while it is unstable locally | `industry`, `market_cap`, `pe_ttm`, and `pb` coverage reaches >=80% for the target universe; failures are cached and surfaced without blocking daily close |
+| P1-11 | Global signal arbiter for rule/Qlib consensus | Done | Codex | Monitor the next close/open cycle for accepted/rejected decision counts and rejected BUY reasons | Rule strategies can only reach paper execution after global confidence gates and fresh Qlib cross-checks; same-symbol BUY conflicts are resolved once in `signal_decisions`; SELL risk-release signals remain executable |
 
 ### P2 - Feedback And Alpha Expansion
 
@@ -217,6 +218,15 @@ This section is the executable queue after the 2026-05-16 v2 review reconciliati
 - Health rows were recorded for `field_coverage_current_holdings`, `field_coverage_target_universe`, and `field_coverage_signal_candidates`; failures/partial results are visible through `data_source_health`.
 - Remaining gap: industry coverage still needs a reliable free batch mapping source. THS industry list/summary is reachable, but local AkShare does not expose a THS industry constituents endpoint; Eastmoney industry constituents and per-symbol metadata are unstable locally.
 - Verification evidence: `pytest tests/test_field_coverage_backfill.py tests/test_free_source_fetchers.py tests/test_free_source_probe.py -q` passed; targeted Ruff passed for the new modules/scripts/tests.
+
+### 2026-05-20 P1-11 Global Signal Arbiter
+
+- Landed: `signal_decisions` persists one global arbitration decision per active stock signal before paper execution.
+- Landed: `src.signals.arbiter` applies portfolio-level BUY confidence/rank-score gates, requires fresh Alpha158 production cross-check for rule-strategy BUYs, blocks same-symbol BUY/SELL conflicts, and keeps only the highest-priority same-symbol BUY.
+- Landed: SELL/SHORT signals remain risk-release actions and are not globally deduplicated, so separate strategy books can still exit their own positions.
+- Landed: `paper_engine` now loads only `ACCEPTED` decisions, and `daily_close.sh` plus Dashboard job manager run the arbiter after Qlib prediction and before allocation planning.
+- Landed: Dashboard V2 current holdings expose buy source and Qlib alignment status/reason, so low-rank legacy holdings are visible as cross-check conflicts rather than silently accepted positions.
+- Verification evidence: `pytest -q` passed with 288 tests; `ruff check .` passed; V2 component test and production build passed.
 
 ### 2026-05-16 P2-06 Value-Quality Prototype
 
