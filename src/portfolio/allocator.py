@@ -19,6 +19,7 @@ class AllocationConfig:
     enabled: bool = True
     core_target_pct: float = 0.60
     satellite_target_pct: float = 0.40
+    cash_target_pct: float = 0.0
     rebalance_tolerance_pct: float = 0.05
     min_trade_amount: float = 1000.0
     core_cash_priority: bool = True
@@ -33,6 +34,7 @@ class AllocationConfig:
             enabled=bool(raw.get("enabled", True)),
             core_target_pct=float(raw.get("core_target_pct", 0.60)),
             satellite_target_pct=float(raw.get("satellite_target_pct", 0.40)),
+            cash_target_pct=float(raw.get("cash_target_pct", 0.0)),
             rebalance_tolerance_pct=float(raw.get("rebalance_tolerance_pct", 0.05)),
             min_trade_amount=float(raw.get("min_trade_amount", 1000.0)),
             core_cash_priority=bool(raw.get("core_cash_priority", True)),
@@ -41,15 +43,17 @@ class AllocationConfig:
     def normalized(self) -> AllocationConfig:
         core = max(float(self.core_target_pct or 0), 0.0)
         satellite = max(float(self.satellite_target_pct or 0), 0.0)
-        total = core + satellite
+        cash = max(float(self.cash_target_pct or 0), 0.0)
+        total = core + satellite + cash
         if total <= 0:
-            core, satellite = 0.60, 0.40
+            core, satellite, cash = 0.60, 0.40, 0.0
         elif abs(total - 1.0) > 1e-9:
-            core, satellite = core / total, satellite / total
+            core, satellite, cash = core / total, satellite / total, cash / total
         return AllocationConfig(
             enabled=self.enabled,
             core_target_pct=core,
             satellite_target_pct=satellite,
+            cash_target_pct=cash,
             rebalance_tolerance_pct=max(float(self.rebalance_tolerance_pct or 0), 0.0),
             min_trade_amount=max(float(self.min_trade_amount or 0), 0.0),
             core_cash_priority=self.core_cash_priority,
@@ -96,6 +100,7 @@ class AllocationPlan:
     cash: float
     core_target_pct: float
     satellite_target_pct: float
+    cash_target_pct: float
     core_value: float
     satellite_value: float
     core_budget: float
@@ -114,6 +119,7 @@ class AllocationPlan:
             "cash": self.cash,
             "core_target_pct": self.core_target_pct,
             "satellite_target_pct": self.satellite_target_pct,
+            "cash_target_pct": self.cash_target_pct,
             "core_value": self.core_value,
             "satellite_value": self.satellite_value,
             "core_budget": self.core_budget,
@@ -148,6 +154,7 @@ def compute_allocation_plan(inputs: AllocationInputs, config: AllocationConfig |
             cash=cash,
             core_target_pct=cfg.core_target_pct,
             satellite_target_pct=cfg.satellite_target_pct,
+            cash_target_pct=cfg.cash_target_pct,
             core_value=core_value,
             satellite_value=satellite_value,
             core_budget=0.0,
@@ -160,6 +167,7 @@ def compute_allocation_plan(inputs: AllocationInputs, config: AllocationConfig |
 
     core_target_value = total_value * cfg.core_target_pct
     satellite_target_value = total_value * cfg.satellite_target_pct
+    cash_target_value = total_value * cfg.cash_target_pct
     core_drift_pct = core_value / total_value - cfg.core_target_pct
     satellite_drift_pct = satellite_value / total_value - cfg.satellite_target_pct
     values = {
@@ -177,7 +185,7 @@ def compute_allocation_plan(inputs: AllocationInputs, config: AllocationConfig |
         },
     }
     budgets = {"core": 0.0, "satellite": 0.0}
-    remaining_cash = cash
+    remaining_cash = max(cash - cash_target_value, 0.0)
     order = ["core", "satellite"] if cfg.core_cash_priority else ["satellite", "core"]
     for sleeve in order:
         value = values[sleeve]
@@ -217,6 +225,7 @@ def compute_allocation_plan(inputs: AllocationInputs, config: AllocationConfig |
         cash=cash,
         core_target_pct=cfg.core_target_pct,
         satellite_target_pct=cfg.satellite_target_pct,
+        cash_target_pct=cfg.cash_target_pct,
         core_value=core_value,
         satellite_value=satellite_value,
         core_budget=budgets["core"],
@@ -266,9 +275,11 @@ def create_allocation_plan(
     account_id: str = DEFAULT_ACCOUNT_ID,
     as_of: date | None = None,
     config: AllocationConfig | None = None,
+    regime_policy: Any | None = None,
     persist: bool = True,
 ) -> AllocationPlan:
     cfg = config or AllocationConfig.from_app_config()
+    cfg = _apply_regime_policy(cfg, regime_policy)
     plan = compute_allocation_plan(
         load_allocation_inputs(conn, account_id=account_id, as_of=as_of),
         cfg,
@@ -282,6 +293,31 @@ def create_allocation_plan(
     if persist:
         persist_allocation_plan(conn, plan)
     return plan
+
+
+def resolve_regime_policy_for_plan(
+    conn: Any,
+    as_of: date | None = None,
+    config: dict[str, Any] | None = None,
+) -> Any | None:
+    """Resolve the optional regime policy used by allocation planning."""
+    from src.portfolio.regime_policy import load_latest_regime_policy
+
+    return load_latest_regime_policy(conn, as_of=as_of, config=config or load_config())
+
+
+def _apply_regime_policy(config: AllocationConfig, regime_policy: Any | None) -> AllocationConfig:
+    if regime_policy is None:
+        return config
+    return AllocationConfig(
+        enabled=config.enabled,
+        core_target_pct=float(getattr(regime_policy, "core_target_pct", config.core_target_pct)),
+        satellite_target_pct=float(getattr(regime_policy, "satellite_target_pct", config.satellite_target_pct)),
+        cash_target_pct=float(getattr(regime_policy, "cash_target_pct", config.cash_target_pct)),
+        rebalance_tolerance_pct=config.rebalance_tolerance_pct,
+        min_trade_amount=config.min_trade_amount,
+        core_cash_priority=True,
+    ).normalized()
 
 
 def attach_core_execution_plan(
@@ -386,11 +422,11 @@ def persist_allocation_plan(conn: Any, plan: AllocationPlan) -> None:
     conn.execute("""
         INSERT INTO allocation_plans (
             plan_id, plan_date, account_id, total_value, cash,
-            core_target_pct, satellite_target_pct, core_value, satellite_value,
+            core_target_pct, satellite_target_pct, cash_target_pct, core_value, satellite_value,
             core_budget, satellite_budget, core_drift_pct, satellite_drift_pct, status
         )
         SELECT plan_id, plan_date, account_id, total_value, cash,
-               core_target_pct, satellite_target_pct, core_value, satellite_value,
+               core_target_pct, satellite_target_pct, cash_target_pct, core_value, satellite_value,
                core_budget, satellite_budget, core_drift_pct, satellite_drift_pct, status
         FROM _tmp_allocation_plans_df
     """)
@@ -591,7 +627,14 @@ def main(argv: list[str] | None = None) -> int:
         conn = get_connection()
         try:
             init_db(conn)
-            plan = create_allocation_plan(conn, account_id=args.account_id, as_of=as_of, persist=not args.no_persist)
+            regime_policy = resolve_regime_policy_for_plan(conn, as_of=as_of)
+            plan = create_allocation_plan(
+                conn,
+                account_id=args.account_id,
+                as_of=as_of,
+                regime_policy=regime_policy,
+                persist=not args.no_persist,
+            )
             print(json.dumps(plan.to_dict(), ensure_ascii=False, default=str, indent=2))
         finally:
             conn.close()

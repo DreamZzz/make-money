@@ -90,11 +90,13 @@ def backfill_field_coverage(
     as_of: date | None = None,
     fetch_cn_spot: Callable[[], pd.DataFrame] | None = None,
     fetch_tencent_quote: Callable[[list[str]], pd.DataFrame] | None = None,
+    fetch_industry_members: Callable[[], pd.DataFrame] | None = None,
     fetch_cn_individual: Callable[[str], pd.DataFrame] | None = None,
     force: bool = False,
     limit: int | None = None,
     sleep_seconds: float = 0.0,
     fetch_industry: bool = True,
+    fetch_individual_industry: bool = True,
 ) -> dict[str, Any]:
     """Backfill industry/market-cap/PE/PB for one scope without touching signals."""
     resolved = _normalize_symbols(symbols) if symbols is not None else resolve_scope_symbols(conn, scope, as_of=as_of, limit=limit)
@@ -109,8 +111,21 @@ def backfill_field_coverage(
     from src.data_pipeline.fetchers import akshare_fetcher as ak
     from src.data_pipeline.fetchers import free_sources
 
+    custom_individual_fetch = fetch_cn_individual is not None
     fetch_cn_spot = fetch_cn_spot or ak.fetch_cn_stock_spot
     fetch_tencent_quote = fetch_tencent_quote or free_sources.fetch_tencent_quote_snapshot
+    if fetch_industry_members is None and fetch_industry and not custom_individual_fetch:
+        industry_targets = needs_update.loc[
+            needs_update["missing_industry"].astype(bool), "symbol"
+        ].astype(str).tolist()
+
+        def fetch_default_industry_members() -> pd.DataFrame:
+            return free_sources.fetch_cn_industry_members(
+                target_symbols=industry_targets,
+                sleep_seconds=sleep_seconds,
+            )
+
+        fetch_industry_members = fetch_default_industry_members
     fetch_cn_individual = fetch_cn_individual or ak.fetch_cn_stock_individual_info
 
     spot = _safe_fetch_spot(fetch_cn_spot)
@@ -120,6 +135,7 @@ def backfill_field_coverage(
             needs_update["symbol"].astype(str).tolist(),
         )
     spot_by_symbol = _rows_by_symbol(spot)
+    industry_by_symbol = _rows_by_symbol(_safe_fetch_industry_members(fetch_industry_members)) if fetch_industry else {}
     stock_updates: dict[str, dict[str, Any]] = {}
     valuation_updates: dict[str, dict[str, Any]] = {}
     failed_symbols: set[str] = set()
@@ -133,8 +149,15 @@ def backfill_field_coverage(
         if spot_row is not None:
             _merge_stock_update(stock_updates, symbol, row, spot_row, force=force)
             _merge_valuation_update(valuation_updates, symbol, row, spot_row, force=force)
+        industry_row = industry_by_symbol.get(symbol)
+        if industry_row is not None:
+            _merge_stock_update(stock_updates, symbol, row, industry_row, force=force)
 
-        if fetch_industry and _needs_individual_fetch(row, stock_updates.get(symbol), force=force):
+        if (
+            fetch_industry
+            and fetch_individual_industry
+            and _needs_individual_fetch(row, stock_updates.get(symbol), force=force)
+        ):
             try:
                 individual = fetch_cn_individual(symbol)
                 if individual is not None and not individual.empty:
@@ -165,11 +188,13 @@ def backfill_field_coverage_scopes(
     as_of: date | None = None,
     fetch_cn_spot: Callable[[], pd.DataFrame] | None = None,
     fetch_tencent_quote: Callable[[list[str]], pd.DataFrame] | None = None,
+    fetch_industry_members: Callable[[], pd.DataFrame] | None = None,
     fetch_cn_individual: Callable[[str], pd.DataFrame] | None = None,
     force: bool = False,
     limit_per_scope: int | None = None,
     sleep_seconds: float = 0.0,
     fetch_industry: bool = True,
+    fetch_individual_industry: bool = True,
 ) -> dict[str, Any]:
     """Backfill staged scopes in priority order, deduplicating already handled symbols."""
     scopes = scopes or ["current_holdings", "signal_candidates", "target_universe"]
@@ -185,10 +210,12 @@ def backfill_field_coverage_scopes(
             as_of=as_of,
             fetch_cn_spot=fetch_cn_spot,
             fetch_tencent_quote=fetch_tencent_quote,
+            fetch_industry_members=fetch_industry_members,
             fetch_cn_individual=fetch_cn_individual,
             force=force,
             sleep_seconds=sleep_seconds,
             fetch_industry=fetch_industry,
+            fetch_individual_industry=fetch_individual_industry,
         )
         results.append(result)
     return {
@@ -329,6 +356,17 @@ def _safe_fetch_tencent_quote(fetch_tencent_quote: Callable[[list[str]], pd.Data
         return df if df is not None else pd.DataFrame()
     except Exception as exc:
         logger.warning(f"Field coverage Tencent quote fetch failed: {exc}")
+        return pd.DataFrame()
+
+
+def _safe_fetch_industry_members(fetch_industry_members: Callable[[], pd.DataFrame] | None) -> pd.DataFrame:
+    if fetch_industry_members is None:
+        return pd.DataFrame()
+    try:
+        df = fetch_industry_members()
+        return df if df is not None else pd.DataFrame()
+    except Exception as exc:
+        logger.warning(f"Field coverage industry-member fetch failed: {exc}")
         return pd.DataFrame()
 
 
@@ -604,6 +642,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sleep", type=float, default=0.2, help="Seconds between per-symbol metadata calls.")
     parser.add_argument("--force", action="store_true", help="Overwrite existing fields instead of filling only missing values.")
     parser.add_argument("--skip-industry-fetch", action="store_true", help="Skip slow per-symbol industry fetches and only fill valuation/market-cap fields.")
+    parser.add_argument(
+        "--enable-individual-industry-fetch",
+        action="store_true",
+        help="After batch industry sources, also call slow per-symbol metadata fallback for unresolved symbols.",
+    )
     parser.add_argument("--record-health", action="store_true", help="Write scope results to data_source_health.")
     args = parser.parse_args(argv)
 
@@ -624,6 +667,7 @@ def main(argv: list[str] | None = None) -> int:
             limit_per_scope=args.limit_per_scope,
             sleep_seconds=args.sleep,
             fetch_industry=not args.skip_industry_fetch,
+            fetch_individual_industry=args.enable_individual_industry_fetch,
         )
         if args.record_health:
             result["recorded_health_rows"] = record_data_source_health(

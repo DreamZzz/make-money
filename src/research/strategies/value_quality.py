@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 MODEL_NAME = "value_quality"
-MODEL_VERSION = "0.1"
+MODEL_VERSION = "0.2"
 
 VALUE_COLUMNS = ("pe_ttm", "pb")
 QUALITY_HIGH_COLUMNS = ("roe", "net_margin")
@@ -27,6 +27,7 @@ def compute_value_quality_scores(
     value_weight: float = 0.45,
     quality_weight: float = 0.45,
     liquidity_weight: float = 0.10,
+    industry_neutral: bool = False,
 ) -> pd.DataFrame:
     """Compute cross-sectional value-quality scores in [0, 1]."""
     if fundamentals.empty or "symbol" not in fundamentals.columns:
@@ -35,20 +36,24 @@ def compute_value_quality_scores(
     df = fundamentals.copy()
     if "trade_date" not in df.columns:
         df["trade_date"] = pd.NaT
+    if industry_neutral and "industry" not in df.columns:
+        df["industry"] = "unknown"
+    if "industry" in df.columns:
+        df["industry"] = df["industry"].fillna("unknown").astype(str)
     for col in [*VALUE_COLUMNS, *QUALITY_HIGH_COLUMNS, *QUALITY_LOW_COLUMNS, "market_cap"]:
         if col not in df.columns:
             df[col] = np.nan
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     value_parts = [
-        _rank_score(df[col], higher_is_better=False, positive_only=True)
+        _factor_rank(df, col, higher_is_better=False, positive_only=True, industry_neutral=industry_neutral)
         for col in VALUE_COLUMNS
     ]
     quality_parts = [
-        _rank_score(df[col], higher_is_better=True, positive_only=False)
+        _factor_rank(df, col, higher_is_better=True, positive_only=False, industry_neutral=industry_neutral)
         for col in QUALITY_HIGH_COLUMNS
     ] + [
-        _rank_score(df[col], higher_is_better=False, positive_only=True)
+        _factor_rank(df, col, higher_is_better=False, positive_only=True, industry_neutral=industry_neutral)
         for col in QUALITY_LOW_COLUMNS
     ]
 
@@ -73,11 +78,54 @@ def compute_value_quality_scores(
         "liquidity_score", "coverage", "pe_ttm", "pb", "roe", "net_margin",
         "debt_ratio", "market_cap",
     ]
+    if "industry" in df.columns:
+        columns.insert(2, "industry")
     return (
         df[columns]
         .sort_values(["trade_date", "score", "symbol"], ascending=[True, False, True])
         .reset_index(drop=True)
     )
+
+
+def industry_neutral_rank(df: pd.DataFrame, column: str, ascending: bool) -> pd.Series:
+    """Rank a factor within industries while preserving the original row index."""
+    if column not in df.columns:
+        return pd.Series(np.nan, index=df.index, dtype=float)
+    if "industry" not in df.columns:
+        working = df.assign(industry="unknown")
+    else:
+        working = df.copy()
+        working["industry"] = working["industry"].fillna("unknown").astype(str)
+    return working.groupby("industry", dropna=False)[column].rank(pct=True, ascending=ascending)
+
+
+def select_value_quality_symbols(
+    scores: pd.DataFrame,
+    top_n: int = 20,
+    prior_symbols: set[str] | None = None,
+    retention_quantile: float = 0.30,
+) -> list[str]:
+    """Select Top-N symbols with a score buffer for existing research holdings."""
+    if scores.empty or "symbol" not in scores.columns or "score" not in scores.columns:
+        return []
+    top_n = max(int(top_n or 1), 1)
+    prior_symbols = {str(symbol) for symbol in (prior_symbols or set())}
+    ranked = scores.copy()
+    ranked["symbol"] = ranked["symbol"].astype(str)
+    ranked["score"] = pd.to_numeric(ranked["score"], errors="coerce").fillna(0.0)
+    ranked = ranked.sort_values(["score", "symbol"], ascending=[False, True]).reset_index(drop=True)
+
+    cutoff_idx = min(top_n, len(ranked)) - 1
+    cutoff_score = float(ranked.iloc[cutoff_idx]["score"]) if cutoff_idx >= 0 else 0.0
+    retention_floor = cutoff_score * (1.0 - min(max(float(retention_quantile), 0.0), 1.0))
+    retained = ranked[
+        ranked["symbol"].isin(prior_symbols)
+        & (ranked["score"] >= retention_floor)
+    ]["symbol"].tolist()
+    retained_set = set(retained)
+    fresh = ranked[~ranked["symbol"].isin(retained_set)]["symbol"].tolist()
+    selected = fresh[: max(top_n - len(retained), 0)] + retained
+    return selected[:top_n]
 
 
 def generate_signals(
@@ -248,6 +296,25 @@ def _rank_score(series: pd.Series, higher_is_better: bool, positive_only: bool) 
         method="average",
     )
     return score.clip(0.0, 1.0)
+
+
+def _factor_rank(
+    df: pd.DataFrame,
+    column: str,
+    higher_is_better: bool,
+    positive_only: bool,
+    industry_neutral: bool,
+) -> pd.Series:
+    if not industry_neutral:
+        return _rank_score(df[column], higher_is_better=higher_is_better, positive_only=positive_only)
+    values = pd.to_numeric(df[column], errors="coerce")
+    valid = values.notna()
+    if positive_only:
+        valid &= values > 0
+    rank_input = df.copy()
+    rank_input[column] = values.where(valid)
+    score = industry_neutral_rank(rank_input, column, ascending=higher_is_better)
+    return score.fillna(0.5).clip(0.0, 1.0)
 
 
 def _mean_score(parts: list[pd.Series]) -> pd.Series:

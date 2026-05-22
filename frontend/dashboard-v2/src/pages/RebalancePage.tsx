@@ -1,6 +1,8 @@
 import { EvidenceDrawer } from "../components/EvidenceDrawer";
+import { CapitalBreakdown } from "../components/CapitalBreakdown";
 import { OperationSummary } from "../components/OperationSummary";
 import { RebalancePlanTable } from "../components/RebalancePlanTable";
+import { RegimePolicyPanel } from "../components/RegimePolicyPanel";
 import { SatelliteCandidatePanel } from "../components/SatelliteCandidatePanel";
 import { SellSignalPanel } from "../components/SellSignalPanel";
 import type { RebalanceSnapshot } from "../types";
@@ -22,9 +24,12 @@ export function RebalancePage({ data }: Props) {
           <div className="funding-gap">
             <span>资金缺口</span>
             <strong>{formatCurrency(data.summary.funding_gap)}</strong>
+            <small>max(预算预留, 订单需现金) - 现金</small>
           </div>
         </div>
         <OperationSummary summary={data.summary} />
+        <RegimePolicyPanel policy={data.regime_policy} compact />
+        <CapitalBreakdown capital={data.capital} />
         <RebalancePlanTable groups={data.groups} />
       </section>
       <EvidenceDrawer evidence={data.evidence} />
@@ -60,7 +65,9 @@ function compactRowDetail(row: Record<string, unknown>): string {
   if (row.one_lot_cash !== undefined) {
     const confidence = row.confidence === undefined ? "" : ` · 置信度 ${formatPercent(row.confidence)}`;
     const model = row.model_name ? ` · ${text(row.model_name)}` : "";
-    return `一手约 ${formatValueForField("one_lot_cash", row.one_lot_cash, row)}${confidence}${model}`;
+    const required = row.required_cash === undefined ? "" : ` · 执行需 ${formatValueForField("required_cash", row.required_cash, row)}`;
+    const target = row.target_position_cash === undefined ? "" : ` · 目标仓位 ${formatValueForField("target_position_cash", row.target_position_cash, row)}`;
+    return `一手约 ${formatValueForField("one_lot_cash", row.one_lot_cash, row)}${target}${required}${confidence}${model}`;
   }
   if (row.sides !== undefined) {
     return `方向 ${translateSide(row.sides)} · ${formatValueForField("signal_count", row.signal_count, row)} 条信号`;

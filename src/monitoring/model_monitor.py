@@ -6,7 +6,7 @@ import importlib.util
 import json
 import re
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import pandas as pd
@@ -16,6 +16,11 @@ MIN_SIGNALS_FOR_RATE_ALERT = 5
 MIN_ALPHA_VS_BENCHMARK = 0.0
 MIN_HIT_RATE = 0.45
 MAX_NO_ACTION_RATE = 0.50
+PREDICTION_READY_BLOCKING_METRICS = {
+    "production_model_missing",
+    "production_prediction_missing",
+    "production_prediction_stale",
+}
 
 
 def evaluate_production_model(conn: Any, as_of: date | None = None) -> dict[str, Any]:
@@ -75,14 +80,82 @@ def update_production_model_monitor(conn: Any | None = None, as_of: date | None 
             conn.close()
 
 
-def _load_production_model(conn: Any) -> dict[str, Any] | None:
+def assert_production_prediction_ready(as_of: date | None = None) -> dict[str, Any]:
+    """Persist monitor state and return whether production prediction is fresh enough for arbitration."""
+    result = update_production_model_monitor(as_of=as_of)
+    blocking = [
+        alert["metric_name"]
+        for alert in result.get("alerts", [])
+        if alert.get("metric_name") in PREDICTION_READY_BLOCKING_METRICS
+    ]
+    return {
+        "ready": not blocking,
+        "status": "ok" if not blocking else "failed",
+        "blocking_metrics": blocking,
+        "latest_data_date": result.get("latest_data_date"),
+        "production_model": result.get("production_model"),
+    }
+
+
+def auto_demote_production_model(
+    conn: Any | None = None,
+    *,
+    model_name: str = "alpha158",
+    min_consecutive_days: int = 8,
+    as_of: date | None = None,
+) -> dict[str, Any]:
+    """Demote a production model to staging after consecutive active critical alerts."""
+    owns_connection = conn is None
+    if conn is None:
+        from src.data_pipeline.loader import get_connection, init_db
+
+        conn = get_connection()
+        init_db(conn)
+    try:
+        production = _load_production_model(conn, model_name=model_name)
+        alert_date = as_of or date.today()
+        if production is None:
+            return {
+                "status": "production_model_missing",
+                "demoted": False,
+                "model_name": model_name,
+                "model_version": None,
+                "critical_streak_days": 0,
+                "min_consecutive_days": min_consecutive_days,
+            }
+
+        streak_days = _active_critical_alert_streak_days(conn, production, as_of=alert_date)
+        demoted = streak_days >= min_consecutive_days
+        if demoted:
+            conn.execute("""
+                UPDATE qlib_model_registry
+                SET status = 'staging'
+                WHERE model_name = ?
+                  AND model_version = ?
+                  AND status = 'production'
+            """, [production["model_name"], production["model_version"]])
+
+        return {
+            "status": "demoted" if demoted else "monitoring",
+            "demoted": demoted,
+            "model_name": production["model_name"],
+            "model_version": production["model_version"],
+            "critical_streak_days": streak_days,
+            "min_consecutive_days": min_consecutive_days,
+        }
+    finally:
+        if owns_connection:
+            conn.close()
+
+
+def _load_production_model(conn: Any, model_name: str = "alpha158") -> dict[str, Any] | None:
     row = conn.execute("""
         SELECT model_name, model_version, experiment_id, published_at, metrics_json
         FROM qlib_model_registry
-        WHERE model_name = 'alpha158' AND status = 'production'
+        WHERE model_name = ? AND status = 'production'
         ORDER BY published_at DESC NULLS LAST, created_at DESC
         LIMIT 1
-    """).fetchone()
+    """, [model_name]).fetchone()
     if row is None:
         return None
     return {
@@ -92,6 +165,26 @@ def _load_production_model(conn: Any) -> dict[str, Any] | None:
         "published_at": _jsonable(row[3]),
         "metrics": _loads_json(row[4]),
     }
+
+
+def _active_critical_alert_streak_days(conn: Any, production: dict[str, Any], *, as_of: date) -> int:
+    rows = conn.execute("""
+        SELECT DISTINCT alert_date
+        FROM model_monitor_alerts
+        WHERE model_name = ?
+          AND model_version = ?
+          AND severity = 'CRITICAL'
+          AND status = 'ACTIVE'
+          AND alert_date <= ?
+        ORDER BY alert_date DESC
+    """, [production["model_name"], production["model_version"], as_of]).fetchall()
+    critical_dates = {row[0] for row in rows}
+    streak = 0
+    current_date = as_of
+    while current_date in critical_dates:
+        streak += 1
+        current_date -= timedelta(days=1)
+    return streak
 
 
 def _latest_trade_date(conn: Any, as_of: date | None = None) -> date | None:
@@ -292,9 +385,16 @@ def _persist_alerts(conn: Any, result: dict[str, Any]) -> None:
     production = result.get("production_model") or {}
     model_name = production.get("model_name") or "alpha158"
     model_version = production.get("model_version")
-    if not model_version:
-        return
     current_metric_names = {alert["metric_name"] for alert in result.get("alerts", [])}
+    conn.execute("""
+        UPDATE model_monitor_alerts
+        SET status = 'RESOLVED',
+            resolved_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE model_name = ?
+          AND status = 'ACTIVE'
+          AND COALESCE(model_version, '__NULL__') <> COALESCE(?, '__NULL__')
+    """, [model_name, model_version])
     if current_metric_names:
         placeholders = ",".join(["?"] * len(current_metric_names))
         params = [model_name, model_version, *sorted(current_metric_names)]
@@ -304,7 +404,7 @@ def _persist_alerts(conn: Any, result: dict[str, Any]) -> None:
                 resolved_at = CURRENT_TIMESTAMP,
                 updated_at = CURRENT_TIMESTAMP
             WHERE model_name = ?
-              AND model_version = ?
+              AND COALESCE(model_version, '__NULL__') = COALESCE(?, '__NULL__')
               AND status = 'ACTIVE'
               AND metric_name NOT IN ({placeholders})
         """, params)
@@ -315,7 +415,7 @@ def _persist_alerts(conn: Any, result: dict[str, Any]) -> None:
                 resolved_at = CURRENT_TIMESTAMP,
                 updated_at = CURRENT_TIMESTAMP
             WHERE model_name = ?
-              AND model_version = ?
+              AND COALESCE(model_version, '__NULL__') = COALESCE(?, '__NULL__')
               AND status = 'ACTIVE'
         """, [model_name, model_version])
 
@@ -444,6 +544,12 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command")
     p_update = sub.add_parser("update", help="evaluate and persist production model alerts")
     p_update.add_argument("--as-of", default=None)
+    p_ready = sub.add_parser("assert-prediction-ready", help="fail if production prediction is missing or stale")
+    p_ready.add_argument("--as-of", default=None)
+    p_demote = sub.add_parser("auto-demote", help="demote production model after consecutive CRITICAL alerts")
+    p_demote.add_argument("--model-name", default="alpha158")
+    p_demote.add_argument("--min-consecutive-days", type=int, default=8)
+    p_demote.add_argument("--as-of", default=None)
     args = parser.parse_args(argv)
 
     if args.command == "update":
@@ -451,6 +557,20 @@ def main(argv: list[str] | None = None) -> int:
         result = update_production_model_monitor(as_of=as_of)
         print(json.dumps(result, ensure_ascii=False, default=str, indent=2))
         return 0 if result.get("status") != "failed" else 1
+    if args.command == "assert-prediction-ready":
+        as_of = date.fromisoformat(args.as_of) if args.as_of else None
+        result = assert_production_prediction_ready(as_of=as_of)
+        print(json.dumps(result, ensure_ascii=False, default=str, indent=2))
+        return 0 if result.get("ready") else 2
+    if args.command == "auto-demote":
+        as_of = date.fromisoformat(args.as_of) if args.as_of else None
+        result = auto_demote_production_model(
+            model_name=args.model_name,
+            min_consecutive_days=args.min_consecutive_days,
+            as_of=as_of,
+        )
+        print(json.dumps(result, ensure_ascii=False, default=str, indent=2))
+        return 0
     parser.print_help()
     return 1
 

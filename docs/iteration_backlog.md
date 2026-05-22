@@ -16,6 +16,13 @@ This file is the durable project backlog. Keep it small enough to review every w
 - P0 work protects trustworthiness: survivorship control, tradability realism, engine comparability, and daily workflow consistency.
 - Data-source policy for the first six-month validation period, through 2026-11-16: use free or public data sources by default. Paid sources such as Tushare, Wind, Choice, JoinQuant, or RiceQuant require explicit approval and a written reason that no free/public route can satisfy the validation need.
 
+### Dashboard Single-Track Policy
+
+- Daily operation entrypoint: Dashboard V2 `/today`.
+- Legacy Streamlit role: research fallback only; 旧 Streamlit 不作为每日操作入口。
+- Production close/open tasks must not depend on Streamlit pages being live.
+- Migration gate: Dashboard V2 must show today action, rebalance, portfolio, health, research summary, user guide, scheduler history, model monitor alerts, and signal outcome summaries before Streamlit restart logic is removed from production scripts.
+
 ## Current Baseline
 
 - Latest local commit before P2-06 validation: `864df9b` (`feat: backfill cn financials from akshare`).

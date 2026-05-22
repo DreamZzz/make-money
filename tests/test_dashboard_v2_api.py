@@ -14,7 +14,14 @@ class FakeDashboardV2Service:
             "trade_date": "2026-05-15",
             "health": {"status": "ok", "label": "数据可用", "blocking": False, "messages": []},
             "account": {"cash": 120000.0, "total_value": 300000.0},
-            "operation_summary": {"operation_count": 2, "cash_required": 18000.0, "estimated_minutes": 12},
+            "capital": {"cash": 120000.0, "unified_total_value": 300000.0, "reserved_cash": 0.0},
+            "operation_summary": {
+                "operation_count": 2,
+                "cash_required": 18000.0,
+                "reserved_cash": 0.0,
+                "cash_commitment": 18000.0,
+                "estimated_minutes": 12,
+            },
             "blockers": [],
             "next_action": {"label": "查看调仓计划", "href": "/rebalance", "enabled": True},
             "evidence": {"data_date": "2026-05-15", "model_version": "alpha158_v1"},
@@ -24,7 +31,8 @@ class FakeDashboardV2Service:
         return {
             "plan_id": "PLAN-1",
             "plan_date": "2026-05-15",
-            "summary": {"operation_count": 2, "cash_required": 18000.0, "funding_gap": 0.0},
+            "capital": {"cash": 120000.0, "unified_total_value": 300000.0, "reserved_cash": 0.0},
+            "summary": {"operation_count": 2, "cash_required": 18000.0, "cash_commitment": 18000.0, "funding_gap": 0.0},
             "groups": {"executable": [], "confirm": [], "deferred": []},
             "conflicts": [],
             "evidence": {"cost_model": "paper_engine_t1_open"},
@@ -33,6 +41,7 @@ class FakeDashboardV2Service:
     def build_portfolio_snapshot(self) -> dict:
         return {
             "account": {"cash": 120000.0, "total_value": 300000.0},
+            "capital": {"cash": 120000.0, "unified_total_value": 300000.0, "reserved_cash": 0.0},
             "holdings": [],
             "risk_alerts": [],
             "exposure": {"industry": [], "size": [], "summary": {}},
@@ -119,11 +128,11 @@ def test_dashboard_v2_get_contracts_expose_stable_operating_snapshots() -> None:
     research = client.get("/api/v2/research/summary")
 
     assert today.status_code == 200
-    assert set(today.json()) >= {"trade_date", "health", "account", "operation_summary", "next_action", "evidence"}
+    assert set(today.json()) >= {"trade_date", "health", "account", "capital", "operation_summary", "next_action", "evidence"}
     assert rebalance.status_code == 200
-    assert set(rebalance.json()) >= {"plan_id", "summary", "groups", "conflicts", "evidence"}
+    assert set(rebalance.json()) >= {"plan_id", "capital", "summary", "groups", "conflicts", "evidence"}
     assert portfolio.status_code == 200
-    assert set(portfolio.json()) >= {"account", "holdings", "risk_alerts", "exposure", "signal_outcomes"}
+    assert set(portfolio.json()) >= {"account", "capital", "holdings", "risk_alerts", "exposure", "signal_outcomes"}
     assert health.status_code == 200
     assert set(health.json()) >= {
         "status",

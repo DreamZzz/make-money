@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 
 import duckdb
 import pandas as pd
@@ -11,7 +11,9 @@ from src.portfolio.allocator import (
     compute_allocation_plan,
     create_allocation_plan,
     persist_allocation_plan,
+    resolve_regime_policy_for_plan,
 )
+from src.portfolio.regime_policy import derive_regime_policy
 
 
 def test_core_underweight_receives_cash_before_satellite_budget():
@@ -73,6 +75,32 @@ def test_missing_index_fund_holdings_treat_core_value_as_zero():
     assert plan.core_value == pytest.approx(0)
     assert plan.core_budget == pytest.approx(10_000)
     assert plan.satellite_budget == pytest.approx(0)
+
+
+def test_allocation_plan_preserves_regime_cash_target_before_spending_budgets():
+    plan = compute_allocation_plan(
+        AllocationInputs(
+            plan_date=date(2026, 5, 15),
+            account_id="default",
+            cash=30_000,
+            core_value=50_000,
+            satellite_value=20_000,
+        ),
+        AllocationConfig(
+            core_target_pct=0.70,
+            satellite_target_pct=0.10,
+            cash_target_pct=0.20,
+            rebalance_tolerance_pct=0.05,
+            min_trade_amount=1_000,
+            core_cash_priority=True,
+        ),
+    )
+
+    assert plan.cash_target_pct == pytest.approx(0.20)
+    assert plan.core_budget == pytest.approx(10_000)
+    assert plan.satellite_budget == pytest.approx(0)
+    assert plan.items[0].target_value == pytest.approx(70_000)
+    assert plan.items[1].target_value == pytest.approx(10_000)
 
 
 def test_persist_allocation_plan_is_idempotent_for_account_and_date():
@@ -149,6 +177,84 @@ def test_create_allocation_plan_allocates_core_budget_to_latest_buy_add_fund_sig
     assert fund_items["action"].tolist() == ["BUY", "ADD"]
     assert fund_items["target_value"].tolist() == pytest.approx([50_400, 33_600])
     assert fund_items["budget_delta"].tolist() == pytest.approx([50_400, 33_600])
+    conn.close()
+
+
+def test_create_allocation_plan_can_consume_regime_policy_without_default_side_effects():
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    conn.execute("""
+        INSERT INTO account_daily (
+            account_id, trade_date, cash, position_value, total_value,
+            net_contribution, nav, daily_return, drawdown
+        )
+        VALUES ('default', DATE '2026-05-15', 30000, 20000, 100000, 100000, 1, 0, 0)
+    """)
+    decision = derive_regime_policy({"risk_state": "risk_off", "reason": "market breakdown"})
+
+    base = create_allocation_plan(
+        conn,
+        config=AllocationConfig(
+            core_target_pct=0.60,
+            satellite_target_pct=0.40,
+            rebalance_tolerance_pct=0.05,
+            min_trade_amount=1000,
+        ),
+        persist=False,
+    )
+    adjusted = create_allocation_plan(
+        conn,
+        config=AllocationConfig(
+            core_target_pct=0.60,
+            satellite_target_pct=0.40,
+            rebalance_tolerance_pct=0.05,
+            min_trade_amount=1000,
+        ),
+        regime_policy=decision,
+        persist=False,
+    )
+
+    assert base.cash_target_pct == pytest.approx(0.0)
+    assert adjusted.cash_target_pct == pytest.approx(0.20)
+    assert adjusted.satellite_target_pct == pytest.approx(0.10)
+    assert adjusted.satellite_budget == pytest.approx(0)
+    assert adjusted.total_value == pytest.approx(50_000)
+    assert adjusted.core_budget == pytest.approx(20_000)
+    assert adjusted.cash - adjusted.core_budget == pytest.approx(10_000)
+    conn.close()
+
+
+def test_resolve_regime_policy_for_plan_is_opt_in_and_reads_index_daily():
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    rows = []
+    close = 100.0
+    for offset in range(130):
+        trade_date = date(2026, 1, 1) + timedelta(days=offset)
+        close *= 0.998
+        if offset == 129:
+            close = 70.0
+        rows.append(("000300", trade_date, close))
+    conn.executemany(
+        "INSERT INTO index_daily (index_code, trade_date, close) VALUES (?, ?, ?)",
+        rows,
+    )
+
+    disabled = resolve_regime_policy_for_plan(
+        conn,
+        as_of=date(2026, 5, 10),
+        config={"portfolio": {"regime_policy": {"enabled": False}}},
+    )
+    enabled = resolve_regime_policy_for_plan(
+        conn,
+        as_of=date(2026, 5, 10),
+        config={"portfolio": {"regime_policy": {"enabled": True, "benchmark_index": "000300"}}},
+    )
+
+    assert disabled is None
+    assert enabled is not None
+    assert enabled.allow_new_buys is False
+    assert enabled.satellite_target_pct <= 0.10
     conn.close()
 
 

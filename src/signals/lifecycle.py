@@ -12,6 +12,7 @@ FILLED = "FILLED"
 NO_ACTION = "NO_ACTION"
 EXPIRED = "EXPIRED"
 SUPERSEDED = "SUPERSEDED"
+DEFERRED_BUDGET = "DEFERRED_BUDGET"
 
 
 def expire_stale_signals(
@@ -119,4 +120,53 @@ def retire_replaced_signals(conn: duckdb.DuckDBPyConnection, new_signals: pd.Dat
     count = len(rows)
     if count:
         logger.info(f"Superseded old pending signals: {count}")
+    return count
+
+
+def retire_same_day_replaced_signals(conn: duckdb.DuckDBPyConnection, new_signals: pd.DataFrame) -> int:
+    """Supersede non-filled signals with the same model/symbol/side/signal date.
+
+    Daily reruns usually keep the same signal date, so timestamp-only replacement
+    does not catch same-day duplicate proposals. This helper keeps FILLED history
+    intact while retiring active/no-action rows that have been regenerated.
+    """
+    if new_signals.empty:
+        return 0
+
+    required = {"signal_id", "model_name", "symbol", "side", "signal_ts"}
+    if not required.issubset(set(new_signals.columns)):
+        return 0
+
+    replacements = new_signals[list(required)].copy()
+    replacements["signal_ts"] = pd.to_datetime(replacements["signal_ts"])
+    replacements["signal_date"] = replacements["signal_ts"].dt.date
+    replacements = replacements.drop_duplicates(
+        ["model_name", "symbol", "side", "signal_date"],
+        keep="first",
+    )
+    conn.execute("CREATE OR REPLACE TEMP TABLE _same_day_signal_replacements AS SELECT * FROM replacements")
+    rows = conn.execute("""
+        UPDATE signals old
+        SET executed = TRUE,
+            status = 'SUPERSEDED',
+            status_reason = '同日重新生成信号，已被最新同口径信号替代',
+            execution_date = new.signal_date,
+            superseded_by = new.signal_id,
+            updated_at = CURRENT_TIMESTAMP
+        FROM _same_day_signal_replacements new
+        WHERE old.signal_id <> new.signal_id
+          AND old.model_name = new.model_name
+          AND old.symbol = new.symbol
+          AND UPPER(old.side) = UPPER(new.side)
+          AND CAST(old.signal_ts AS DATE) = new.signal_date
+          AND COALESCE(old.status, 'ACTIVE') IN ('ACTIVE', 'NO_ACTION', 'SUPERSEDED')
+          AND old.signal_id NOT IN (
+              SELECT signal_id FROM paper_orders WHERE status = 'FILLED'
+          )
+        RETURNING old.signal_id
+    """).fetchall()
+
+    count = len(rows)
+    if count:
+        logger.info(f"Superseded same-day duplicate signals: {count}")
     return count

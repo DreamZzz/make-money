@@ -61,6 +61,34 @@ def test_predict_latest_cli_returns_nonzero_on_failed_result(monkeypatch):
     assert qlib_runner.main(["predict-latest", "--model", "production"]) == 1
 
 
+def test_qlib_runner_reexecs_project_venv_for_cli_when_qlib_missing(monkeypatch):
+    calls = []
+    target_python = PROJECT_ROOT / ".venv-qlib" / "bin" / "python"
+    monkeypatch.delenv("MAKE_MONEY_QLIB_REEXEC", raising=False)
+    monkeypatch.setattr(qlib_runner, "_current_python_can_import_qlib", lambda: False)
+    monkeypatch.setattr(qlib_runner, "_qlib_python_candidates", lambda: [target_python])
+    monkeypatch.setattr(qlib_runner, "_python_is_compatible", lambda python: Path(python) == target_python)
+    monkeypatch.setattr(qlib_runner, "_python_can_import", lambda python, module: Path(python) == target_python and module == "qlib")
+    monkeypatch.setattr(qlib_runner.sys, "executable", "/opt/homebrew/bin/python3.12")
+
+    def fake_execvpe(file, args, env):
+        calls.append((file, args, env))
+        raise RuntimeError("stop after exec")
+
+    monkeypatch.setattr(qlib_runner.os, "execvpe", fake_execvpe)
+
+    with pytest.raises(RuntimeError, match="stop after exec"):
+        qlib_runner._maybe_reexec_qlib_python(["predict-latest", "--model", "production"])
+
+    assert calls == [
+        (
+            str(target_python),
+            [str(target_python), "-m", "src.backtest.qlib_runner", "predict-latest", "--model", "production"],
+            {**calls[0][2], "MAKE_MONEY_QLIB_REEXEC": "1"},
+        )
+    ]
+
+
 def _status_df(status: str, close: float | None = None, error: str = "") -> pd.DataFrame:
     if close is None:
         df = pd.DataFrame()

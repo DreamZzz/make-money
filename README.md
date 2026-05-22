@@ -16,6 +16,14 @@
 http://localhost:5173/today
 ```
 
+日常入口使用 Dashboard V2：
+
+```bash
+scripts/run_dashboard_v2.sh
+```
+
+打开 `http://localhost:5173/today`。旧 Streamlit 仅作为研究兜底入口，不作为每日操作入口。
+
 完整手册见：
 
 [docs/dashboard_v2_user_guide.md](docs/dashboard_v2_user_guide.md)
@@ -55,7 +63,7 @@ scripts/run_dashboard_v2.sh
 | V2 前端 | `5173` | React/Vite 页面 |
 | V2 API | `8600` | FastAPI 数据接口 |
 
-旧版 Streamlit Dashboard 仍保留为研究/迁移期兜底：
+旧版 Streamlit Dashboard 仍保留为研究/迁移期兜底，不作为日常操作入口：
 
 ```text
 http://localhost:8501

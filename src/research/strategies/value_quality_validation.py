@@ -14,10 +14,12 @@ from src.backtest.qlib_runner import (
     compute_periodic_metrics,
     simulate_topn_open,
 )
+from src.research.alpha_gate import evaluate_alpha_gate
 from src.research.strategies.value_quality import (
     MODEL_NAME,
     compute_value_quality_scores,
     measure_return_correlation,
+    select_value_quality_symbols,
 )
 
 
@@ -59,6 +61,7 @@ def build_value_quality_score_panel(
     rebalance_freq: str = "monthly",
     financial_lag_days: int = 60,
     country: str = "CN",
+    industry_neutral: bool = False,
 ) -> pd.DataFrame:
     """Build point-in-time value-quality scores for each rebalance date."""
     frames = []
@@ -72,7 +75,7 @@ def build_value_quality_score_panel(
         )
         if fundamentals.empty:
             continue
-        scored = compute_value_quality_scores(fundamentals)
+        scored = compute_value_quality_scores(fundamentals, industry_neutral=industry_neutral)
         if scored.empty:
             continue
         scored["trade_date"] = rebalance_date
@@ -92,6 +95,8 @@ def run_value_quality_validation(
     benchmark_returns: pd.Series | None = None,
     reference_returns: pd.Series | None = None,
     save_result: bool = False,
+    industry_neutral: bool = False,
+    retention_quantile: float | None = None,
 ) -> dict[str, Any]:
     """Run standalone value-quality validation and return metrics plus correlations."""
     scores = build_value_quality_score_panel(
@@ -100,8 +105,13 @@ def run_value_quality_validation(
         end=end,
         rebalance_freq=rebalance_freq,
         financial_lag_days=financial_lag_days,
+        industry_neutral=industry_neutral,
     )
-    pred = _scores_to_prediction_frame(scores)
+    pred = _scores_to_prediction_frame(
+        scores,
+        top_n=top_n if retention_quantile is not None else None,
+        retention_quantile=retention_quantile,
+    )
     price_end = pd.to_datetime(end).date() + timedelta(days=max(90, int(holding_days) * 5))
     prices = _load_price_frame(
         conn,
@@ -146,6 +156,16 @@ def run_value_quality_validation(
         rebalance_freq=rebalance_freq,
     )
 
+    gate_metrics = {
+        "information_ratio": metrics.get("info_ratio") if metrics else None,
+        "correlation_alpha158": measure_return_correlation(returns, aligned_reference),
+        "correlation_benchmark": measure_return_correlation(returns, aligned_benchmark),
+        "max_drawdown": metrics.get("max_drawdown") if metrics else None,
+        "annual_turnover": metrics.get("turnover") if metrics else None,
+        "factor_coverage": float(scores["coverage"].mean()) if not scores.empty else 0.0,
+    }
+    gate_result = evaluate_alpha_gate(gate_metrics)
+
     result = {
         "strategy_name": MODEL_NAME,
         "score_rows": int(len(scores)),
@@ -156,11 +176,16 @@ def run_value_quality_validation(
         "holding_days": int(holding_days),
         "rebalance_freq": rebalance_freq,
         "financial_lag_days": int(financial_lag_days),
+        "industry_neutral": bool(industry_neutral),
+        "retention_quantile": retention_quantile,
         "benchmark_name": benchmark_name,
         "reference_experiment_id": reference_experiment_id,
         "reference_periods": int(len(aligned_reference)),
-        "correlation_alpha158": measure_return_correlation(returns, aligned_reference),
-        "correlation_benchmark": measure_return_correlation(returns, aligned_benchmark),
+        "correlation_alpha158": gate_metrics["correlation_alpha158"],
+        "correlation_benchmark": gate_metrics["correlation_benchmark"],
+        "alpha_gate_passed": gate_result.passed,
+        "alpha_gate_failed_reasons": gate_result.failed_reasons,
+        "alpha_gate_metrics": gate_result.metrics,
         "metrics": metrics,
     }
 
@@ -175,6 +200,8 @@ def run_value_quality_validation(
                 "holding_days": holding_days,
                 "rebalance_freq": rebalance_freq,
                 "financial_lag_days": financial_lag_days,
+                "industry_neutral": industry_neutral,
+                "retention_quantile": retention_quantile,
                 "benchmark_name": benchmark_name,
                 "reference_experiment_id": reference_experiment_id,
             },
@@ -233,7 +260,7 @@ def _load_fundamentals_snapshot(
     df = conn.execute(
         """
         WITH latest_price AS (
-            SELECT symbol, trade_date, pe_ttm, pb
+            SELECT symbol, trade_date, pe_ttm, pb, amount
             FROM daily_price
             WHERE trade_date <= ?
             QUALIFY ROW_NUMBER() OVER (
@@ -256,7 +283,8 @@ def _load_fundamentals_snapshot(
             lf.roe,
             lf.net_margin,
             lf.debt_ratio,
-            si.market_cap
+            si.industry,
+            lp.amount AS market_cap
         FROM stock_info si
         LEFT JOIN latest_price lp ON si.symbol = lp.symbol
         LEFT JOIN latest_financials lf ON si.symbol = lf.symbol
@@ -271,13 +299,31 @@ def _load_fundamentals_snapshot(
     return df
 
 
-def _scores_to_prediction_frame(scores: pd.DataFrame) -> pd.DataFrame:
+def _scores_to_prediction_frame(
+    scores: pd.DataFrame,
+    top_n: int | None = None,
+    retention_quantile: float | None = None,
+) -> pd.DataFrame:
     if scores.empty:
         return pd.DataFrame(columns=["datetime", "instrument", "score"])
+    score_df = scores.copy()
+    if top_n is not None and retention_quantile is not None:
+        selected_frames = []
+        prior_symbols: set[str] = set()
+        for _, group in score_df.sort_values(["trade_date", "symbol"]).groupby("trade_date", sort=True):
+            selected = select_value_quality_symbols(
+                group,
+                top_n=int(top_n),
+                prior_symbols=prior_symbols,
+                retention_quantile=float(retention_quantile),
+            )
+            prior_symbols = set(selected)
+            selected_frames.append(group[group["symbol"].astype(str).isin(selected)].copy())
+        score_df = pd.concat(selected_frames, ignore_index=True) if selected_frames else score_df.iloc[0:0].copy()
     return pd.DataFrame({
-        "datetime": pd.to_datetime(scores["trade_date"]),
-        "instrument": scores["symbol"].astype(str),
-        "score": pd.to_numeric(scores["score"], errors="coerce").fillna(0.0),
+        "datetime": pd.to_datetime(score_df["trade_date"]),
+        "instrument": score_df["symbol"].astype(str),
+        "score": pd.to_numeric(score_df["score"], errors="coerce").fillna(0.0),
     })
 
 
@@ -415,6 +461,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rebalance-freq", choices=["daily", "weekly", "monthly"], default="monthly")
     parser.add_argument("--financial-lag-days", type=int, default=60)
     parser.add_argument("--benchmark", default="MIXED_EQUAL")
+    parser.add_argument("--industry-neutral", action="store_true", help="Rank value and quality factors within industries.")
+    parser.add_argument("--retention-quantile", type=float, default=None, help="Keep prior holdings whose score remains within the retention band.")
     parser.add_argument("--save", action="store_true", help="Persist metrics to backtest_results as research_only")
     args = parser.parse_args(argv)
 
@@ -432,6 +480,8 @@ def main(argv: list[str] | None = None) -> int:
             rebalance_freq=args.rebalance_freq,
             financial_lag_days=args.financial_lag_days,
             benchmark_name=args.benchmark,
+            industry_neutral=args.industry_neutral,
+            retention_quantile=args.retention_quantile,
             save_result=args.save,
         )
     finally:

@@ -175,6 +175,98 @@ def test_backfill_field_coverage_can_skip_per_symbol_industry_fetch():
     conn.close()
 
 
+def test_backfill_field_coverage_uses_batch_industry_mapping_before_per_symbol_fetch():
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    _seed_symbol(conn, "000001", industry=None, market_cap=1000, pe_ttm=5, pb=0.8)
+    _seed_symbol(conn, "600519", industry=None, market_cap=18000, pe_ttm=25, pb=8)
+    individual_calls: list[str] = []
+
+    industry_members = pd.DataFrame([
+        {"symbol": "000001", "name": "平安银行", "industry": "银行", "country": "CN", "source": "eastmoney_industry_board"},
+        {"symbol": "600519", "name": "贵州茅台", "industry": "白酒", "country": "CN", "source": "eastmoney_industry_board"},
+    ])
+
+    result = backfill_field_coverage(
+        conn,
+        scope="target_universe",
+        as_of=date(2026, 5, 15),
+        fetch_cn_spot=lambda: pd.DataFrame(),
+        fetch_tencent_quote=lambda _symbols: pd.DataFrame(),
+        fetch_industry_members=lambda: industry_members,
+        fetch_cn_individual=lambda symbol: individual_calls.append(symbol) or pd.DataFrame(),
+    )
+
+    rows = conn.execute(
+        "SELECT symbol, industry FROM stock_info ORDER BY symbol"
+    ).fetchall()
+    assert result["status"] == "OK"
+    assert result["updated_stock_info"] == 2
+    assert result["missing_after"] == {"industry": 0, "market_cap": 0, "pe_ttm": 0, "pb": 0}
+    assert rows == [("000001", "银行"), ("600519", "白酒")]
+    assert individual_calls == []
+    conn.close()
+
+
+def test_backfill_field_coverage_falls_back_to_per_symbol_only_for_unmapped_industries():
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    _seed_symbol(conn, "000001", industry=None, market_cap=1000, pe_ttm=5, pb=0.8)
+    _seed_symbol(conn, "600519", industry=None, market_cap=18000, pe_ttm=25, pb=8)
+    individual_calls: list[str] = []
+
+    result = backfill_field_coverage(
+        conn,
+        scope="target_universe",
+        as_of=date(2026, 5, 15),
+        fetch_cn_spot=lambda: pd.DataFrame(),
+        fetch_tencent_quote=lambda _symbols: pd.DataFrame(),
+        fetch_industry_members=lambda: pd.DataFrame([
+            {"symbol": "000001", "name": "平安银行", "industry": "银行", "country": "CN"},
+        ]),
+        fetch_cn_individual=lambda symbol: (
+            individual_calls.append(symbol)
+            or pd.DataFrame([{"symbol": symbol, "industry": "白酒"}])
+        ),
+    )
+
+    assert result["status"] == "OK"
+    assert individual_calls == ["600519"]
+    assert conn.execute(
+        "SELECT symbol, industry FROM stock_info ORDER BY symbol"
+    ).fetchall() == [("000001", "银行"), ("600519", "白酒")]
+    conn.close()
+
+
+def test_backfill_field_coverage_can_disable_per_symbol_industry_fallback():
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    _seed_symbol(conn, "000001", industry=None, market_cap=1000, pe_ttm=5, pb=0.8)
+    _seed_symbol(conn, "600519", industry=None, market_cap=18000, pe_ttm=25, pb=8)
+    individual_calls: list[str] = []
+
+    result = backfill_field_coverage(
+        conn,
+        scope="target_universe",
+        as_of=date(2026, 5, 15),
+        fetch_cn_spot=lambda: pd.DataFrame(),
+        fetch_tencent_quote=lambda _symbols: pd.DataFrame(),
+        fetch_industry_members=lambda: pd.DataFrame([
+            {"symbol": "000001", "name": "平安银行", "industry": "银行", "country": "CN"},
+        ]),
+        fetch_cn_individual=lambda symbol: individual_calls.append(symbol) or pd.DataFrame(),
+        fetch_individual_industry=False,
+    )
+
+    assert result["status"] == "WARN"
+    assert individual_calls == []
+    assert result["missing_after"] == {"industry": 1, "market_cap": 0, "pe_ttm": 0, "pb": 0}
+    assert conn.execute(
+        "SELECT symbol, industry FROM stock_info ORDER BY symbol"
+    ).fetchall() == [("000001", "银行"), ("600519", None)]
+    conn.close()
+
+
 def test_backfill_field_coverage_scopes_deduplicates_symbols_across_priority_scopes():
     conn = duckdb.connect(":memory:")
     init_db(conn)

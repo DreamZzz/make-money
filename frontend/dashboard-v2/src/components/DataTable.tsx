@@ -48,6 +48,9 @@ function stableRowKey(row: Record<string, unknown>, index: number): string {
     row.trade_date,
     row.started_at,
     row.model_name,
+    row.strategy_label,
+    row.horizon_days,
+    row.horizon_label,
   ].filter(Boolean);
   return parts.length ? parts.join("-") : String(index);
 }

@@ -16,6 +16,7 @@ import pandas as pd
 from loguru import logger
 
 from src.config import load_config
+from src.portfolio.regime_policy import load_latest_regime_policy
 
 ARBITER_VERSION = "signal_arbiter_v1"
 ACCEPTED = "ACCEPTED"
@@ -44,8 +45,10 @@ def arbitrate_pending_signals(
     if signals.empty:
         return ArbitrationResult(total=0, accepted=0, rejected=0)
 
-    qlib = _load_latest_qlib_predictions(conn)
-    decisions = _build_decisions(signals, qlib, config)
+    baselines = _consensus_baselines(config)
+    regime_policy = load_latest_regime_policy(conn, as_of=as_of, config=config)
+    baseline_predictions = _load_latest_baseline_predictions(conn, baselines)
+    decisions = _build_decisions(signals, baseline_predictions, config, baselines, regime_policy=regime_policy)
     _persist_decisions(conn, decisions)
     _apply_rejections_to_signals(conn, decisions)
     accepted = int((decisions["decision"] == ACCEPTED).sum())
@@ -72,34 +75,98 @@ def _load_active_signals(conn: duckdb.DuckDBPyConnection, as_of: date | None = N
     """, params).fetchdf()
 
 
-def _load_latest_qlib_predictions(conn: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+def _consensus_baselines(config: dict) -> list[str]:
+    arbiter_cfg = config.get("portfolio", {}).get("signal_arbiter", {})
+    raw = arbiter_cfg.get("consensus_baselines", ["alpha158"])
+    if raw is None:
+        return ["alpha158"]
+    if isinstance(raw, str):
+        raw = [raw]
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
+def _empty_baseline_predictions() -> pd.DataFrame:
+    return pd.DataFrame(columns=[
+        "model_name",
+        "symbol",
+        "prediction_date",
+        "rank",
+        "confidence",
+        "score",
+        "model_version",
+    ])
+
+
+def _load_latest_baseline_predictions(
+    conn: duckdb.DuckDBPyConnection,
+    model_names: list[str],
+) -> pd.DataFrame:
+    if not model_names:
+        return _empty_baseline_predictions()
+    placeholders = ",".join(["?"] * len(model_names))
     try:
-        return conn.execute("""
-            SELECT symbol, prediction_date, rank, confidence, score, model_version
-            FROM qlib_predictions
-            WHERE model_name = 'alpha158'
-              AND mode = 'production_inference'
+        return conn.execute(
+            f"""
+            WITH production AS (
+                SELECT model_name, model_version
+                FROM qlib_model_registry
+                WHERE status = 'production'
+                  AND model_name IN ({placeholders})
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY model_name
+                    ORDER BY published_at DESC NULLS LAST, created_at DESC NULLS LAST
+                ) = 1
+            ),
+            candidate_predictions AS (
+                SELECT qp.model_name, qp.symbol, qp.prediction_date, qp.rank, qp.confidence,
+                       qp.score, qp.model_version, qp.selected
+                FROM qlib_predictions qp
+                JOIN production p
+                  ON p.model_name = qp.model_name
+                 AND p.model_version = qp.model_version
+                WHERE qp.mode = 'production_inference'
+            )
+            SELECT model_name, symbol, prediction_date, rank, confidence, score, model_version
+            FROM candidate_predictions
             QUALIFY ROW_NUMBER() OVER (
-                PARTITION BY symbol ORDER BY prediction_date DESC, selected DESC, rank ASC
+                PARTITION BY model_name, symbol ORDER BY prediction_date DESC, selected DESC, rank ASC
             ) = 1
-        """).fetchdf()
+            """,
+            model_names,
+        ).fetchdf()
     except Exception:
-        return pd.DataFrame(columns=["symbol", "prediction_date", "rank", "confidence", "score", "model_version"])
+        return _empty_baseline_predictions()
 
 
-def _build_decisions(signals: pd.DataFrame, qlib: pd.DataFrame, config: dict) -> pd.DataFrame:
+def _build_decisions(
+    signals: pd.DataFrame,
+    baseline_predictions: pd.DataFrame,
+    config: dict,
+    baselines: list[str],
+    regime_policy: Any | None = None,
+) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     signal_df = signals.copy()
     signal_df["signal_date"] = pd.to_datetime(signal_df["signal_ts"]).dt.date
     signal_df["side_norm"] = signal_df["side"].fillna("").astype(str).str.upper()
 
-    qlib_by_symbol = {
-        str(row["symbol"]): row
-        for _, row in qlib.iterrows()
-    } if not qlib.empty else {}
+    baseline_order = {model_name: idx for idx, model_name in enumerate(baselines)}
+    baseline_by_symbol: dict[str, list[pd.Series]] = {}
+    if not baseline_predictions.empty:
+        sorted_predictions = baseline_predictions.assign(
+            _baseline_order=baseline_predictions["model_name"].map(baseline_order).fillna(len(baseline_order)),
+        ).sort_values(["symbol", "_baseline_order"], kind="mergesort")
+        for _, row in sorted_predictions.iterrows():
+            baseline_by_symbol.setdefault(str(row["symbol"]), []).append(row)
 
     for _, row in signal_df.iterrows():
-        rows.append(_base_decision(row, qlib_by_symbol.get(str(row["symbol"])), config))
+        rows.append(_base_decision(
+            row,
+            baseline_by_symbol.get(str(row["symbol"]), []),
+            config,
+            baselines,
+            regime_policy=regime_policy,
+        ))
 
     decisions = pd.DataFrame(rows)
     if decisions.empty:
@@ -110,40 +177,59 @@ def _build_decisions(signals: pd.DataFrame, qlib: pd.DataFrame, config: dict) ->
     return decisions
 
 
-def _base_decision(signal: pd.Series, qlib_row: pd.Series | None, config: dict) -> dict[str, Any]:
+def _base_decision(
+    signal: pd.Series,
+    baseline_rows: list[pd.Series],
+    config: dict,
+    baselines: list[str],
+    regime_policy: Any | None = None,
+) -> dict[str, Any]:
     side = str(signal.get("side_norm") or "").upper()
     model_name = str(signal.get("model_name") or "")
     score = _to_float(signal.get("score"))
     confidence = _to_float(signal.get("confidence"))
-    priority_score = _priority_score(model_name, side, confidence, score, qlib_row)
-    qlib_meta = _qlib_meta(qlib_row)
-    common = {
-        "decision_id": f"DEC-{uuid.uuid4().hex[:10].upper()}",
-        "signal_id": signal.get("signal_id"),
-        "decision_date": date.today(),
-        "model_name": model_name,
-        "model_version": signal.get("model_version"),
-        "symbol": signal.get("symbol"),
-        "side": side,
-        "signal_ts": signal.get("signal_ts"),
-        "arbiter_version": ARBITER_VERSION,
-        "priority_score": priority_score,
-        **qlib_meta,
-    }
+    signal_id = signal.get("signal_id")
+    baseline_set = set(baselines)
+    default_baseline_row = baseline_rows[0] if baseline_rows else None
+
+    def common(qlib_row: pd.Series | None = default_baseline_row) -> dict[str, Any]:
+        priority_score = _priority_score(model_name, side, confidence, score, qlib_row, baseline_set)
+        return {
+            "decision_id": f"DEC-{signal_id}-{ARBITER_VERSION}",
+            "signal_id": signal_id,
+            "decision_date": date.today(),
+            "model_name": model_name,
+            "model_version": signal.get("model_version"),
+            "symbol": signal.get("symbol"),
+            "side": side,
+            "signal_ts": signal.get("signal_ts"),
+            "arbiter_version": ARBITER_VERSION,
+            "priority_score": priority_score,
+            **_qlib_meta(qlib_row),
+        }
 
     if side in {"SELL", "SHORT"}:
         return {
-            **common,
+            **common(),
             "decision": ACCEPTED,
             "decision_reason": "SELL/风险释放优先通过统一仲裁",
             "consensus_status": "SELL",
         }
     if side != "BUY":
         return {
-            **common,
+            **common(),
             "decision": REJECTED,
             "decision_reason": f"不支持的信号方向: {side or '-'}",
             "consensus_status": "UNSUPPORTED_SIDE",
+        }
+
+    regime_reject_reason = _regime_buy_reject_reason(regime_policy, confidence)
+    if regime_reject_reason:
+        return {
+            **common(),
+            "decision": REJECTED,
+            "decision_reason": regime_reject_reason,
+            "consensus_status": "MACRO_BLOCK",
         }
 
     portfolio_cfg = config.get("portfolio", {})
@@ -152,68 +238,102 @@ def _base_decision(signal: pd.Series, qlib_row: pd.Series | None, config: dict) 
     rank_score = confidence * max(score, 0.0)
     if confidence < min_conf or rank_score < min_rank_score:
         return {
-            **common,
+            **common(),
             "decision": REJECTED,
             "decision_reason": f"低于全局BUY门槛: confidence={confidence:.2f}, rank_score={rank_score:.2f}",
             "consensus_status": "LOW_SIGNAL_SCORE",
         }
 
-    if model_name == "alpha158":
+    if model_name in baseline_set:
         return {
-            **common,
+            **common(),
             "decision": ACCEPTED,
-            "decision_reason": "Alpha158 production BUY 通过统一仲裁",
-            "consensus_status": "QLIB_HOLDING",
+            "decision_reason": f"{_baseline_label(model_name)} production BUY 通过统一仲裁",
+            "consensus_status": "BASELINE_SELF",
         }
 
-    reject_reason, consensus_status = _rule_buy_consensus_reject_reason(signal, qlib_row, config)
+    if not baselines:
+        return {
+            **common(None),
+            "decision": ACCEPTED,
+            "decision_reason": "规则BUY通过统一仲裁；未配置共识基准",
+            "consensus_status": "NO_BASELINE_REQUIRED",
+        }
+
+    consensus_row, reject_reason, consensus_status = _rule_buy_consensus(
+        signal,
+        baseline_rows,
+        config,
+        baselines,
+    )
     if reject_reason:
         return {
-            **common,
+            **common(consensus_row),
             "decision": REJECTED,
             "decision_reason": reject_reason,
             "consensus_status": consensus_status,
         }
     return {
-        **common,
+        **common(consensus_row),
         "decision": ACCEPTED,
-        "decision_reason": _accepted_rule_buy_reason(qlib_row),
-        "consensus_status": _accepted_consensus_status(qlib_row),
+        "decision_reason": _accepted_rule_buy_reason(consensus_row),
+        "consensus_status": _accepted_consensus_status(consensus_row),
     }
 
 
-def _rule_buy_consensus_reject_reason(
+def _rule_buy_consensus(
     signal: pd.Series,
-    qlib_row: pd.Series | None,
+    baseline_rows: list[pd.Series],
     config: dict,
-) -> tuple[str | None, str]:
+    baselines: list[str],
+) -> tuple[pd.Series | None, str | None, str]:
     arbiter_cfg = config.get("portfolio", {}).get("signal_arbiter", {})
-    if qlib_row is None:
+    if not baseline_rows:
         if bool(arbiter_cfg.get("block_when_missing", True)):
-            return "Qlib共识不可用: 无 alpha158 production 预测，规则BUY不进入执行", "MISSING"
-        return None, "MISSING_ALLOWED"
+            baseline_text = ", ".join(baselines)
+            return None, f"Qlib共识不可用: 无 {baseline_text} production 预测，规则BUY不进入执行", "MISSING"
+        return None, None, "MISSING_ALLOWED"
 
-    pred_date = _as_date(qlib_row.get("prediction_date"))
     signal_date = _as_date(signal.get("signal_date"))
     max_stale_days = int(arbiter_cfg.get("max_prediction_stale_days", 3) or 0)
-    stale_days = max((signal_date - pred_date).days, 0) if pred_date and signal_date else 9999
-    if stale_days > max_stale_days:
-        return (
-            f"Qlib共识过期: prediction_date={pred_date}, signal_date={signal_date}, stale_days={stale_days}",
-            "STALE",
-        )
-
-    rank = _to_int(qlib_row.get("rank"))
-    confidence = _to_float(qlib_row.get("confidence"))
     max_rank = int(arbiter_cfg.get("max_rule_buy_rank", 500) or 500)
     min_confidence = float(arbiter_cfg.get("min_rule_buy_confidence", 0.45) or 0.0)
-    if rank is None or rank > max_rank or confidence < min_confidence:
+    freshest_stale_row: pd.Series | None = None
+    first_divergent_row: pd.Series | None = None
+
+    for baseline_row in baseline_rows:
+        pred_date = _as_date(baseline_row.get("prediction_date"))
+        stale_days = max((signal_date - pred_date).days, 0) if pred_date and signal_date else 9999
+        if stale_days > max_stale_days:
+            freshest_stale_row = baseline_row if freshest_stale_row is None else freshest_stale_row
+            continue
+
+        rank = _to_int(baseline_row.get("rank"))
+        confidence = _to_float(baseline_row.get("confidence"))
+        if rank is not None and rank <= max_rank and confidence >= min_confidence:
+            return baseline_row, None, "CONSENSUS"
+        first_divergent_row = baseline_row if first_divergent_row is None else first_divergent_row
+
+    if first_divergent_row is not None:
+        rank = _to_int(first_divergent_row.get("rank"))
+        confidence = _to_float(first_divergent_row.get("confidence"))
         rank_text = "-" if rank is None else str(rank)
+        label = _baseline_label(str(first_divergent_row.get("model_name") or "Qlib"))
         return (
-            f"Qlib共识不足: rank={rank_text} > {max_rank} 或 confidence={confidence:.2f} < {min_confidence:.2f}",
+            first_divergent_row,
+            f"Qlib共识不足: {label} rank={rank_text} > {max_rank} 或 confidence={confidence:.2f} < {min_confidence:.2f}",
             "DIVERGENCE",
         )
-    return None, "CONSENSUS"
+
+    stale_row = freshest_stale_row or baseline_rows[0]
+    pred_date = _as_date(stale_row.get("prediction_date"))
+    stale_days = max((signal_date - pred_date).days, 0) if pred_date and signal_date else 9999
+    label = _baseline_label(str(stale_row.get("model_name") or "Qlib"))
+    return (
+        stale_row,
+        f"Qlib共识过期: {label} prediction_date={pred_date}, signal_date={signal_date}, stale_days={stale_days}",
+        "STALE",
+    )
 
 
 def _accepted_rule_buy_reason(qlib_row: pd.Series | None) -> str:
@@ -221,7 +341,8 @@ def _accepted_rule_buy_reason(qlib_row: pd.Series | None) -> str:
         return "规则BUY通过统一仲裁；Qlib缺失但配置允许"
     rank = _to_int(qlib_row.get("rank"))
     confidence = _to_float(qlib_row.get("confidence"))
-    return f"规则BUY通过统一仲裁；Alpha158 rank={rank}, confidence={confidence:.2f}"
+    label = _baseline_label(str(qlib_row.get("model_name") or "Qlib"))
+    return f"规则BUY通过统一仲裁；{label} rank={rank}, confidence={confidence:.2f}"
 
 
 def _accepted_consensus_status(qlib_row: pd.Series | None) -> str:
@@ -229,6 +350,26 @@ def _accepted_consensus_status(qlib_row: pd.Series | None) -> str:
         return "MISSING_ALLOWED"
     rank = _to_int(qlib_row.get("rank")) or 999999
     return "CONSENSUS" if rank <= 100 else "NEUTRAL"
+
+
+def _regime_buy_reject_reason(regime_policy: Any | None, confidence: float) -> str | None:
+    if regime_policy is None:
+        return None
+    regime_state = str(getattr(regime_policy, "regime_state", "unknown") or "unknown")
+    action_hint = str(getattr(regime_policy, "action_hint", "") or "")
+    if not bool(getattr(regime_policy, "allow_new_buys", False)):
+        return f"宏观风控暂停BUY: {regime_state}; {action_hint}"
+    min_confidence = float(getattr(regime_policy, "min_buy_confidence", 0.0) or 0.0)
+    if confidence < min_confidence:
+        return (
+            f"宏观风控提高BUY门槛: {regime_state}; "
+            f"confidence={confidence:.2f} < {min_confidence:.2f}; {action_hint}"
+        )
+    return None
+
+
+def _baseline_label(model_name: str) -> str:
+    return "Alpha158" if model_name == "alpha158" else model_name
 
 
 def _reject_buys_when_symbol_has_sell(decisions: pd.DataFrame) -> None:
@@ -354,10 +495,17 @@ def _qlib_meta(qlib_row: pd.Series | None) -> dict[str, Any]:
     }
 
 
-def _priority_score(model_name: str, side: str, confidence: float, score: float, qlib_row: pd.Series | None) -> float:
+def _priority_score(
+    model_name: str,
+    side: str,
+    confidence: float,
+    score: float,
+    qlib_row: pd.Series | None,
+    baseline_set: set[str] | None = None,
+) -> float:
     if side in {"SELL", "SHORT"}:
         return 2.0 + confidence
-    model_bonus = 0.2 if model_name == "alpha158" else 0.0
+    model_bonus = 0.2 if model_name in (baseline_set or {"alpha158"}) else 0.0
     qlib_bonus = 0.0
     rank = _to_int(qlib_row.get("rank")) if qlib_row is not None else None
     if rank is not None and rank > 0:

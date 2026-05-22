@@ -12,7 +12,7 @@ export function SatelliteCandidatePanel({ context }: Props) {
     <div className="panel satellite-candidates">
       <div className="panel-title-block">
         <h2>Satellite 股票候选</h2>
-        <p>这里只展示已通过置信度和排序分门槛的股票 BUY 信号；低于执行门槛的记录会前置过滤。</p>
+        <p>这里只展示已通过置信度和排序分门槛的股票 BUY 信号；执行金额按目标仓位、整手和预算同口径预估。</p>
       </div>
       {context ? (
         <>
@@ -39,7 +39,7 @@ export function SatelliteCandidatePanel({ context }: Props) {
                 <thead>
                   <tr>
                     <th>标的</th>
-                    <th>一手资金</th>
+                    <th>目标 / 执行资金</th>
                     <th>置信度 / 模型</th>
                     <th>执行资格</th>
                     <th>预算状态</th>
@@ -80,6 +80,8 @@ function CandidateRow({ row }: { row: SatelliteCandidateRow }) {
   const rankScore = row.rank_score === undefined ? "-" : formatNumber(row.rank_score, 3);
   const model = row.model_name || "-";
   const gap = Number(row.budget_gap || 0) > 0 ? `缺口 ${formatCurrency(row.budget_gap)}` : "";
+  const requiredCash = row.required_cash === undefined ? "-" : formatCurrency(row.required_cash);
+  const targetCash = row.target_position_cash === undefined ? "-" : formatCurrency(row.target_position_cash);
 
   return (
     <tr>
@@ -87,7 +89,10 @@ function CandidateRow({ row }: { row: SatelliteCandidateRow }) {
         <strong>{formatInstrumentLabel(row as unknown as Record<string, unknown>)}</strong>
         <span className="muted-line">{text(row.signal_count)} 条 BUY 信号</span>
       </td>
-      <td>{formatCurrency(row.one_lot_cash)}</td>
+      <td>
+        <strong>{requiredCash}</strong>
+        <span className="muted-line">目标 {targetCash} · 一手 {formatCurrency(row.one_lot_cash)}</span>
+      </td>
       <td>
         <strong>{confidence}</strong>
         <span className="muted-line">{model} · 排序分 {rankScore}</span>
@@ -108,6 +113,6 @@ function CandidateRow({ row }: { row: SatelliteCandidateRow }) {
 
 function executionStatusClass(status: SatelliteCandidateRow["execution_status"]) {
   if (status === "executable_candidate") return "status-chip status-chip--ok";
-  if (status === "budget_blocked") return "status-chip status-chip--warn";
+  if (status === "budget_blocked" || status === "cash_blocked" || status === "lot_blocked") return "status-chip status-chip--warn";
   return "status-chip";
 }

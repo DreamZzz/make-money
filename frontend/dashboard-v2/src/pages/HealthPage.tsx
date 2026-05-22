@@ -1,5 +1,6 @@
 import { DataTable } from "../components/DataTable";
 import { JobRunTimeline } from "../components/JobRunTimeline";
+import { RegimePolicyPanel } from "../components/RegimePolicyPanel";
 import type { HealthSnapshot } from "../types";
 
 type Props = {
@@ -32,6 +33,7 @@ export function HealthPage({ data }: Props) {
           ]}
         />
       </section>
+      <RegimePolicyPanel policy={data.regime_policy} />
       <section className="panel">
         <h2>定时执行历史</h2>
         <DataTable

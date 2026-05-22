@@ -683,6 +683,7 @@ CREATE TABLE IF NOT EXISTS allocation_plans (
     cash                 DOUBLE,
     core_target_pct      DOUBLE,
     satellite_target_pct DOUBLE,
+    cash_target_pct      DOUBLE DEFAULT 0,
     core_value           DOUBLE,
     satellite_value      DOUBLE,
     core_budget          DOUBLE,

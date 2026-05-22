@@ -1,4 +1,6 @@
 import { DataTable } from "../components/DataTable";
+import { CapitalBreakdown } from "../components/CapitalBreakdown";
+import { RegimePolicyPanel } from "../components/RegimePolicyPanel";
 import type { PortfolioSnapshot, RiskAlert } from "../types";
 import { fieldLabel, formatCurrency, formatPercent, formatValueForField, text } from "../utils";
 
@@ -16,11 +18,15 @@ export function PortfolioPage({ data }: Props) {
         </div>
       </div>
       <div className="account-strip">
-        <strong>总资产 {formatCurrency(data.account.total_value)}</strong>
-        <span>现金 {formatCurrency(data.account.cash)}</span>
-        <span>持仓 {formatCurrency(data.account.position_value)}</span>
+        <strong>统一总资产 {formatCurrency(data.capital?.unified_total_value ?? data.account.total_value)}</strong>
+        <span>现金 {formatCurrency(data.capital?.cash ?? data.account.cash)}</span>
+        <span>Core基金市值 {formatCurrency(data.capital?.core_value)}</span>
+        <span>Satellite股票市值 {formatCurrency(data.capital?.satellite_value ?? data.account.position_value)}</span>
+        <span>股票纸盘资产 {formatCurrency(data.capital?.trading_account_total_value ?? data.account.total_value)}</span>
         <span>回撤 {formatPercent(data.account.drawdown)}</span>
       </div>
+      <CapitalBreakdown capital={data.capital} />
+      <RegimePolicyPanel policy={data.regime_policy} compact />
       <section className="two-column">
         <div className="panel">
           <h2>风险处置清单</h2>

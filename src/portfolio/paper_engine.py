@@ -9,6 +9,7 @@ import pandas as pd
 from loguru import logger
 
 from src.portfolio.execution_guards import check_open_tradeable
+from src.portfolio.execution_preview import estimate_buy_execution
 
 
 def _load_config():
@@ -140,6 +141,24 @@ def _mark_signal_handled(
     """, [execution_price, execution_date, status, status_reason, signal_id])
 
 
+def _mark_signal_deferred(
+    conn: duckdb.DuckDBPyConnection,
+    signal_id: str,
+    execution_date: date,
+    status: str,
+    status_reason: str,
+) -> None:
+    conn.execute("""
+        UPDATE signals
+        SET executed = FALSE,
+            execution_date = ?,
+            status = ?,
+            status_reason = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE signal_id = ?
+    """, [execution_date, status, status_reason, signal_id])
+
+
 def _load_pending_signals(
     conn: duckdb.DuckDBPyConnection,
     strategy_name: str | None,
@@ -240,6 +259,7 @@ def _run_signal_batch(
 
     from src.data_pipeline.loader import get_connection, init_db
     from src.portfolio.cashbook import get_account_summary, get_available_cash
+    from src.portfolio.regime_policy import load_latest_regime_policy
     from src.signals.arbiter import arbitrate_pending_signals
     from src.signals.lifecycle import expire_stale_signals
 
@@ -255,6 +275,7 @@ def _run_signal_batch(
         in_transaction = True
         expire_stale_signals(conn)
         arbitrate_pending_signals(conn, config=config)
+        regime_policy = load_latest_regime_policy(conn, config=config)
         signals = _load_pending_signals(conn, strategy_name, market)
 
         if signals.empty:
@@ -331,6 +352,19 @@ def _run_signal_batch(
                 stats["skipped_no_price"] += 1
                 logger.warning(f"No open price for {sym} on {next_day}")
                 continue
+            if signal_market == "CN" and order_side == "BUY" and pd.isna(quote.get("pre_close")):
+                stats["skipped_untradeable"] += 1
+                _mark_signal_handled(
+                    conn,
+                    sig["signal_id"],
+                    next_day,
+                    status="NO_ACTION",
+                    status_reason="缺少昨收价，无法判断A股涨跌停，开盘BUY跳过",
+                )
+                stats["handled_without_order"] += 1
+                handled_trade_keys.add(trade_key)
+                logger.info(f"  跳过 {sym} {side}：缺少昨收价，无法判断A股涨跌停")
+                continue
             tradeability = check_open_tradeable(
                 price,
                 quote.get("pre_close"),
@@ -353,10 +387,29 @@ def _run_signal_batch(
                 continue
 
             max_position = sig["max_position_pct"] if sig["max_position_pct"] else 0.05
+            market_key = "cn" if signal_market == "CN" else "hk"
+            cost_cfg = config["markets"].get(market_key, config["markets"]["cn"])
+            commission = float(cost_cfg["commission_rate"])
+            stamp_duty = float(cost_cfg.get("stamp_duty_rate", 0))
+            min_fee = 5.0 if signal_market == "CN" else 10.0
 
             if side == "BUY":
                 score = float(sig["score"] or 0)
                 confidence = float(sig["confidence"] or 0)
+                regime_block_reason = _regime_buy_block_reason(regime_policy, confidence)
+                if regime_block_reason:
+                    stats["skipped_profile"] += 1
+                    _mark_signal_handled(
+                        conn,
+                        sig["signal_id"],
+                        next_day,
+                        status="NO_ACTION",
+                        status_reason=regime_block_reason,
+                    )
+                    stats["handled_without_order"] += 1
+                    handled_trade_keys.add(trade_key)
+                    logger.info(f"  跳过 {sym} BUY：{regime_block_reason}")
+                    continue
                 rank_score = confidence * max(score, 0)
                 min_conf = float(portfolio_cfg.get("min_rebalance_buy_confidence", 0.75))
                 min_rank = float(portfolio_cfg.get("min_rebalance_buy_rank_score", 0.50))
@@ -405,13 +458,23 @@ def _run_signal_batch(
                 max_position = min(float(max_position), allowed_cap)
 
                 target_value = current_total * max_position
-                lots = int(target_value / price / 100)
-                if lots == 0:
+                preview = estimate_buy_execution(
+                    conn=conn,
+                    symbol=sym,
+                    trade_date=next_day,
+                    current_total=current_total,
+                    max_position_pct=max_position,
+                    available_cash=session_cash,
+                    satellite_budget=satellite_budget_remaining,
+                    market=signal_market,
+                    price=price,
+                    commission_rate=commission,
+                    min_fee=min_fee,
+                )
+                qty = int(preview["rounded_qty"])
+                if qty == 0:
                     stats["skipped_lot"] += 1
-                    reason = (
-                        f"不足一手: 仓位 {max_position*100:.0f}% × 总资产 {current_total:,.0f} = "
-                        f"{target_value:,.0f}，不足一手 ({price:.0f}×100={price*100:,.0f})"
-                    )
+                    reason = preview["block_reason"]
                     _mark_signal_handled(
                         conn,
                         sig["signal_id"],
@@ -426,20 +489,14 @@ def _run_signal_batch(
                         f"{target_value:,.0f}，不足一手 ({price:.0f}×100={price*100:,.0f})"
                     )
                     continue
-                qty = lots * 100
 
             elif side in {"SELL", "SHORT"}:
                 qty = held_qty
             else:
                 continue
 
-            market_key = "cn" if signal_market == "CN" else "hk"
-            cost_cfg = config["markets"].get(market_key, config["markets"]["cn"])
-            commission = float(cost_cfg["commission_rate"])
-            stamp_duty = float(cost_cfg.get("stamp_duty_rate", 0))
             execution_value = float(qty * price)
             execution_cost = float(execution_value * (commission + (stamp_duty if order_side == "SELL" else 0)))
-            min_fee = 5.0 if signal_market == "CN" else 10.0
             if execution_cost < min_fee:
                 execution_cost = min_fee
 
@@ -466,6 +523,16 @@ def _run_signal_batch(
                     continue
                 if satellite_budget_remaining is not None and required > satellite_budget_remaining + 1e-9:
                     stats["skipped_budget"] += 1
+                    reason = f"Satellite预算不足: 剩余 {satellite_budget_remaining:,.0f} < 需要 {required:,.0f}"
+                    _mark_signal_deferred(
+                        conn,
+                        sig["signal_id"],
+                        next_day,
+                        status="DEFERRED_BUDGET",
+                        status_reason=reason,
+                    )
+                    stats["handled_without_order"] += 1
+                    handled_trade_keys.add(trade_key)
                     logger.warning(
                         f"  跳过 {sym} BUY：satellite预算不足 "
                         f"(剩余 {satellite_budget_remaining:,.0f} < 需要 {required:,.0f})"
@@ -527,6 +594,22 @@ def _run_signal_batch(
         raise
     finally:
         conn.close()
+
+
+def _regime_buy_block_reason(regime_policy: object | None, confidence: float) -> str | None:
+    if regime_policy is None:
+        return None
+    regime_state = str(getattr(regime_policy, "regime_state", "unknown") or "unknown")
+    action_hint = str(getattr(regime_policy, "action_hint", "") or "")
+    if not bool(getattr(regime_policy, "allow_new_buys", False)):
+        return f"宏观风控暂停BUY: {regime_state}; {action_hint}"
+    min_confidence = float(getattr(regime_policy, "min_buy_confidence", 0.0) or 0.0)
+    if confidence < min_confidence:
+        return (
+            f"宏观风控提高BUY门槛: {regime_state}; "
+            f"confidence={confidence:.2f} < {min_confidence:.2f}; {action_hint}"
+        )
+    return None
 
 
 def run(strategy_name: str, initial_capital: float | None = None, market: str = "CN") -> dict:

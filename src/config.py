@@ -96,10 +96,20 @@ DEFAULT_CONFIG = {
         "max_daily_turnover_pct": 0.30,
         "signal_arbiter": {
             "enabled": True,
+            "consensus_baselines": ["alpha158"],
             "max_prediction_stale_days": 3,
             "max_rule_buy_rank": 500,
             "min_rule_buy_confidence": 0.45,
             "block_when_missing": True,
+        },
+        "regime_policy": {
+            "enabled": False,
+            "benchmark_index": "000300",
+            "lookback_days": 260,
+            "fast_window": 20,
+            "slow_window": 120,
+            "vol_window": 20,
+            "drawdown_window": 120,
         },
         "risk_profile": "auto",
         "risk_profiles": {

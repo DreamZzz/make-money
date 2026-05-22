@@ -188,6 +188,17 @@ def test_resolve_qlib_python_prefers_explicit_env(monkeypatch):
     assert jm._resolve_qlib_python("/default", candidates=["/other"]) == "/custom/qlib-python"
 
 
+def test_resolve_qlib_python_prefers_project_venv_by_default(monkeypatch):
+    monkeypatch.delenv("QLIB_PYTHON", raising=False)
+    project_venv = str(jm.PROJECT_ROOT / ".venv-qlib" / "bin" / "python")
+    monkeypatch.setattr(jm, "_python_can_import", lambda python, module: python == project_venv and module == "qlib")
+    monkeypatch.setattr(jm, "_python_is_project_compatible", lambda python: python == project_venv)
+
+    result = jm._resolve_qlib_python("/opt/python3.12")
+
+    assert result == project_venv
+
+
 def test_resolve_qlib_python_finds_candidate_that_imports_qlib(monkeypatch):
     monkeypatch.delenv("QLIB_PYTHON", raising=False)
     monkeypatch.setattr(jm, "_python_can_import", lambda python, module: python == "/usr/bin/python3" and module == "qlib")
@@ -221,10 +232,18 @@ def test_daily_close_workflow_plans_allocation_without_paper_trade():
     assert "allocation_plan" in step_keys
     assert "signal_arbiter" in step_keys
     assert "paper_trade" not in step_keys
-    assert step_keys.index("qlib_predict") < step_keys.index("signal_arbiter")
+    assert "model_prediction_gate" in step_keys
+    assert step_keys.index("qlib_predict") < step_keys.index("model_prediction_gate")
+    assert step_keys.index("model_prediction_gate") < step_keys.index("signal_arbiter")
     assert step_keys.index("signal_arbiter") < step_keys.index("allocation_plan")
     assert step_keys.index("qlib_rule_pk_ab") < step_keys.index("allocation_plan")
     assert step_keys.index("allocation_plan") < step_keys.index("recalculate_nav")
+    assert jm.SINGLE_STEPS["model_prediction_gate"].cmd == [
+        jm.PYTHON,
+        "-m",
+        "src.monitoring.model_monitor",
+        "assert-prediction-ready",
+    ]
     assert jm.SINGLE_STEPS["signal_arbiter"].cmd == [jm.PYTHON, "-m", "src.signals.arbiter"]
     assert jm.SINGLE_STEPS["allocation_plan"].cmd[:3] == [jm.PYTHON, "-m", "src.portfolio.allocator"]
 
@@ -248,6 +267,24 @@ def test_daily_close_workflow_refreshes_holding_fundamentals_before_signals():
         "-m",
         "src.portfolio.fundamentals_coverage",
         "update",
+    ]
+
+
+def test_daily_close_job_includes_field_coverage_step_after_fundamentals():
+    step_keys = [step.key for step in jm.JOB_DEFINITIONS["daily_close_workflow"].steps]
+
+    assert "fundamentals_coverage" in step_keys
+    assert "field_coverage" in step_keys
+    assert step_keys.index("fundamentals_coverage") < step_keys.index("field_coverage")
+    assert step_keys.index("field_coverage") < step_keys.index("index_funds_update")
+    assert jm.SINGLE_STEPS["field_coverage"].cmd == [
+        jm.PYTHON,
+        "-m",
+        "src.data_pipeline.field_coverage_backfill",
+        "--scopes",
+        "current_holdings,signal_candidates,target_universe",
+        "--skip-industry-fetch",
+        "--record-health",
     ]
 
 

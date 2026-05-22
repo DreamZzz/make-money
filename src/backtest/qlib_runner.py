@@ -10,8 +10,10 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import pickle
 import platform
+import shutil
 import subprocess
 import sys
 import uuid
@@ -30,6 +32,15 @@ from src.portfolio.execution_guards import check_open_tradeable
 MODEL_NAME = "alpha158"
 DEFAULT_TOP_N = 50
 _QLIB_INITIALIZED = False
+QLIB_REEXEC_COMMANDS = {
+    "status",
+    "prepare-data",
+    "run-experiment",
+    "predict-latest",
+    "refresh-production",
+    "evaluate-grid",
+    "run-candidates",
+}
 QLIB_OPEN_END_TS = pd.Timestamp("2099-12-31")
 QLIB_MARKET_INDEX_CODES = {
     "csi300": ("000300",),
@@ -90,6 +101,98 @@ def _experiment_id(mode: str) -> str:
 
 def _model_version(experiment_id: str) -> str:
     return f"alpha158-{experiment_id.split('-')[-2].lower()}-{experiment_id.split('-')[-1].lower()}"
+
+
+def _current_python_can_import_qlib() -> bool:
+    return importlib.util.find_spec("qlib") is not None
+
+
+def _python_is_compatible(python: str | Path) -> bool:
+    try:
+        result = subprocess.run(
+            [str(python), "-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _python_can_import(python: str | Path, module: str) -> bool:
+    try:
+        result = subprocess.run(
+            [str(python), "-c", f"import {module}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _qlib_python_candidates() -> list[Path | str]:
+    candidates: list[Path | str] = []
+    if os.environ.get("QLIB_PYTHON"):
+        candidates.append(os.environ["QLIB_PYTHON"])
+    candidates.extend([
+        PROJECT_ROOT / ".venv-qlib" / "bin" / "python",
+        sys.executable,
+        "python3.12",
+        "/opt/homebrew/bin/python3.12",
+        "/opt/homebrew/opt/python@3.12/bin/python3.12",
+        "python3",
+    ])
+    return candidates
+
+
+def _resolve_python_candidate(candidate: Path | str) -> str | None:
+    value = str(candidate)
+    resolved = shutil.which(value)
+    if resolved:
+        return resolved
+    return value if Path(value).exists() else None
+
+
+def _maybe_reexec_qlib_python(argv: list[str]) -> None:
+    command = argv[0] if argv else "status"
+    if command not in QLIB_REEXEC_COMMANDS:
+        return
+    if os.environ.get("MAKE_MONEY_QLIB_REEXEC") == "1":
+        return
+    if _current_python_can_import_qlib():
+        return
+
+    current = Path(sys.executable).absolute()
+    seen: set[str] = set()
+    for candidate in _qlib_python_candidates():
+        resolved = _resolve_python_candidate(candidate)
+        if not resolved or resolved in seen:
+            continue
+        seen.add(resolved)
+        candidate_path = Path(resolved)
+        if candidate_path.absolute() == current:
+            continue
+        if not (_python_is_compatible(candidate_path) and _python_can_import(candidate_path, "qlib")):
+            continue
+
+        env = os.environ.copy()
+        env["MAKE_MONEY_QLIB_REEXEC"] = "1"
+        existing_pythonpath = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = (
+            str(PROJECT_ROOT)
+            if not existing_pythonpath
+            else f"{PROJECT_ROOT}{os.pathsep}{existing_pythonpath}"
+        )
+        os.execvpe(
+            str(candidate_path),
+            [str(candidate_path), "-m", "src.backtest.qlib_runner", *argv],
+            env,
+        )
 
 
 def _qlib_import_status() -> dict[str, Any]:
@@ -624,6 +727,7 @@ def simulate_topn_open(
     holding_days: int,
     rebalance_freq: str = "daily",
     buffer_n: int | None = None,
+    max_replacements_per_rebalance: int | None = None,
     commission_rate: float = 0.00025,
     stamp_duty_rate: float = 0.001,
     market: str = "CN",
@@ -643,14 +747,14 @@ def simulate_topn_open(
     groups = []
     for dt, group in pred.groupby("datetime"):
         groups.append((pd.to_datetime(dt), group))
-    if rebalance_freq in {"weekly", "monthly"}:
+    if rebalance_freq in {"weekly", "monthly", "quarterly"}:
         sampled = {}
-        period_freq = "W-FRI" if rebalance_freq == "weekly" else "M"
+        period_freq = {"weekly": "W-FRI", "monthly": "M", "quarterly": "Q"}[rebalance_freq]
         for dt, group in groups:
             sampled[dt.to_period(period_freq)] = (dt, group)
         groups = [sampled[k] for k in sorted(sampled)]
     elif rebalance_freq != "daily":
-        raise ValueError("rebalance_freq must be daily, weekly, or monthly")
+        raise ValueError("rebalance_freq must be daily, weekly, monthly, or quarterly")
 
     current_holdings: set[str] = set()
     turnover_values: dict[pd.Timestamp, float] = {}
@@ -680,6 +784,26 @@ def simulate_topn_open(
             if sym not in kept:
                 kept.append(sym)
         new_holdings = set(kept[:top_n])
+        if (
+            max_replacements_per_rebalance is not None
+            and current_holdings
+            and len(new_holdings - current_holdings) > int(max_replacements_per_rebalance)
+        ):
+            max_replacements = max(0, int(max_replacements_per_rebalance))
+            kept_existing = [sym for sym in ranked if sym in current_holdings and sym in new_holdings]
+            additions = [sym for sym in ranked if sym in new_holdings and sym not in current_holdings]
+            retained_candidates = [sym for sym in ranked if sym in current_holdings and sym not in new_holdings]
+            limited = kept_existing + additions[:max_replacements]
+            for sym in retained_candidates:
+                if len(limited) >= top_n:
+                    break
+                limited.append(sym)
+            for sym in ranked:
+                if len(limited) >= top_n:
+                    break
+                if sym not in limited:
+                    limited.append(sym)
+            new_holdings = set(limited[:top_n])
         if not new_holdings:
             continue
 
@@ -697,7 +821,7 @@ def simulate_topn_open(
         current_holdings = new_holdings
 
     returns = pd.Series([r for _, r in daily_returns], index=pd.to_datetime([dt for dt, _ in daily_returns]))
-    periods_per_year = {"daily": 252, "weekly": 52, "monthly": 12}[rebalance_freq]
+    periods_per_year = {"daily": 252, "weekly": 52, "monthly": 12, "quarterly": 4}[rebalance_freq]
     returns.attrs["turnover"] = float(pd.Series(turnover_values).mean() * periods_per_year) if turnover_values else None
     returns.attrs["periods_per_year"] = periods_per_year
     return returns
@@ -750,14 +874,14 @@ def simulate_topn_open_constrained(
     )
 
     groups = [(pd.to_datetime(dt), group) for dt, group in pred.groupby("datetime")]
-    if rebalance_freq in {"weekly", "monthly"}:
+    if rebalance_freq in {"weekly", "monthly", "quarterly"}:
         sampled = {}
-        period_freq = "W-FRI" if rebalance_freq == "weekly" else "M"
+        period_freq = {"weekly": "W-FRI", "monthly": "M", "quarterly": "Q"}[rebalance_freq]
         for dt, group in groups:
             sampled[dt.to_period(period_freq)] = (dt, group)
         groups = [sampled[k] for k in sorted(sampled)]
     elif rebalance_freq != "daily":
-        raise ValueError("rebalance_freq must be daily, weekly, or monthly")
+        raise ValueError("rebalance_freq must be daily, weekly, monthly, or quarterly")
 
     buffer_n = max(buffer_n or top_n, top_n)
     investable_cash = account_capital * max(0.0, 1.0 - cash_reserve_pct)
@@ -878,7 +1002,7 @@ def simulate_topn_open_constrained(
         current_holdings = new_holdings
 
     returns = pd.Series([r for _, r in daily_returns], index=pd.to_datetime([dt for dt, _ in daily_returns]))
-    periods_per_year = {"daily": 252, "weekly": 52, "monthly": 12}[rebalance_freq]
+    periods_per_year = {"daily": 252, "weekly": 52, "monthly": 12, "quarterly": 4}[rebalance_freq]
     returns.attrs["turnover"] = float(pd.Series(turnover_values).mean() * periods_per_year) if turnover_values else None
     returns.attrs["periods_per_year"] = periods_per_year
     returns.attrs["constraint_profile"] = _small_account_profile_name(account_capital)
@@ -2581,6 +2705,10 @@ def _print_json(payload: dict[str, Any]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+        _maybe_reexec_qlib_python(argv)
+
     parser = argparse.ArgumentParser(description="Qlib Alpha158 research and production workflow")
     sub = parser.add_subparsers(dest="command")
 

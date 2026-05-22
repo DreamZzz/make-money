@@ -8,10 +8,62 @@ export type HealthState = {
 export type OperationSummaryData = {
   operation_count: number;
   cash_required: number;
+  reserved_cash?: number;
+  cash_commitment?: number;
+  available_cash_after_reserve?: number;
+  available_cash_after_commitment?: number;
   estimated_minutes: number;
   buy_count?: number;
   reduce_count?: number;
   funding_gap?: number;
+};
+
+export type CapitalBreakdown = {
+  scope?: string;
+  scope_label?: string;
+  scope_note?: string;
+  formula?: string;
+  unified_total_value?: number;
+  trading_account_total_value?: number;
+  trading_position_value?: number;
+  cash?: number;
+  core_value?: number;
+  satellite_value?: number;
+  core_budget?: number;
+  satellite_budget?: number;
+  reserved_cash?: number;
+  unreserved_cash?: number;
+  core_target_value?: number;
+  satellite_target_value?: number;
+  cash_target_value?: number;
+  core_target_pct?: number;
+  satellite_target_pct?: number;
+  cash_target_pct?: number;
+  reconciliation?: {
+    formula?: string;
+    computed_total?: number;
+    recorded_total?: number;
+    delta?: number;
+    trading_account_formula?: string;
+    trading_account_computed_total?: number;
+    trading_account_recorded_total?: number;
+    trading_account_delta?: number;
+  };
+};
+
+export type RegimePolicy = {
+  status?: "ok" | "not_applied" | "unavailable" | string;
+  as_of_date?: string | null;
+  regime_key?: string | null;
+  regime_label?: string;
+  stance?: string;
+  application_state?: "advisory_only" | "applied_to_plan" | "not_applied" | string;
+  buy_mode?: "normal" | "reduced" | "paused" | string;
+  satellite_budget_multiplier?: number | null;
+  signal_threshold_adjustment?: string | null;
+  reason_summary?: string;
+  source?: string;
+  evidence?: Record<string, unknown>;
 };
 
 export type RebalanceItem = {
@@ -45,6 +97,12 @@ export type SatelliteCandidateRow = {
   name?: string;
   display_name?: string;
   one_lot_cash: number;
+  target_position_cash?: number;
+  rounded_qty?: number;
+  execution_value?: number;
+  fee?: number;
+  required_cash?: number;
+  execution_price?: number;
   confidence?: number;
   score?: number;
   rank_score?: number;
@@ -54,7 +112,7 @@ export type SatelliteCandidateRow = {
   budget_gap?: number;
   budget_status?: "covered" | "over_budget" | string;
   budget_status_label?: string;
-  execution_status?: "executable_candidate" | "budget_blocked" | "below_threshold" | string;
+  execution_status?: "executable_candidate" | "budget_blocked" | "cash_blocked" | "lot_blocked" | "below_threshold" | string;
   execution_status_label?: string;
   passes_execution_threshold?: boolean;
   decision?: string;
@@ -69,6 +127,8 @@ export type SatelliteCandidateContext = {
   over_budget_count: number;
   executable_count?: number;
   budget_blocked_count?: number;
+  lot_blocked_count?: number;
+  cash_blocked_count?: number;
   threshold_blocked_count?: number;
   max_one_lot_cash?: number;
   decision_hint?: string;
@@ -117,6 +177,8 @@ export type TodaySnapshot = {
   trade_date: string | null;
   health: HealthState;
   account: Record<string, unknown>;
+  capital?: CapitalBreakdown;
+  regime_policy?: RegimePolicy;
   operation_summary: OperationSummaryData;
   blockers: RiskAlert[];
   next_action: { label: string; href?: string; enabled?: boolean };
@@ -126,6 +188,8 @@ export type TodaySnapshot = {
 export type RebalanceSnapshot = {
   plan_id: string | null;
   plan_date: string | null;
+  capital?: CapitalBreakdown;
+  regime_policy?: RegimePolicy;
   summary: OperationSummaryData;
   groups: RebalanceGroups;
   sell_signals?: SellSignalRow[];
@@ -137,6 +201,8 @@ export type RebalanceSnapshot = {
 
 export type PortfolioSnapshot = {
   account: Record<string, unknown>;
+  capital?: CapitalBreakdown;
+  regime_policy?: RegimePolicy;
   holdings: Record<string, unknown>[];
   risk_alerts: RiskAlert[];
   exposure: {
@@ -167,6 +233,7 @@ export type HealthSnapshot = HealthState & {
   field_coverage: Record<string, unknown>[];
   scheduled_jobs: Record<string, unknown>[];
   scheduled_job_history: Record<string, unknown>[];
+  regime_policy?: RegimePolicy;
   qlib: Record<string, unknown>;
   latest_job: Record<string, unknown> | null;
   failure_diagnostic: Record<string, unknown> | null;

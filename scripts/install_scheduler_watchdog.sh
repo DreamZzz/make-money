@@ -47,7 +47,42 @@ _resolve_python() {
   exit 1
 }
 
+_python_can_import() {
+  "$1" - "$2" <<'PY' >/dev/null 2>&1
+import importlib.util
+import sys
+raise SystemExit(0 if importlib.util.find_spec(sys.argv[1]) is not None else 1)
+PY
+}
+
+_resolve_qlib_python() {
+  if [ -n "${QLIB_PYTHON:-}" ]; then
+    if _python_is_compatible "$QLIB_PYTHON" && _python_can_import "$QLIB_PYTHON" qlib; then
+      echo "$QLIB_PYTHON"
+      return
+    fi
+    echo "QLIB_PYTHON=$QLIB_PYTHON is not Python 3.12+ with qlib; falling back to project resolver." >&2
+  fi
+
+  for candidate in "$PROJECT/.venv-qlib/bin/python" "$1" python3.12 /opt/homebrew/bin/python3.12 /opt/homebrew/opt/python@3.12/bin/python3.12 python3; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      resolved="$(command -v "$candidate")"
+    elif [ -x "$candidate" ]; then
+      resolved="$candidate"
+    else
+      continue
+    fi
+    if _python_is_compatible "$resolved" && _python_can_import "$resolved" qlib; then
+      echo "$resolved"
+      return
+    fi
+  done
+
+  echo "$1"
+}
+
 PYTHON_BIN="$(_resolve_python)"
+QLIB_PYTHON_BIN="$(_resolve_qlib_python "$PYTHON_BIN")"
 mkdir -p "$OUTPUT_DIR" "$HOME/Library/LaunchAgents"
 
 for old_label in "${OLD_LABELS[@]}"; do
@@ -85,6 +120,8 @@ cat > "$PLIST" <<PLIST
   <dict>
     <key>PYTHON</key>
     <string>$PYTHON_BIN</string>
+    <key>QLIB_PYTHON</key>
+    <string>$QLIB_PYTHON_BIN</string>
     <key>PYTHONPATH</key>
     <string>$PROJECT</string>
     <key>PATH</key>

@@ -9,6 +9,7 @@ from src.research.strategies.value_quality import (
     generate_signals,
     load_fundamentals_snapshot,
     measure_return_correlation,
+    select_value_quality_symbols,
     simulate_topn_equal_weight_returns,
 )
 
@@ -55,6 +56,43 @@ def test_compute_value_quality_scores_prefers_low_valuation_high_quality():
     assert scored.set_index("symbol").loc["000001", "score"] > scored.set_index("symbol").loc["000002", "score"]
 
 
+def test_value_quality_industry_neutral_score_compares_within_industry():
+    fundamentals = pd.DataFrame({
+        "symbol": ["A", "B", "C", "D"],
+        "trade_date": pd.to_datetime(["2026-03-31"] * 4),
+        "industry": ["bank", "bank", "tech", "tech"],
+        "pe_ttm": [5.0, 8.0, 30.0, 50.0],
+        "pb": [0.5, 0.8, 4.0, 8.0],
+        "roe": [0.12, 0.08, 0.20, 0.10],
+        "net_margin": [0.30, 0.20, 0.15, 0.05],
+        "debt_ratio": [0.85, 0.88, 0.20, 0.35],
+        "market_cap": [1e11, 8e10, 5e10, 3e10],
+        "amount": [1e8, 1e8, 1e8, 1e8],
+    })
+
+    scored = compute_value_quality_scores(fundamentals, industry_neutral=True).set_index("symbol")
+
+    assert scored.loc["A", "score"] > scored.loc["B", "score"]
+    assert scored.loc["C", "score"] > scored.loc["D", "score"]
+    assert "industry" in scored.columns
+
+
+def test_value_quality_keeps_prior_holding_inside_retention_band():
+    scores = pd.DataFrame({
+        "symbol": ["A", "B", "C"],
+        "score": [0.90, 0.88, 0.70],
+    })
+
+    selected = select_value_quality_symbols(
+        scores,
+        top_n=2,
+        prior_symbols={"C"},
+        retention_quantile=0.30,
+    )
+
+    assert selected == ["A", "C"]
+
+
 def test_generate_signals_emits_standard_value_quality_buy_rows():
     scored = pd.DataFrame([
         {
@@ -85,6 +123,15 @@ def test_generate_signals_emits_standard_value_quality_buy_rows():
     assert row["horizon"] == "20d"
     assert row["confidence"] == pytest.approx(0.91)
     assert "value_quality" in row["risk_tags"]
+
+
+def test_value_quality_remains_research_only():
+    import inspect
+
+    import src.signals.generator as generator
+
+    source = inspect.getsource(generator.generate_all)
+    assert "value_quality" not in source
 
 
 def test_simulate_topn_returns_and_correlation_against_reference():

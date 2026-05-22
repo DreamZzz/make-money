@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import date
+from datetime import date, timedelta
 
 import duckdb
 import pandas as pd
@@ -35,6 +35,19 @@ def _patch_temp_db(monkeypatch, tmp_path, portfolio_overrides: dict | None = Non
     return str(db_path)
 
 
+def _seed_alpha158_production_model(
+    conn: duckdb.DuckDBPyConnection,
+    experiment_id: str = "EXP-PROD",
+    model_version: str = "alpha158-prod",
+) -> None:
+    conn.execute("""
+        INSERT INTO qlib_model_registry (
+            model_version, experiment_id, model_name, status, market, published_at
+        )
+        VALUES (?, ?, 'alpha158', 'production', 'CN', TIMESTAMP '2024-01-02 18:00:00')
+    """, [model_version, experiment_id])
+
+
 def _seed_paper_engine_failure_db(db_path: str) -> None:
     conn = duckdb.connect(db_path)
     init_db(conn)
@@ -55,6 +68,7 @@ def _seed_paper_engine_failure_db(db_path: str) -> None:
         )
         VALUES ('default', DATE '2024-01-02', 100000, 0, 100000, 100000, 1, 0, 0)
     """)
+    _seed_alpha158_production_model(conn)
     conn.execute("""
         INSERT INTO qlib_predictions (
             experiment_id, model_name, model_version, mode, prediction_date,
@@ -156,8 +170,8 @@ def test_paper_engine_marks_unaffordable_lot_as_no_action(monkeypatch, tmp_path)
     init_db(conn)
     conn.execute("INSERT INTO stock_info (symbol, country, name) VALUES ('688001', 'CN', '高价股')")
     conn.execute("""
-        INSERT INTO daily_price (symbol, trade_date, open, high, low, close, volume)
-        VALUES ('688001', DATE '2024-01-03', 1000, 1000, 1000, 1000, 1000)
+        INSERT INTO daily_price (symbol, trade_date, open, high, low, close, pre_close, volume)
+        VALUES ('688001', DATE '2024-01-03', 1000, 1000, 1000, 1000, 1000, 1000)
     """)
     conn.execute("""
         INSERT INTO account_daily (
@@ -198,6 +212,43 @@ def test_paper_engine_marks_unaffordable_lot_as_no_action(monkeypatch, tmp_path)
     assert row[3] == date(2024, 1, 3)
 
 
+def test_execution_preview_explains_target_position_lot_requirement(monkeypatch, tmp_path):
+    db_path = _patch_temp_db(monkeypatch, tmp_path)
+    conn = duckdb.connect(db_path)
+    init_db(conn)
+    conn.execute("INSERT INTO stock_info (symbol, country, name) VALUES ('002281', 'CN', '光迅科技')")
+    conn.execute("""
+        INSERT INTO daily_price (symbol, trade_date, open, close, pre_close, high, low, volume)
+        VALUES ('002281', DATE '2026-05-21', 230.15, 221.52, 229.01, 232, 220, 1000)
+    """)
+    conn.close()
+
+    from src.portfolio.execution_preview import estimate_buy_execution
+
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        row = estimate_buy_execution(
+            conn=conn,
+            symbol="002281",
+            trade_date=date(2026, 5, 21),
+            current_total=289_977,
+            max_position_pct=0.05,
+            available_cash=118_205,
+            satellite_budget=0,
+            market="CN",
+        )
+    finally:
+        conn.close()
+
+    assert row["display_name"] == "光迅科技（002281）"
+    assert row["one_lot_cash"] == 23015.0
+    assert row["target_position_cash"] == 14498.85
+    assert row["rounded_qty"] == 0
+    assert row["required_cash"] == 0
+    assert row["status"] == "BLOCKED_LOT"
+    assert "5%目标仓位" in row["block_reason"]
+
+
 def test_paper_engine_respects_small_account_stock_count_limit(monkeypatch, tmp_path):
     db_path = _patch_temp_db(monkeypatch, tmp_path, {"risk_profile": "small"})
     conn = duckdb.connect(db_path)
@@ -205,11 +256,11 @@ def test_paper_engine_respects_small_account_stock_count_limit(monkeypatch, tmp_
     rows = ", ".join([f"('00000{i}', 'CN', '持仓{i}')" for i in range(1, 7)])
     conn.execute(f"INSERT INTO stock_info (symbol, country, name) VALUES {rows}")
     price_rows = ", ".join([
-        f"('00000{i}', DATE '2024-01-03', 10, 10, 10, 10, 1000)"
+        f"('00000{i}', DATE '2024-01-03', 10, 10, 10, 10, 10, 1000)"
         for i in range(1, 7)
     ])
     conn.execute(f"""
-        INSERT INTO daily_price (symbol, trade_date, open, high, low, close, volume)
+        INSERT INTO daily_price (symbol, trade_date, open, high, low, close, pre_close, volume)
         VALUES {price_rows}
     """)
     conn.execute("""
@@ -309,6 +360,44 @@ def test_paper_engine_marks_cn_limit_open_as_no_action(monkeypatch, tmp_path):
     assert orders == 0
 
 
+def test_paper_engine_blocks_cn_buy_when_pre_close_missing(monkeypatch, tmp_path):
+    db_path = _patch_temp_db(monkeypatch, tmp_path)
+    conn = duckdb.connect(db_path)
+    init_db(conn)
+    conn.execute("INSERT INTO stock_info (symbol, country, name) VALUES ('000001', 'CN', '缺昨收')")
+    conn.execute("""
+        INSERT INTO daily_price (symbol, trade_date, open, close, pre_close, high, low, volume)
+        VALUES ('000001', DATE '2026-05-21', 11, 11, NULL, 11, 11, 1000)
+    """)
+    conn.execute("""
+        INSERT INTO account_daily (
+            account_id, trade_date, cash, position_value, total_value,
+            net_contribution, nav, daily_return, drawdown
+        )
+        VALUES ('default', DATE '2026-05-20', 100000, 0, 100000, 100000, 1, 0, 0)
+    """)
+    conn.execute("""
+        INSERT INTO signals (
+            signal_id, model_name, model_version, symbol, signal_ts,
+            side, score, confidence, max_position_pct, executed, status
+        )
+        VALUES ('missing_preclose_buy', 'alpha158', 'alpha158-prod', '000001',
+                TIMESTAMP '2026-05-20 15:00:00', 'BUY', 1, 1, 0.10, FALSE, 'ACTIVE')
+    """)
+    conn.close()
+
+    result = pe.run("alpha158", market="CN")
+
+    assert result["executed"] == 0
+    assert result["skipped_untradeable"] == 1
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        reason = conn.execute("SELECT status_reason FROM signals WHERE signal_id = 'missing_preclose_buy'").fetchone()[0]
+    finally:
+        conn.close()
+    assert "缺少昨收价" in reason
+
+
 def test_paper_engine_caps_buys_by_latest_satellite_budget(monkeypatch, tmp_path):
     db_path = _patch_temp_db(monkeypatch, tmp_path)
     conn = duckdb.connect(db_path)
@@ -358,7 +447,7 @@ def test_paper_engine_caps_buys_by_latest_satellite_budget(monkeypatch, tmp_path
 
     assert result["executed"] == 1
     assert result["skipped_budget"] == 1
-    assert result["pending"] == 1
+    assert result["pending"] == 0
 
     conn = duckdb.connect(db_path, read_only=True)
     try:
@@ -376,7 +465,65 @@ def test_paper_engine_caps_buys_by_latest_satellite_budget(monkeypatch, tmp_path
         conn.close()
 
     assert orders == [("buy_budget_first", "BUY", 10000.0)]
-    assert statuses == {"buy_budget_first": "FILLED", "buy_budget_second": "ACTIVE"}
+    assert statuses == {"buy_budget_first": "FILLED", "buy_budget_second": "DEFERRED_BUDGET"}
+
+
+def test_paper_engine_marks_budget_blocked_signal_as_deferred(monkeypatch, tmp_path):
+    db_path = _patch_temp_db(monkeypatch, tmp_path)
+    conn = duckdb.connect(db_path)
+    init_db(conn)
+    conn.execute("INSERT INTO stock_info (symbol, country, name) VALUES ('688126', 'CN', '沪硅产业')")
+    conn.execute("""
+        INSERT INTO daily_price (symbol, trade_date, open, close, pre_close, high, low, volume)
+        VALUES ('688126', DATE '2026-05-21', 30.01, 30.39, 30.00, 30.50, 29.80, 1000)
+    """)
+    conn.execute("""
+        INSERT INTO account_daily (
+            account_id, trade_date, cash, position_value, total_value,
+            net_contribution, nav, daily_return, drawdown
+        )
+        VALUES ('default', DATE '2026-05-20', 118205, 171772, 289977, 300000, 0.9666, 0, -0.0334)
+    """)
+    conn.execute("""
+        INSERT INTO allocation_plans (
+            plan_id, plan_date, account_id, total_value, cash, core_target_pct, satellite_target_pct,
+            core_value, satellite_value, core_budget, satellite_budget, core_drift_pct, satellite_drift_pct
+        )
+        VALUES ('PLAN-ZERO-SAT', DATE '2026-05-20', 'default', 485580, 118205, 0.6, 0.4,
+                195603, 171772, 95745, 0, -0.19, -0.04)
+    """)
+    conn.execute("""
+        INSERT INTO signals (
+            signal_id, model_name, model_version, symbol, signal_ts,
+            side, score, confidence, max_position_pct, executed, status
+        )
+        VALUES ('budget_blocked_buy', 'alpha158', 'alpha158-prod', '688126',
+                TIMESTAMP '2026-05-20 15:00:00', 'BUY', 0.9, 0.9, 0.05, FALSE, 'ACTIVE')
+    """)
+    conn.close()
+
+    result = pe.run("alpha158", market="CN")
+
+    assert result["executed"] == 0
+    assert result["skipped_budget"] == 1
+    assert result["pending"] == 0
+
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        row = conn.execute("""
+            SELECT executed, status, status_reason
+            FROM signals WHERE signal_id = 'budget_blocked_buy'
+        """).fetchone()
+        from scripts.open_paper_trade import _load_target_symbols
+
+        open_targets = _load_target_symbols(conn)
+    finally:
+        conn.close()
+
+    assert row[0] is False
+    assert row[1] == "DEFERRED_BUDGET"
+    assert "Satellite预算不足" in row[2]
+    assert ("688126", "CN") not in open_targets
 
 
 def test_paper_engine_allows_sells_when_satellite_budget_is_zero(monkeypatch, tmp_path):
@@ -636,6 +783,7 @@ def test_paper_engine_deduplicates_same_strategy_symbol_side_execution_day(monke
         VALUES ('EXP-DUP', 'alpha158', 'alpha158-prod', 'production_inference',
                 DATE '2024-01-02', '600808', 0.8, 10, 0.80, TRUE)
     """)
+    _seed_alpha158_production_model(conn, experiment_id="EXP-DUP")
     conn.execute("""
         INSERT INTO signals (
             signal_id, model_name, model_version, symbol, signal_ts,
@@ -764,6 +912,7 @@ def test_paper_engine_allows_rule_buy_when_fresh_qlib_prediction_agrees(monkeypa
         VALUES ('EXP-PROD', 'alpha158', 'alpha158-prod', 'production_inference',
                 DATE '2024-01-02', '000001', 0.8, 10, 0.80, TRUE)
     """)
+    _seed_alpha158_production_model(conn)
     conn.execute("""
         INSERT INTO signals (
             signal_id, model_name, model_version, symbol, signal_ts,
@@ -788,6 +937,93 @@ def test_paper_engine_allows_rule_buy_when_fresh_qlib_prediction_agrees(monkeypa
         conn.close()
 
     assert orders == [("rule_buy_high_qlib", "000001", "BUY", 10000.0)]
+
+
+def test_paper_engine_regime_policy_blocks_previously_accepted_buy(monkeypatch, tmp_path):
+    db_path = _patch_temp_db(
+        monkeypatch,
+        tmp_path,
+        portfolio_overrides={
+            "regime_policy": {
+                "enabled": True,
+                "benchmark_index": "000300",
+                "lookback_days": 260,
+            }
+        },
+    )
+    conn = duckdb.connect(db_path)
+    init_db(conn)
+    conn.execute("INSERT INTO stock_info (symbol, country, name) VALUES ('000001', 'CN', '宏观挡板')")
+    conn.execute("""
+        INSERT INTO daily_price (symbol, trade_date, open, high, low, close, pre_close, volume)
+        VALUES ('000001', DATE '2026-05-11', 10, 10, 10, 10, 10, 1000)
+    """)
+    close = 100.0
+    rows = []
+    start = date(2026, 1, 1)
+    for offset in range(130):
+        trade_date = start + timedelta(days=offset)
+        close *= 0.998
+        if offset == 129:
+            close = 70.0
+        rows.append(("000300", trade_date, close))
+    conn.executemany(
+        "INSERT INTO index_daily (index_code, trade_date, close) VALUES (?, ?, ?)",
+        rows,
+    )
+    conn.execute("""
+        INSERT INTO account_daily (
+            account_id, trade_date, cash, position_value, total_value,
+            net_contribution, nav, daily_return, drawdown
+        )
+        VALUES ('default', DATE '2026-05-10', 100000, 0, 100000, 100000, 1, 0, 0)
+    """)
+    conn.execute("""
+        INSERT INTO signals (
+            signal_id, model_name, model_version, symbol, signal_ts,
+            side, score, confidence, max_position_pct, executed, status
+        )
+        VALUES ('accepted_before_regime', 'alpha158', '1.0', '000001',
+                TIMESTAMP '2026-05-10 15:00:00', 'BUY', 1, 0.95, 0.10, FALSE, 'ACTIVE')
+    """)
+    conn.execute("""
+        INSERT INTO signal_decisions (
+            decision_id, signal_id, decision_date, model_name, symbol, side,
+            signal_ts, decision, decision_reason, consensus_status,
+            arbiter_version, priority_score
+        )
+        VALUES (
+            'DEC-OLD', 'accepted_before_regime', DATE '2026-05-10', 'alpha158', '000001', 'BUY',
+            TIMESTAMP '2026-05-10 15:00:00', 'ACCEPTED', '旧仲裁通过', 'BASELINE_SELF',
+            'signal_arbiter_v1', 1.2
+        )
+    """)
+    conn.close()
+
+    import src.signals.arbiter as signal_arbiter
+
+    monkeypatch.setattr(signal_arbiter, "arbitrate_pending_signals", lambda *_args, **_kwargs: None)
+
+    result = pe.run("alpha158", market="CN")
+
+    assert result["executed"] == 0
+    assert result["handled_without_order"] == 1
+    assert result["pending"] == 0
+
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        order_count = conn.execute("SELECT COUNT(*) FROM paper_orders").fetchone()[0]
+        signal = conn.execute("""
+            SELECT executed, status, status_reason
+            FROM signals WHERE signal_id = 'accepted_before_regime'
+        """).fetchone()
+    finally:
+        conn.close()
+
+    assert order_count == 0
+    assert signal[0] is True
+    assert signal[1] == "NO_ACTION"
+    assert "宏观风控暂停BUY" in signal[2]
 
 
 def test_prioritize_signals_releases_cash_before_older_buys():

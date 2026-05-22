@@ -25,6 +25,7 @@ from src.dashboard.signal_outcome_service import load_signal_outcome_snapshot
 from src.data_pipeline.loader import get_connection, init_db
 from src.index_funds.performance import add_snapshot
 from src.portfolio.cashbook import add_cashflow
+from src.portfolio.execution_preview import estimate_buy_execution
 from src.portfolio.exposure_monitor import load_exposure_snapshot
 
 
@@ -48,7 +49,9 @@ class DashboardV2Service:
             latest_date = _latest_trade_date(conn)
             account = _load_account_summary(conn)
             plan = _load_latest_plan(conn)
-            operation_summary = _build_operation_summary(plan["items"])
+            capital = _build_capital_breakdown(account, plan)
+            regime_policy = _load_regime_policy_contract(conn, plan)
+            operation_summary = _build_operation_summary(plan["items"], capital)
             health = _build_health_status(conn)
             blockers = _build_blockers(health, account, plan)
             next_action = _next_action(health, operation_summary, blockers)
@@ -65,6 +68,8 @@ class DashboardV2Service:
                 "trade_date": latest_date,
                 "health": health,
                 "account": account,
+                "capital": capital,
+                "regime_policy": regime_policy,
                 "operation_summary": operation_summary,
                 "blockers": blockers,
                 "next_action": next_action,
@@ -73,20 +78,31 @@ class DashboardV2Service:
 
     def build_rebalance_snapshot(self) -> dict[str, Any]:
         with self._managed_connection(read_only=True) as conn:
+            account = _load_account_summary(conn)
             plan = _load_latest_plan(conn)
+            capital = _build_capital_breakdown(account, plan)
+            regime_policy = _load_regime_policy_contract(conn, plan)
             groups = _group_rebalance_items(plan["items"])
-            summary = _build_operation_summary(plan["items"])
+            summary = _build_operation_summary(plan["items"], capital)
             thresholds = _load_execution_thresholds()
-            one_lot_gaps = _load_one_lot_gaps(conn, thresholds)
-            threshold_filtered_count = _load_threshold_filtered_buy_candidate_count(conn, thresholds)
             satellite_budget = _safe_float(plan.get("satellite_budget"))
             sell_signals = _load_active_holding_sell_signals(conn)
             sell_release_estimate = sum(_safe_float(row.get("estimated_release_cash")) for row in sell_signals)
             effective_satellite_budget = satellite_budget + sell_release_estimate
-            summary["funding_gap"] = max(float(summary["cash_required"] or 0) - float(plan["cash"] or 0), 0.0)
+            one_lot_gaps = _load_one_lot_gaps(
+                conn,
+                thresholds,
+                current_total=_safe_float(account.get("total_value")),
+                available_cash=_safe_float(capital.get("cash")),
+                satellite_budget=effective_satellite_budget,
+            )
+            threshold_filtered_count = _load_threshold_filtered_buy_candidate_count(conn, thresholds)
+            summary["funding_gap"] = max(float(summary.get("cash_commitment") or 0) - float(capital["cash"] or 0), 0.0)
             return {
                 "plan_id": plan["plan_id"],
                 "plan_date": _date_to_iso(plan["plan_date"]),
+                "capital": capital,
+                "regime_policy": regime_policy,
                 "summary": summary,
                 "groups": groups,
                 "sell_signals": sell_signals,
@@ -105,8 +121,12 @@ class DashboardV2Service:
                     "signal_date": _latest_signal_date(conn),
                     "cost_model": "paper_engine_t1_open_with_fee_and_lot",
                     "budget": {
+                        "cash": _safe_float(capital.get("cash")),
                         "core_budget": _safe_float(plan.get("core_budget")),
                         "satellite_budget": satellite_budget,
+                        "reserved_cash": _safe_float(capital.get("reserved_cash")),
+                        "unreserved_cash": _safe_float(capital.get("unreserved_cash")),
+                        "cash_commitment": _safe_float(summary.get("cash_commitment")),
                         "satellite_sell_release_estimate": round(sell_release_estimate, 2),
                         "satellite_effective_buy_budget": round(effective_satellite_budget, 2),
                     },
@@ -116,12 +136,17 @@ class DashboardV2Service:
     def build_portfolio_snapshot(self) -> dict[str, Any]:
         with self._managed_connection(read_only=True) as conn:
             account = _load_account_summary(conn)
+            plan = _load_latest_plan(conn)
+            capital = _build_capital_breakdown(account, plan)
+            regime_policy = _load_regime_policy_contract(conn, plan)
             holdings = _load_latest_holdings(conn)
             exposure = _safe_exposure_snapshot(conn)
             outcomes = _safe_signal_outcomes(conn)
             risk_alerts = _build_actionable_risk_alerts(exposure["warnings"], holdings, exposure)
             return {
                 "account": account,
+                "capital": capital,
+                "regime_policy": regime_policy,
                 "holdings": holdings,
                 "risk_alerts": risk_alerts,
                 "exposure": {
@@ -146,6 +171,7 @@ class DashboardV2Service:
             failure = _scheduled_failure_diagnostic(latest_run)
             return {
                 **health,
+                "regime_policy": _load_regime_policy_contract(conn),
                 "latest_quote_date": _latest_trade_date(conn),
                 "data_sources": _load_data_sources(conn),
                 "field_coverage": _load_field_coverage(conn),
@@ -379,6 +405,7 @@ def _load_latest_plan(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     plan_row = conn.execute(
         """
         SELECT plan_id, plan_date, total_value, cash, core_target_pct, satellite_target_pct,
+               COALESCE(cash_target_pct, 0) AS cash_target_pct,
                core_value, satellite_value, core_budget, satellite_budget, core_drift_pct, satellite_drift_pct, status
         FROM allocation_plans
         ORDER BY plan_date DESC, created_at DESC, plan_id DESC
@@ -401,6 +428,7 @@ def _load_latest_plan(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
         "cash",
         "core_target_pct",
         "satellite_target_pct",
+        "cash_target_pct",
         "core_value",
         "satellite_value",
         "core_budget",
@@ -451,12 +479,183 @@ def _load_latest_plan(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     return plan
 
 
-def _build_operation_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
+def _load_regime_policy_contract(
+    conn: duckdb.DuckDBPyConnection,
+    plan: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Expose macro regime policy as a separate UI contract, not money or signal data."""
+    try:
+        from src.portfolio.regime_policy import load_latest_regime_policy
+
+        config = load_config()
+        decision = load_latest_regime_policy(conn, config=config)
+    except Exception as exc:
+        return {
+            "status": "unavailable",
+            "as_of_date": None,
+            "regime_key": None,
+            "regime_label": "宏观状态不可用",
+            "stance": "unknown",
+            "application_state": "not_applied",
+            "buy_mode": "paused",
+            "satellite_budget_multiplier": None,
+            "signal_threshold_adjustment": None,
+            "reason_summary": f"宏观风控状态读取失败：{exc}",
+            "source": "index_daily",
+            "evidence": {"source": "index_daily", "data_date": None},
+        }
+
+    if decision is None:
+        return {
+            "status": "not_applied",
+            "as_of_date": None,
+            "regime_key": None,
+            "regime_label": "宏观策略未启用",
+            "stance": "unknown",
+            "application_state": "not_applied",
+            "buy_mode": "normal",
+            "satellite_budget_multiplier": None,
+            "signal_threshold_adjustment": None,
+            "reason_summary": "Regime Policy 未启用；当前预算和信号准入不受宏观状态层调节。",
+            "source": "disabled",
+            "evidence": {"source": "disabled", "data_date": None},
+        }
+
+    source_state = decision.source_state if isinstance(decision.source_state, dict) else {}
+    cfg = load_config()
+    allocation_cfg = cfg.get("portfolio", {}).get("allocation", {})
+    base_satellite = _safe_float(allocation_cfg.get("satellite_target_pct", 0.40)) or 0.40
+    multiplier = decision.satellite_target_pct / base_satellite if base_satellite > 0 else None
+    application_state = _regime_application_state(decision, plan)
+    return {
+        "status": "ok" if decision.regime_state != "unknown" else "unavailable",
+        "as_of_date": _date_to_iso(source_state.get("trade_date")),
+        "regime_key": decision.regime_state,
+        "regime_label": _regime_label(decision.regime_state),
+        "stance": decision.regime_state,
+        "application_state": application_state,
+        "buy_mode": _regime_buy_mode(decision),
+        "satellite_budget_multiplier": round(multiplier, 4) if multiplier is not None else None,
+        "signal_threshold_adjustment": _regime_threshold_text(decision),
+        "reason_summary": f"宏观状态 {_regime_label(decision.regime_state)}：{decision.reason}",
+        "source": f"index_daily:{source_state.get('index_code') or cfg.get('portfolio', {}).get('regime_policy', {}).get('benchmark_index', '000300')}",
+        "evidence": {
+            "source": "index_daily",
+            "data_date": _date_to_iso(source_state.get("trade_date")),
+            "benchmark": source_state.get("index_code"),
+            "trend_score": _safe_float(source_state.get("trend_score")),
+            "drawdown": _safe_float(source_state.get("drawdown")),
+        },
+    }
+
+
+def _regime_application_state(decision: Any, plan: dict[str, Any] | None) -> str:
+    if not plan or not plan.get("plan_id"):
+        return "advisory_only"
+    expected = [
+        ("core_target_pct", decision.core_target_pct),
+        ("satellite_target_pct", decision.satellite_target_pct),
+        ("cash_target_pct", decision.cash_target_pct),
+    ]
+    if all(abs(_safe_float(plan.get(key)) - float(value)) <= 1e-6 for key, value in expected):
+        return "applied_to_plan"
+    return "advisory_only"
+
+
+def _regime_buy_mode(decision: Any) -> str:
+    if not bool(decision.allow_new_buys):
+        return "paused"
+    if float(decision.min_buy_confidence or 0.0) > 0.75:
+        return "reduced"
+    return "normal"
+
+
+def _regime_threshold_text(decision: Any) -> str | None:
+    if not bool(decision.allow_new_buys):
+        return "暂停新增 BUY，仅保留 SELL/减仓"
+    min_conf = float(decision.min_buy_confidence or 0.0)
+    if min_conf > 0.75:
+        return f"BUY 最低置信度提高到 {min_conf:.0%}"
+    return "沿用常规 BUY 门槛"
+
+
+def _regime_label(regime_state: str) -> str:
+    return {
+        "risk_on": "进攻",
+        "neutral": "中性",
+        "defensive": "防御",
+        "risk_off": "避险",
+        "crisis": "危机",
+        "unknown": "未知",
+    }.get(str(regime_state or "unknown"), str(regime_state or "未知"))
+
+
+def _build_capital_breakdown(account: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+    """Return one shared money vocabulary for Dashboard V2 pages."""
+    has_plan = bool(plan.get("plan_id"))
+    cash = _safe_float(plan.get("cash") if has_plan else account.get("cash"))
+    core_value = _safe_float(plan.get("core_value")) if has_plan else 0.0
+    satellite_value = _safe_float(plan.get("satellite_value") if has_plan else account.get("position_value"))
+    unified_total = _safe_float(plan.get("total_value")) if has_plan else cash + satellite_value
+    trading_account_total = _safe_float(account.get("total_value"))
+    trading_position_value = _safe_float(account.get("position_value"))
+    core_budget = _safe_float(plan.get("core_budget"))
+    satellite_budget = _safe_float(plan.get("satellite_budget"))
+    reserved_cash = max(core_budget, 0.0) + max(satellite_budget, 0.0)
+    unreserved_cash = max(cash - reserved_cash, 0.0)
+    formula_total = cash + core_value + satellite_value
+    core_target_pct = _safe_float(plan.get("core_target_pct"))
+    satellite_target_pct = _safe_float(plan.get("satellite_target_pct"))
+    cash_target_pct = _safe_float(plan.get("cash_target_pct"))
+    return {
+        "scope": "unified_core_satellite" if has_plan else "satellite_paper_account",
+        "scope_label": "统一资金池" if has_plan else "股票纸盘账户",
+        "scope_note": "组合体检顶部优先展示统一资金池；股票纸盘 NAV/回撤来自 account_daily。",
+        "formula": "统一总资产 = 现金 + Core基金市值 + Satellite股票市值",
+        "unified_total_value": round(unified_total, 2),
+        "trading_account_total_value": round(trading_account_total, 2),
+        "trading_position_value": round(trading_position_value, 2),
+        "cash": round(cash, 2),
+        "core_value": round(core_value, 2),
+        "satellite_value": round(satellite_value, 2),
+        "core_budget": round(core_budget, 2),
+        "satellite_budget": round(satellite_budget, 2),
+        "reserved_cash": round(reserved_cash, 2),
+        "unreserved_cash": round(unreserved_cash, 2),
+        "core_target_value": round(unified_total * core_target_pct, 2) if core_target_pct else 0.0,
+        "satellite_target_value": round(unified_total * satellite_target_pct, 2) if satellite_target_pct else 0.0,
+        "core_target_pct": core_target_pct,
+        "satellite_target_pct": satellite_target_pct,
+        "cash_target_pct": cash_target_pct,
+        "cash_target_value": round(unified_total * cash_target_pct, 2) if cash_target_pct else 0.0,
+        "reconciliation": {
+            "formula": "统一总资产 = 现金 + Core基金市值 + Satellite股票市值",
+            "computed_total": round(formula_total, 2),
+            "recorded_total": round(unified_total, 2),
+            "delta": round(unified_total - formula_total, 2),
+            "trading_account_formula": "股票纸盘资产 = 现金 + Satellite股票市值",
+            "trading_account_computed_total": round(cash + satellite_value, 2),
+            "trading_account_recorded_total": round(trading_account_total, 2),
+            "trading_account_delta": round(trading_account_total - (cash + satellite_value), 2),
+        },
+    }
+
+
+def _build_operation_summary(items: list[dict[str, Any]], capital: dict[str, Any] | None = None) -> dict[str, Any]:
     actionable = [item for item in items if _is_trade_actionable(item)]
     cash_required = sum(_cash_outflow(item) for item in actionable)
+    reserved_cash = _safe_float(capital.get("reserved_cash")) if capital else sum(
+        _cash_outflow(item) for item in items if _is_budget_item(item)
+    )
+    unreserved_cash = _safe_float(capital.get("unreserved_cash")) if capital else 0.0
+    cash_commitment = max(cash_required, reserved_cash)
     return {
         "operation_count": len(actionable),
         "cash_required": round(cash_required, 2),
+        "reserved_cash": round(reserved_cash, 2),
+        "cash_commitment": round(cash_commitment, 2),
+        "available_cash_after_reserve": round(unreserved_cash, 2),
+        "available_cash_after_commitment": round(max(_safe_float(capital.get("cash")) - cash_commitment, 0.0), 2) if capital else 0.0,
         "estimated_minutes": max(len(actionable) * 6, 0),
         "buy_count": sum(1 for item in actionable if str(item.get("action") or "").upper() in {"BUY", "ADD"} and _cash_outflow(item) > 0),
         "reduce_count": sum(1 for item in actionable if str(item.get("action") or "").upper() in {"REDUCE", "SELL"} and _cash_inflow(item) > 0),
@@ -487,43 +686,69 @@ def _build_satellite_candidate_context(
     covered_count = 0
     executable_count = 0
     budget_blocked_count = 0
+    lot_blocked_count = 0
+    cash_blocked_count = 0
     max_one_lot_cash = 0.0
     for row in rows:
         one_lot_cash = _safe_float(row.get("one_lot_cash"))
         max_one_lot_cash = max(max_one_lot_cash, one_lot_cash)
-        is_covered = one_lot_cash > 0 and one_lot_cash <= satellite_budget
-        if is_covered:
-            covered_count += 1
-        budget_gap = max(one_lot_cash - satellite_budget, 0.0)
-        if is_covered:
+        required_cash = _safe_float(row.get("required_cash"))
+        raw_status = str(row.get("execution_status") or "").upper()
+        if raw_status == "EXECUTABLE":
             execution_status = "executable_candidate"
             execution_label = "过门槛且预算够"
-            decision = "可进入纸交易执行队列；仍需通过持仓上限、换手率和可交易性检查。"
-            executable_count += 1
+        elif raw_status == "BLOCKED_LOT":
+            execution_status = "lot_blocked"
+            execution_label = "目标仓位不足一手"
+        elif raw_status == "BLOCKED_CASH":
+            execution_status = "cash_blocked"
+            execution_label = "现金不足"
         else:
             execution_status = "budget_blocked"
             execution_label = "过门槛但预算不足"
-            decision = "高分候选被一手资金门槛挡住，默认不操作；可追加 Satellite 预算或等待更低门槛候选。"
+        is_covered = execution_status == "executable_candidate"
+        if is_covered:
+            covered_count += 1
+            executable_count += 1
+            decision = "可进入纸交易执行队列；仍需通过持仓上限、换手率和可交易性检查。"
+        elif execution_status == "lot_blocked":
+            lot_blocked_count += 1
+            decision = str(row.get("block_reason") or "目标仓位不足一手，默认不操作。")
+        elif execution_status == "cash_blocked":
+            cash_blocked_count += 1
+            decision = str(row.get("block_reason") or "现金不足，默认不操作。")
+        else:
             budget_blocked_count += 1
+            decision = str(row.get("block_reason") or "高分候选被 Satellite 预算挡住，默认不操作。")
+        budget_gap = max(required_cash - satellite_budget, 0.0) if required_cash > 0 else 0.0
+        budget_status = "covered" if is_covered else "over_budget"
+        budget_status_label = "预算可覆盖" if is_covered else "预算不足"
+        if execution_status == "lot_blocked":
+            budget_status = "not_applicable"
+            budget_status_label = "整手不足"
         enriched_rows.append({
             **row,
             "budget": round(satellite_budget, 2),
             "budget_gap": round(budget_gap, 2),
-            "budget_status": "covered" if is_covered else "over_budget",
-            "budget_status_label": "预算可覆盖" if is_covered else "预算不足",
+            "budget_status": budget_status,
+            "budget_status_label": budget_status_label,
             "execution_status": execution_status,
             "execution_status_label": execution_label,
             "decision": decision,
         })
 
     candidate_count = len(rows)
-    over_budget_count = candidate_count - covered_count
+    over_budget_count = budget_blocked_count + cash_blocked_count
     if candidate_count == 0:
         decision_hint = "暂无股票 BUY 候选；Satellite 预算不会触发个股买入。"
     elif executable_count:
         decision_hint = f"优先关注 {executable_count} 只预算够且过门槛的候选；运行纸交易后还会继续经过风控、换手和可交易性检查。"
+    elif lot_blocked_count:
+        decision_hint = f"{lot_blocked_count} 只高分候选被目标仓位/整手规则挡住；默认不操作，可提高资金档位或等待更低价格候选。"
+    elif cash_blocked_count:
+        decision_hint = f"{cash_blocked_count} 只高分候选现金不足；默认不操作，请先核对现金或基金预算预留。"
     elif budget_blocked_count:
-        decision_hint = f"{budget_blocked_count} 只高分候选被一手资金门槛挡住；默认不操作，可追加 Satellite 预算或等待更低门槛候选。"
+        decision_hint = f"{budget_blocked_count} 只高分候选被 Satellite 预算挡住；默认不操作，可等待 SELL 释放资金或重新生成资金计划。"
     else:
         decision_hint = "低于执行门槛的 BUY 信号已前置过滤；当前没有可进入纸交易队列的股票候选。"
 
@@ -538,6 +763,8 @@ def _build_satellite_candidate_context(
         "over_budget_count": over_budget_count,
         "executable_count": executable_count,
         "budget_blocked_count": budget_blocked_count,
+        "lot_blocked_count": lot_blocked_count,
+        "cash_blocked_count": cash_blocked_count,
         "threshold_blocked_count": int(threshold_filtered_count),
         "max_one_lot_cash": round(max_one_lot_cash, 2),
         "decision_hint": decision_hint,
@@ -547,12 +774,18 @@ def _build_satellite_candidate_context(
 
 
 def _satellite_candidate_sort_key(row: dict[str, Any]) -> tuple[int, float, float, float]:
-    status_order = {"executable_candidate": 0, "budget_blocked": 1, "below_threshold": 2}
+    status_order = {
+        "executable_candidate": 0,
+        "budget_blocked": 1,
+        "cash_blocked": 2,
+        "lot_blocked": 3,
+        "below_threshold": 4,
+    }
     return (
         status_order.get(str(row.get("execution_status")), 9),
         -_safe_float(row.get("rank_score")),
         -_safe_float(row.get("confidence")),
-        -_safe_float(row.get("one_lot_cash")),
+        -_safe_float(row.get("required_cash") or row.get("one_lot_cash")),
     )
 
 
@@ -690,6 +923,30 @@ def _load_alpha158_signal_freshness(conn: duckdb.DuckDBPyConnection) -> dict[str
             "sell_count": sell_count,
         }
 
+    metrics = production.get("metrics") if isinstance(production.get("metrics"), dict) else {}
+    rebalance_freq = str(metrics.get("best_rebalance_freq") or "").lower()
+    if (
+        latest_signal_date is not None
+        and latest_signal_date < latest_prediction_date
+        and rebalance_freq == "monthly"
+        and latest_signal_date.year == latest_prediction_date.year
+        and latest_signal_date.month == latest_prediction_date.month
+    ):
+        return {
+            "status": "ok",
+            "blocking": False,
+            "message": None,
+            "model_version": model_version,
+            "experiment_id": experiment_id,
+            "latest_prediction_date": _date_to_iso(latest_prediction_date),
+            "latest_signal_date": _date_to_iso(latest_signal_date),
+            "prediction_count": prediction_count,
+            "signal_count": signal_count,
+            "buy_count": buy_count,
+            "sell_count": sell_count,
+            "rebalance_freq": rebalance_freq,
+        }
+
     if latest_signal_date is None or latest_signal_date < latest_prediction_date:
         prediction_label = _date_to_iso(latest_prediction_date) or "-"
         signal_label = _date_to_iso(latest_signal_date) or "-"
@@ -705,6 +962,7 @@ def _load_alpha158_signal_freshness(conn: duckdb.DuckDBPyConnection) -> dict[str
             "signal_count": signal_count,
             "buy_count": buy_count,
             "sell_count": sell_count,
+            "rebalance_freq": rebalance_freq,
         }
 
     return {
@@ -719,6 +977,7 @@ def _load_alpha158_signal_freshness(conn: duckdb.DuckDBPyConnection) -> dict[str
         "signal_count": signal_count,
         "buy_count": buy_count,
         "sell_count": sell_count,
+        "rebalance_freq": rebalance_freq,
     }
 
 
@@ -910,6 +1169,9 @@ def _estimate_sell_release_cash(market_value: Any, market: Any) -> float:
 def _load_one_lot_gaps(
     conn: duckdb.DuckDBPyConnection,
     thresholds: dict[str, float] | None = None,
+    current_total: float = 0.0,
+    available_cash: float = 0.0,
+    satellite_budget: float | None = None,
 ) -> list[dict[str, Any]]:
     thresholds = thresholds or _load_execution_thresholds()
     min_confidence = float(thresholds.get("min_confidence", 0.75))
@@ -920,7 +1182,7 @@ def _load_one_lot_gaps(
             SELECT MAX(CAST(signal_ts AS DATE)) AS signal_date FROM signals
         ),
         latest_price AS (
-            SELECT symbol, close
+            SELECT symbol, trade_date, close
             FROM daily_price
             QUALIFY ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY trade_date DESC) = 1
         ),
@@ -931,9 +1193,12 @@ def _load_one_lot_gaps(
                        WHEN si.name IS NOT NULL THEN si.name || '（' || s.symbol || '）'
                        ELSE s.symbol
                    END AS display_name,
-                   MAX(lp.close) * 100 AS one_lot_cash,
+                   COALESCE(si.country, 'CN') AS market,
+                   MAX(lp.trade_date) AS trade_date,
+                   MAX(lp.close) AS price,
                    MAX(s.confidence) AS confidence,
                    MAX(s.score) AS score,
+                   MAX(COALESCE(s.max_position_pct, 0.05)) AS max_position_pct,
                    MAX(s.confidence * CASE WHEN COALESCE(s.score, 0) > 0 THEN s.score ELSE 0 END) AS rank_score,
                    BOOL_OR(
                        COALESCE(s.confidence, 0) >= ?
@@ -948,17 +1213,64 @@ def _load_one_lot_gaps(
             WHERE s.side = 'BUY'
               AND s.status = 'ACTIVE'
               AND lp.close IS NOT NULL
-            GROUP BY s.symbol, si.name
+            GROUP BY s.symbol, si.name, si.country
         )
         SELECT *
         FROM grouped
         WHERE passes_execution_threshold
-        ORDER BY passes_execution_threshold DESC, rank_score DESC, confidence DESC, one_lot_cash DESC
+        ORDER BY passes_execution_threshold DESC, rank_score DESC, confidence DESC, price DESC
         LIMIT 20
         """,
         [min_confidence, min_rank_score],
     ).fetchdf()
-    return _records(df)
+    if df.empty:
+        return []
+
+    try:
+        markets = load_config().get("markets", {})
+    except Exception:
+        markets = {}
+
+    rows: list[dict[str, Any]] = []
+    for _, item in df.iterrows():
+        market = str(item.get("market") or "CN").upper()
+        market_key = "hk" if market == "HK" else "cn"
+        cost_cfg = markets.get(market_key, markets.get("cn", {}))
+        preview = estimate_buy_execution(
+            conn=conn,
+            symbol=str(item["symbol"]),
+            trade_date=pd.to_datetime(item["trade_date"]).date(),
+            current_total=current_total,
+            max_position_pct=_safe_float(item.get("max_position_pct")) or 0.05,
+            available_cash=available_cash,
+            satellite_budget=satellite_budget,
+            market=market,
+            price=_safe_float(item.get("price")),
+            commission_rate=float(cost_cfg.get("commission_rate", 0.00025)),
+            min_fee=10.0 if market == "HK" else 5.0,
+        )
+        row = _jsonable(item.to_dict())
+        row.update(preview)
+        row["execution_status"] = preview["status"]
+        row["execution_status_label"] = _execution_preview_status_label(preview["status"])
+        row["decision"] = (
+            "可进入纸交易执行队列；仍需通过持仓上限、换手率和可交易性检查。"
+            if preview["status"] == "EXECUTABLE"
+            else preview["block_reason"]
+        )
+        rows.append(row)
+    return rows
+
+
+def _execution_preview_status_label(status: Any) -> str:
+    labels = {
+        "EXECUTABLE": "过门槛且预算够",
+        "BLOCKED_LOT": "目标仓位不足一手",
+        "BLOCKED_BUDGET": "预算不足",
+        "BLOCKED_CASH": "现金不足",
+        "NO_PRICE": "价格缺失",
+    }
+    return labels.get(str(status or "").upper(), "待确认")
 
 
 def _load_threshold_filtered_buy_candidate_count(

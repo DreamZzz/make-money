@@ -145,6 +145,8 @@ const CURRENCY_FIELDS = new Set([
   "one_lot_cash",
   "pnl",
   "position_value",
+  "required_cash",
+  "target_position_cash",
   "target_value",
   "total_value",
 ]);

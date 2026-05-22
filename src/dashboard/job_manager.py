@@ -57,6 +57,7 @@ def _resolve_qlib_python(default_python: str, candidates: Optional[list[str]] = 
         return explicit
 
     candidate_values = candidates or [
+        str(PROJECT_ROOT / ".venv-qlib" / "bin" / "python"),
         default_python,
         "python3",
         "python3.12",
@@ -167,6 +168,20 @@ SINGLE_STEPS: dict[str, JobStep] = {
         "补当前持仓基础信息",
         [PYTHON, "-m", "src.portfolio.fundamentals_coverage", "update"],
     ),
+    "field_coverage": _step(
+        "field_coverage",
+        "补目标池字段覆盖",
+        [
+            PYTHON,
+            "-m",
+            "src.data_pipeline.field_coverage_backfill",
+            "--scopes",
+            "current_holdings,signal_candidates,target_universe",
+            "--skip-industry-fetch",
+            "--record-health",
+        ],
+        allow_failure=True,
+    ),
     "index_funds_update": _step("index_funds_update", "更新指数基金数据", [PYTHON, "-m", "src.index_funds.pipeline", "update"]),
     "index_funds_signals": _step("index_funds_signals", "生成指数基金信号", [PYTHON, "-m", "src.index_funds.signals", "generate"]),
     "generate_signals": _step("generate_signals", "生成股票调仓信号", [PYTHON, "-m", "src.signals.generator"]),
@@ -174,6 +189,11 @@ SINGLE_STEPS: dict[str, JobStep] = {
         "qlib_predict",
         "Qlib production 日常预测",
         [QLIB_PYTHON, "-m", "src.backtest.qlib_runner", "predict-latest", "--model", "production"],
+    ),
+    "model_prediction_gate": _step(
+        "model_prediction_gate",
+        "生产预测就绪门禁",
+        [PYTHON, "-m", "src.monitoring.model_monitor", "assert-prediction-ready"],
     ),
     "signal_arbiter": _step(
         "signal_arbiter",
@@ -263,10 +283,12 @@ JOB_DEFINITIONS: dict[str, JobDefinition] = {
         steps=(
             SINGLE_STEPS["update"],
             SINGLE_STEPS["fundamentals_coverage"],
+            SINGLE_STEPS["field_coverage"],
             SINGLE_STEPS["index_funds_update"],
             SINGLE_STEPS["index_funds_signals"],
             SINGLE_STEPS["generate_signals"],
             SINGLE_STEPS["qlib_predict"],
+            SINGLE_STEPS["model_prediction_gate"],
             SINGLE_STEPS["signal_arbiter"],
             SINGLE_STEPS["qlib_rule_pk_ab"],
             SINGLE_STEPS["allocation_plan"],

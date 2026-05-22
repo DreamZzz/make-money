@@ -115,6 +115,63 @@ def test_run_value_quality_validation_outputs_metrics_and_correlations():
     conn.close()
 
 
+def test_run_value_quality_validation_outputs_alpha_gate_result():
+    conn = duckdb.connect(":memory:")
+    _seed_validation_db(conn)
+
+    result = run_value_quality_validation(
+        conn,
+        start="2022-01-01",
+        end="2022-03-31",
+        top_n=2,
+        holding_days=1,
+        rebalance_freq="monthly",
+        financial_lag_days=60,
+        benchmark_returns=pd.Series(
+            [0.01, 0.01, 0.01, 0.01],
+            index=pd.to_datetime(["2022-01-28", "2022-02-28", "2022-03-31", "2022-04-29"]),
+        ),
+        reference_returns=pd.Series(
+            [0.02, 0.01, 0.02, 0.01],
+            index=pd.to_datetime(["2022-01-28", "2022-02-28", "2022-03-31", "2022-04-29"]),
+        ),
+    )
+
+    assert isinstance(result["alpha_gate_passed"], bool)
+    assert isinstance(result["alpha_gate_failed_reasons"], list)
+    assert "alpha_gate_metrics" in result
+    conn.close()
+
+
+def test_run_value_quality_validation_exposes_v02_options():
+    conn = duckdb.connect(":memory:")
+    _seed_validation_db(conn)
+
+    result = run_value_quality_validation(
+        conn,
+        start="2022-01-01",
+        end="2022-03-31",
+        top_n=2,
+        holding_days=1,
+        rebalance_freq="monthly",
+        financial_lag_days=60,
+        industry_neutral=True,
+        retention_quantile=0.30,
+        benchmark_returns=pd.Series(
+            [0.01, 0.01, 0.01, 0.01],
+            index=pd.to_datetime(["2022-01-28", "2022-02-28", "2022-03-31", "2022-04-29"]),
+        ),
+        reference_returns=pd.Series(
+            [0.02, 0.01, 0.02, 0.01],
+            index=pd.to_datetime(["2022-01-28", "2022-02-28", "2022-03-31", "2022-04-29"]),
+        ),
+    )
+
+    assert result["industry_neutral"] is True
+    assert result["retention_quantile"] == 0.30
+    conn.close()
+
+
 def test_run_value_quality_validation_can_persist_research_only_backtest_result():
     conn = duckdb.connect(":memory:")
     _seed_validation_db(conn)

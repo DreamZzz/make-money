@@ -29,12 +29,24 @@ describe("Dashboard V2 core components", () => {
   it("renders operation count, required cash and estimated minutes", () => {
     render(
       <OperationSummary
-        summary={{ operation_count: 3, cash_required: 28000, estimated_minutes: 18, buy_count: 2, reduce_count: 1 }}
+        summary={{
+          operation_count: 3,
+          cash_required: 28000,
+          reserved_cash: 116000,
+          cash_commitment: 116000,
+          estimated_minutes: 18,
+          buy_count: 2,
+          reduce_count: 1,
+        }}
       />,
     );
 
     expect(screen.getByText("3 次")).toBeInTheDocument();
+    expect(screen.getByText("订单需现金")).toBeInTheDocument();
     expect(screen.getByText("¥28,000")).toBeInTheDocument();
+    expect(screen.getByText("预算预留")).toBeInTheDocument();
+    expect(screen.getAllByText("¥116,000").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("现金占用上限")).toBeInTheDocument();
     expect(screen.getByText("18 分钟")).toBeInTheDocument();
   });
 
@@ -82,6 +94,8 @@ describe("Dashboard V2 core components", () => {
     );
 
     expect(screen.getByText("资金分配")).toBeInTheDocument();
+    expect(screen.getAllByText("当前 / 目标").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("预留 / 现金影响").length).toBeGreaterThan(0);
     expect(screen.getByText("资金池预算，不是交易指令")).toBeInTheDocument();
     expect(screen.getByText("可执行")).toBeInTheDocument();
     expect(screen.getByText("需人工确认")).toBeInTheDocument();
@@ -148,30 +162,35 @@ describe("Dashboard V2 core components", () => {
             base_budget: 10000,
             sell_release_estimate: 9987.5,
             candidate_count: 2,
-            covered_count: 2,
+            covered_count: 1,
             over_budget_count: 0,
-            executable_count: 2,
+            executable_count: 1,
             budget_blocked_count: 0,
+            lot_blocked_count: 1,
             threshold_blocked_count: 1,
-            decision_hint: "优先关注 2 只预算够且过门槛的候选；运行纸交易后还会继续经过风控、换手和可交易性检查。",
+            decision_hint: "优先关注 1 只预算够且过门槛的候选；运行纸交易后还会继续经过风控、换手和可交易性检查。",
             rows: [{
               symbol: "688001.SH",
               name: "华兴源创",
               display_name: "华兴源创（688001.SH）",
               one_lot_cash: 16000,
+              target_position_cash: 15000,
+              required_cash: 0,
               confidence: 0.81,
               rank_score: 0.729,
-              budget_status: "covered",
-              budget_status_label: "预算可覆盖",
-              execution_status: "executable_candidate",
-              execution_status_label: "过门槛且预算够",
+              budget_status: "not_applicable",
+              budget_status_label: "整手不足",
+              execution_status: "lot_blocked",
+              execution_status_label: "目标仓位不足一手",
               budget_gap: 0,
-              decision: "可进入纸交易执行队列；仍需通过持仓上限、换手率和可交易性检查。",
+              decision: "5%目标仓位约 15,000 元，不足一手所需 16,000 元",
             }, {
               symbol: "000002.SZ",
               name: "万科A",
               display_name: "万科A（000002.SZ）",
               one_lot_cash: 3000,
+              target_position_cash: 15000,
+              required_cash: 15005,
               confidence: 0.82,
               rank_score: 0.656,
               budget_status: "covered",
@@ -192,7 +211,7 @@ describe("Dashboard V2 core components", () => {
     expect(screen.getByText("-9.1%")).toBeInTheDocument();
     expect(screen.getByText(/浮亏超过 8%/)).toBeInTheDocument();
     expect(screen.getByText("Satellite 股票候选")).toBeInTheDocument();
-    expect(screen.getByText(/低于执行门槛的记录会前置过滤/)).toBeInTheDocument();
+    expect(screen.getByText(/执行金额按目标仓位、整手和预算同口径预估/)).toBeInTheDocument();
     expect(screen.getByText("基础预算")).toBeInTheDocument();
     expect(screen.getByText("SELL预计释放")).toBeInTheDocument();
     expect(screen.getByText("有效BUY预算")).toBeInTheDocument();
@@ -202,7 +221,65 @@ describe("Dashboard V2 core components", () => {
     expect(screen.getAllByText("过门槛且预算够").length).toBeGreaterThan(0);
     expect(screen.getByText("门槛过滤")).toBeInTheDocument();
     expect(screen.getByText("华兴源创（688001.SH）")).toBeInTheDocument();
+    expect(screen.getByText("目标仓位不足一手")).toBeInTheDocument();
     expect(screen.getAllByText("可进入纸交易执行队列；仍需通过持仓上限、换手率和可交易性检查。").length).toBeGreaterThan(0);
+  });
+
+  it("renders portfolio capital with unified and stock paper account scopes separated", () => {
+    render(
+      <PortfolioPage
+        data={{
+          account: {
+            total_value: 300000,
+            cash: 120000,
+            position_value: 180000,
+            nav: 1,
+            drawdown: -0.02,
+          },
+          capital: {
+            unified_total_value: 460000,
+            trading_account_total_value: 300000,
+            cash: 120000,
+            core_value: 160000,
+            satellite_value: 180000,
+            reserved_cash: 116000,
+            unreserved_cash: 4000,
+            scope_note: "组合体检顶部优先展示统一资金池；股票纸盘 NAV/回撤来自 account_daily。",
+            reconciliation: {
+              formula: "统一总资产 = 现金 + Core基金市值 + Satellite股票市值",
+            },
+          },
+          holdings: [],
+          risk_alerts: [],
+          exposure: {
+            industry: [],
+            size: [],
+            summary: {},
+            insights: [],
+          },
+          signal_outcomes: {
+            summary: [],
+            state: {
+              status: "empty",
+              message: "暂无信号收益数据",
+              ready_count: 0,
+              pending_count: 0,
+              total_count: 0,
+            },
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getAllByText(/统一总资产/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/¥460,000/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/股票纸盘资产/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/¥300,000/).length).toBeGreaterThan(0);
+    expect(screen.getByText("Core基金市值")).toBeInTheDocument();
+    expect(screen.getByText("¥160,000")).toBeInTheDocument();
+    expect(screen.getByText("已预留现金")).toBeInTheDocument();
+    expect(screen.getByText("¥116,000")).toBeInTheDocument();
+    expect(screen.getByText(/统一总资产 = 现金/)).toBeInTheDocument();
   });
 
   it("shows every satellite candidate in a full-width readable table", () => {
@@ -211,6 +288,8 @@ describe("Dashboard V2 core components", () => {
       name: `候选股票${index}`,
       display_name: `候选股票${index}（00000${index}.SZ）`,
       one_lot_cash: 1000 + index * 100,
+      target_position_cash: 10000,
+      required_cash: 9000 + index * 100,
       confidence: 0.6 + index * 0.01,
       rank_score: 0.6 + index * 0.01,
       model_name: "trend_following",
@@ -248,7 +327,7 @@ describe("Dashboard V2 core components", () => {
       />,
     );
 
-    expect(screen.getByText("一手资金")).toBeInTheDocument();
+    expect(screen.getByText("目标 / 执行资金")).toBeInTheDocument();
     expect(screen.getByText("置信度 / 模型")).toBeInTheDocument();
     expect(screen.getByText("执行资格")).toBeInTheDocument();
     expect(screen.getByText("预算状态")).toBeInTheDocument();
@@ -479,21 +558,21 @@ describe("Dashboard V2 core components", () => {
           risk_alerts: [],
           exposure: { industry: [], size: [], summary: {}, insights: [] },
           signal_outcomes: {
-            summary: [{
+            summary: [1, 5, 20].map((horizon) => ({
               model_name: "alpha158",
               strategy_label: "Alpha158 多因子",
               strategy_logic: "158 个价量因子 + LightGBM 排序选股",
               online_scope: "线上生产模型",
               trading_role: "会产生 BUY/SELL；依赖 production 预测成功",
-              horizon_days: 1,
-              horizon_label: "T+1",
-              horizon_meaning: "成交后 1 个交易日的短期验证",
+              horizon_days: horizon,
+              horizon_label: `T+${horizon}`,
+              horizon_meaning: `成交后 ${horizon} 个交易日的验证`,
               sample_count: 26,
-              pending_count: 0,
-              hit_rate: 0.269,
-              avg_return: -0.024,
-              avg_alpha_vs_benchmark: -0.02,
-            }],
+              pending_count: horizon === 1 ? 0 : 26,
+              hit_rate: horizon === 1 ? 0.269 : 0,
+              avg_return: horizon === 1 ? -0.024 : 0,
+              avg_alpha_vs_benchmark: horizon === 1 ? -0.02 : 0,
+            })),
             monthly: [],
             detail: [],
             state: {
@@ -513,10 +592,12 @@ describe("Dashboard V2 core components", () => {
     expect(screen.getByText("策略/信号来源")).toBeInTheDocument();
     expect(screen.getByText("线上状态")).toBeInTheDocument();
     expect(screen.getByText("是否参与交易")).toBeInTheDocument();
-    expect(screen.getByText("Alpha158 多因子")).toBeInTheDocument();
-    expect(screen.getByText("线上生产模型")).toBeInTheDocument();
-    expect(screen.getByText(/会产生 BUY\/SELL/)).toBeInTheDocument();
+    expect(screen.getAllByText("Alpha158 多因子").length).toBeGreaterThanOrEqual(3);
+    expect(screen.getAllByText("线上生产模型").length).toBeGreaterThanOrEqual(3);
+    expect(screen.getAllByText(/会产生 BUY\/SELL/).length).toBeGreaterThanOrEqual(3);
     expect(screen.getByText("T+1")).toBeInTheDocument();
-    expect(screen.getByText(/LightGBM/)).toBeInTheDocument();
+    expect(screen.getByText("T+5")).toBeInTheDocument();
+    expect(screen.getByText("T+20")).toBeInTheDocument();
+    expect(screen.getAllByText(/LightGBM/).length).toBeGreaterThanOrEqual(3);
   });
 });

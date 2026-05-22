@@ -14,19 +14,37 @@ cd "$PROJECT_DIR"
 
 echo "=== $(date '+%Y-%m-%d %H:%M:%S') 开始回测: strategy=$STRATEGY ==="
 
-require_qlib_python() {
-  if "$PYTHON" -c "import qlib" >/dev/null 2>&1; then
-    return
-  fi
+_python_is_compatible() {
+  "$1" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 12) else 1)
+PY
+}
 
-  for candidate in python3 python3.12 /opt/homebrew/bin/python3.12; do
-    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "import qlib" >/dev/null 2>&1; then
-      PYTHON="$candidate"
+_python_can_import() {
+  "$1" - "$2" <<'PY' >/dev/null 2>&1
+import importlib.util
+import sys
+raise SystemExit(0 if importlib.util.find_spec(sys.argv[1]) is not None else 1)
+PY
+}
+
+require_qlib_python() {
+  for candidate in "$PROJECT_DIR/.venv-qlib/bin/python" "$PYTHON" python3.12 /opt/homebrew/bin/python3.12 /opt/homebrew/opt/python@3.12/bin/python3.12 python3; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      resolved="$(command -v "$candidate")"
+    elif [ -x "$candidate" ]; then
+      resolved="$candidate"
+    else
+      continue
+    fi
+    if _python_is_compatible "$resolved" && _python_can_import "$resolved" qlib; then
+      PYTHON="$resolved"
       return
     fi
   done
 
-  echo "未找到可 import qlib 的 Python。请先激活原来的 Qlib 环境，或用 PYTHON=/path/to/python bash scripts/run_backtest.sh alpha158。" >&2
+  echo "未找到 Python 3.12+ 且可 import qlib 的解释器。请先创建/修复 $PROJECT_DIR/.venv-qlib，或用 QLIB_PYTHON/PYTHON 指定。" >&2
   exit 1
 }
 

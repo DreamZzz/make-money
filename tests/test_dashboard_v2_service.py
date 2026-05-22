@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import duckdb
 
 from src.data_pipeline.loader import init_db
@@ -33,8 +35,8 @@ def _seed_dashboard_v2_db(db_path) -> None:
                 core_value, satellite_value, core_budget, satellite_budget, core_drift_pct, satellite_drift_pct
             )
             VALUES (
-                'PLAN-1', DATE '2026-05-15', 'default', 300000, 120000, 0.6, 0.4,
-                160000, 140000, 20000, 10000, -0.0667, 0.0667
+                'PLAN-1', DATE '2026-05-15', 'default', 460000, 120000, 0.6, 0.4,
+                160000, 180000, 116000, 0, -0.2522, -0.0087
             )
         """)
         conn.execute("""
@@ -88,6 +90,18 @@ def test_dashboard_v2_service_builds_today_from_local_db(tmp_path) -> None:
 
     assert snapshot["trade_date"] == "2026-05-15"
     assert snapshot["account"]["total_value"] == 300000
+    assert snapshot["capital"]["unified_total_value"] == 460000
+    assert snapshot["capital"]["trading_account_total_value"] == 300000
+    assert snapshot["capital"]["cash"] == 120000
+    assert snapshot["capital"]["core_value"] == 160000
+    assert snapshot["capital"]["satellite_value"] == 180000
+    assert snapshot["capital"]["reserved_cash"] == 116000
+    assert snapshot["capital"]["unreserved_cash"] == 4000
+    assert snapshot["capital"]["reconciliation"]["formula"] == "统一总资产 = 现金 + Core基金市值 + Satellite股票市值"
+    assert snapshot["operation_summary"]["reserved_cash"] == 116000
+    assert snapshot["operation_summary"]["cash_commitment"] == 116000
+    assert snapshot["operation_summary"]["available_cash_after_reserve"] == 4000
+    assert snapshot["operation_summary"]["available_cash_after_commitment"] == 4000
     assert snapshot["operation_summary"]["operation_count"] == 1
     assert snapshot["next_action"]["label"] == "查看调仓计划"
     assert snapshot["health"]["model_monitor"]["status"] == "degraded"
@@ -152,6 +166,12 @@ def test_dashboard_v2_portfolio_explains_risks_holdings_and_empty_outcomes(tmp_p
 
     snapshot = DashboardV2Service(db_path=db_path).build_portfolio_snapshot()
 
+    assert snapshot["capital"]["unified_total_value"] == 460000
+    assert snapshot["capital"]["trading_account_total_value"] == 300000
+    assert snapshot["capital"]["core_value"] == 160000
+    assert snapshot["capital"]["satellite_value"] == 180000
+    assert snapshot["capital"]["scope_note"] == "组合体检顶部优先展示统一资金池；股票纸盘 NAV/回撤来自 account_daily。"
+
     top1 = next(alert for alert in snapshot["risk_alerts"] if alert["metric"] == "top1_weight")
     assert top1["affected_holdings"][0]["display_name"] == "平安银行（000001.SZ）"
     assert top1["affected_holdings"][0]["weight"] == 0.0333
@@ -185,6 +205,84 @@ def test_dashboard_v2_portfolio_explains_risks_holdings_and_empty_outcomes(tmp_p
         "total_count": 0,
         "next_ready_date": None,
     }
+
+
+def test_dashboard_v2_rebalance_snapshot_explains_budget_vs_actual_cash(tmp_path) -> None:
+    from src.dashboard_v2.service import DashboardV2Service
+
+    db_path = tmp_path / "dashboard_v2.duckdb"
+    _seed_dashboard_v2_db(db_path)
+
+    snapshot = DashboardV2Service(db_path=db_path).build_rebalance_snapshot()
+
+    assert snapshot["capital"]["unified_total_value"] == 460000
+    assert snapshot["capital"]["cash"] == 120000
+    assert snapshot["capital"]["reserved_cash"] == 116000
+    assert snapshot["capital"]["unreserved_cash"] == 4000
+    assert snapshot["summary"]["cash_required"] == 10000
+    assert snapshot["summary"]["reserved_cash"] == 116000
+    assert snapshot["summary"]["cash_commitment"] == 116000
+    assert snapshot["summary"]["available_cash_after_reserve"] == 4000
+    assert snapshot["summary"]["available_cash_after_commitment"] == 4000
+    assert snapshot["summary"]["funding_gap"] == 0
+    assert snapshot["evidence"]["budget"]["cash"] == 120000
+    assert snapshot["evidence"]["budget"]["reserved_cash"] == 116000
+    assert snapshot["evidence"]["budget"]["unreserved_cash"] == 4000
+    assert snapshot["evidence"]["budget"]["cash_commitment"] == 116000
+
+
+def test_dashboard_v2_exposes_regime_policy_without_mixing_money_vocab(tmp_path, monkeypatch) -> None:
+    import src.dashboard_v2.service as service_module
+    from src.dashboard_v2.service import DashboardV2Service
+
+    db_path = tmp_path / "dashboard_v2.duckdb"
+    _seed_dashboard_v2_db(db_path)
+    conn = duckdb.connect(str(db_path))
+    try:
+        close = 100.0
+        rows = []
+        for offset in range(130):
+            trade_date = date(2026, 1, 1) + timedelta(days=offset)
+            close *= 0.998
+            if offset == 129:
+                close = 70.0
+            rows.append(("000300", trade_date, close))
+        conn.executemany(
+            "INSERT INTO index_daily (index_code, trade_date, close) VALUES (?, ?, ?)",
+            rows,
+        )
+        conn.execute("UPDATE allocation_plans SET core_target_pct = 0.50, satellite_target_pct = 0.00, cash_target_pct = 0.50")
+    finally:
+        conn.close()
+
+    config = {
+        "portfolio": {
+            "allocation": {"core_target_pct": 0.60, "satellite_target_pct": 0.40, "cash_target_pct": 0.0},
+            "regime_policy": {
+                "enabled": True,
+                "benchmark_index": "000300",
+                "lookback_days": 260,
+            },
+        }
+    }
+    monkeypatch.setattr(service_module, "load_config", lambda: config)
+
+    today = DashboardV2Service(db_path=db_path).build_today_snapshot()
+    rebalance = DashboardV2Service(db_path=db_path).build_rebalance_snapshot()
+    portfolio = DashboardV2Service(db_path=db_path).build_portfolio_snapshot()
+    health = DashboardV2Service(db_path=db_path).build_health_snapshot()
+
+    for snapshot in (today, rebalance, portfolio):
+        regime = snapshot["regime_policy"]
+        assert regime["status"] == "ok"
+        assert regime["regime_key"] in {"risk_off", "crisis"}
+        assert regime["buy_mode"] == "paused"
+        assert regime["application_state"] == "applied_to_plan"
+        assert "宏观" in regime["reason_summary"]
+        assert "cash" not in regime
+        assert "unified_total_value" not in regime
+    assert health["regime_policy"]["status"] == "ok"
+    assert health["regime_policy"]["source"] == "index_daily:000300"
 
 
 def test_dashboard_v2_portfolio_ignores_stale_positions_after_strategy_is_flat(tmp_path) -> None:
@@ -550,6 +648,11 @@ def test_dashboard_v2_rebalance_explains_satellite_candidates_against_budget(tmp
     conn = duckdb.connect(str(db_path))
     try:
         conn.execute("""
+            UPDATE allocation_plans
+            SET satellite_budget = 10000, core_budget = 106000
+            WHERE plan_id = 'PLAN-1'
+        """)
+        conn.execute("""
             INSERT INTO daily_price (symbol, trade_date, close)
             VALUES ('688001.SH', DATE '2026-05-15', 160.0)
         """)
@@ -583,18 +686,27 @@ def test_dashboard_v2_rebalance_explains_satellite_candidates_against_budget(tmp
     assert candidates["base_budget"] == 10000
     assert candidates["sell_release_estimate"] == 9987.5
     assert candidates["candidate_count"] == 2
-    assert candidates["covered_count"] == 2
+    assert candidates["covered_count"] == 1
     assert candidates["over_budget_count"] == 0
-    assert candidates["executable_count"] == 2
+    assert candidates["executable_count"] == 1
     assert candidates["budget_blocked_count"] == 0
+    assert candidates["lot_blocked_count"] == 1
     assert candidates["threshold_blocked_count"] == 1
-    assert candidates["decision_hint"] == "优先关注 2 只预算够且过门槛的候选；运行纸交易后还会继续经过风控、换手和可交易性检查。"
+    assert candidates["decision_hint"] == "优先关注 1 只预算够且过门槛的候选；运行纸交易后还会继续经过风控、换手和可交易性检查。"
     assert [
-        (row["display_name"], row["execution_status_label"], row["budget_status_label"], row["budget_gap"], row["decision"])
+        (
+            row["display_name"],
+            row["execution_status_label"],
+            row["budget_status_label"],
+            row["target_position_cash"],
+            row["required_cash"],
+            row["budget_gap"],
+            row["decision"],
+        )
         for row in candidates["rows"]
     ] == [
-        ("华兴源创（688001.SH）", "过门槛且预算够", "预算可覆盖", 0.0, "可进入纸交易执行队列；仍需通过持仓上限、换手率和可交易性检查。"),
-        ("万科A（000002.SZ）", "过门槛且预算够", "预算可覆盖", 0.0, "可进入纸交易执行队列；仍需通过持仓上限、换手率和可交易性检查。"),
+        ("万科A（000002.SZ）", "过门槛且预算够", "预算可覆盖", 15000.0, 15005.0, 0.0, "可进入纸交易执行队列；仍需通过持仓上限、换手率和可交易性检查。"),
+        ("华兴源创（688001.SH）", "目标仓位不足一手", "整手不足", 15000.0, 0.0, 0.0, "5%目标仓位约 15,000 元，不足一手所需 16,000 元"),
     ]
 
 
@@ -639,6 +751,48 @@ def test_dashboard_v2_health_blocks_when_production_signal_lags_prediction(tmp_p
     assert freshness["latest_signal_date"] is None
     assert snapshot["blocking"] is True
     assert "Alpha158 production 信号滞后：预测日期 2026-05-15，信号日期 -" in snapshot["messages"]
+
+
+def test_dashboard_v2_health_allows_monthly_production_signal_with_fresh_prediction(tmp_path) -> None:
+    from src.dashboard_v2.service import DashboardV2Service
+
+    db_path = tmp_path / "dashboard_v2.duckdb"
+    _seed_dashboard_v2_db(db_path)
+    conn = duckdb.connect(str(db_path))
+    try:
+        conn.execute("""
+            INSERT INTO qlib_model_registry (
+                model_version, experiment_id, model_name, status, market, published_at, metrics_json
+            )
+            VALUES (
+                'alpha158-prod', 'EXP-PROD', 'alpha158', 'production', 'CN',
+                TIMESTAMP '2026-05-17 16:00:00',
+                '{"best_rebalance_freq": "monthly"}'
+            )
+        """)
+        conn.execute("""
+            INSERT INTO qlib_predictions (
+                experiment_id, model_name, model_version, mode, prediction_date, symbol, score, rank, confidence, selected
+            )
+            VALUES ('EXP-PROD', 'alpha158', 'alpha158-prod', 'production_inference', DATE '2026-05-22', '000001.SZ', 0.8, 1, 0.9, TRUE)
+        """)
+        conn.execute("""
+            INSERT INTO signals (
+                signal_id, model_name, model_version, symbol, signal_ts, score, side, confidence, status
+            )
+            VALUES ('SIG-MONTHLY-ALPHA', 'alpha158', 'alpha158-prod', '000001.SZ', TIMESTAMP '2026-05-20 15:00:00', 0.6, 'BUY', 0.8, 'ACTIVE')
+        """)
+    finally:
+        conn.close()
+
+    snapshot = DashboardV2Service(db_path=db_path).build_health_snapshot()
+
+    freshness = snapshot["qlib"]["signal_freshness"]
+    assert freshness["status"] == "ok"
+    assert freshness["blocking"] is False
+    assert freshness["latest_prediction_date"] == "2026-05-22"
+    assert freshness["latest_signal_date"] == "2026-05-20"
+    assert not any("Alpha158 production 信号滞后" in message for message in snapshot["messages"])
 
 
 def test_dashboard_v2_safe_writes_persist_audit_log(tmp_path) -> None:

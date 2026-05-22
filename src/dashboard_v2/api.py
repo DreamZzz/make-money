@@ -123,6 +123,7 @@ def _fallback_health(exc: Exception) -> dict[str, Any]:
         "field_coverage": [],
         "scheduled_jobs": [],
         "scheduled_job_history": [],
+        "regime_policy": _unavailable_regime_policy(message),
         "qlib": {"production_available": False},
         "latest_job": None,
         "failure_diagnostic": {
@@ -138,6 +139,8 @@ def _fallback_today(exc: Exception) -> dict[str, Any]:
         "trade_date": None,
         "health": health,
         "account": _empty_account(),
+        "capital": _empty_capital(),
+        "regime_policy": _unavailable_regime_policy(health["messages"][0]),
         "operation_summary": _empty_operation_summary(),
         "blockers": [{
             "level": "error",
@@ -154,6 +157,8 @@ def _fallback_rebalance(exc: Exception) -> dict[str, Any]:
     return {
         "plan_id": None,
         "plan_date": None,
+        "capital": _empty_capital(),
+        "regime_policy": _unavailable_regime_policy(message),
         "summary": {**_empty_operation_summary(), "funding_gap": 0.0},
         "groups": {"budget": [], "executable": [], "confirm": [], "deferred": []},
         "sell_signals": [],
@@ -175,6 +180,8 @@ def _fallback_portfolio(exc: Exception) -> dict[str, Any]:
     message = _data_unavailable_message(exc)
     return {
         "account": _empty_account(),
+        "capital": _empty_capital(),
+        "regime_policy": _unavailable_regime_policy(message),
         "holdings": [],
         "risk_alerts": [{
             "level": "error",
@@ -226,10 +233,66 @@ def _empty_account() -> dict[str, float | None]:
     }
 
 
+def _empty_capital() -> dict[str, float | str | dict[str, float | str]]:
+    return {
+        "scope": "unavailable",
+        "scope_label": "资金口径暂不可用",
+        "scope_note": "数据暂不可用；恢复后会展示统一资金池与股票纸盘账户的对账结果。",
+        "formula": "统一总资产 = 现金 + Core基金市值 + Satellite股票市值",
+        "unified_total_value": 0.0,
+        "trading_account_total_value": 0.0,
+        "trading_position_value": 0.0,
+        "cash": 0.0,
+        "core_value": 0.0,
+        "satellite_value": 0.0,
+        "core_budget": 0.0,
+        "satellite_budget": 0.0,
+        "reserved_cash": 0.0,
+        "unreserved_cash": 0.0,
+        "core_target_value": 0.0,
+        "satellite_target_value": 0.0,
+        "core_target_pct": 0.0,
+        "satellite_target_pct": 0.0,
+        "cash_target_pct": 0.0,
+        "cash_target_value": 0.0,
+        "reconciliation": {
+            "formula": "统一总资产 = 现金 + Core基金市值 + Satellite股票市值",
+            "computed_total": 0.0,
+            "recorded_total": 0.0,
+            "delta": 0.0,
+            "trading_account_formula": "股票纸盘资产 = 现金 + Satellite股票市值",
+            "trading_account_computed_total": 0.0,
+            "trading_account_recorded_total": 0.0,
+            "trading_account_delta": 0.0,
+        },
+    }
+
+
+def _unavailable_regime_policy(message: str) -> dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "as_of_date": None,
+        "regime_key": None,
+        "regime_label": "宏观状态不可用",
+        "stance": "unknown",
+        "application_state": "not_applied",
+        "buy_mode": "paused",
+        "satellite_budget_multiplier": None,
+        "signal_threshold_adjustment": None,
+        "reason_summary": message,
+        "source": "unavailable",
+        "evidence": {"source": "unavailable", "data_date": None},
+    }
+
+
 def _empty_operation_summary() -> dict[str, int | float]:
     return {
         "operation_count": 0,
         "cash_required": 0.0,
+        "reserved_cash": 0.0,
+        "cash_commitment": 0.0,
+        "available_cash_after_reserve": 0.0,
+        "available_cash_after_commitment": 0.0,
         "estimated_minutes": 0,
         "buy_count": 0,
         "reduce_count": 0,

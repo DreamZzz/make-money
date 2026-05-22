@@ -10,7 +10,7 @@ import pandas as pd
 from loguru import logger
 
 from src.config import load_config
-from src.signals.lifecycle import expire_stale_signals, retire_replaced_signals
+from src.signals.lifecycle import expire_stale_signals, retire_replaced_signals, retire_same_day_replaced_signals
 
 
 def _get_config():
@@ -100,6 +100,7 @@ def save_to_db(df: pd.DataFrame) -> int:
     conn = get_connection()
     init_db(conn)
     expire_stale_signals(conn)
+    retire_same_day_replaced_signals(conn, insert_df)
     retire_replaced_signals(conn, insert_df)
     conn.execute(f"INSERT INTO signals ({cols_str}) SELECT {cols_str} FROM insert_df")
     conn.close()

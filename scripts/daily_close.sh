@@ -1,5 +1,5 @@
 #!/bin/bash
-# 收盘一站式：更新行情 → 持仓基础信息 → 指数基金 → 生成信号 → 全局信号仲裁 → 资金分配计划 → 计算净值 → 信号收益跟踪 → 模型监控
+# 收盘一站式：更新行情 → 持仓基础信息 → 字段覆盖 → 指数基金 → 生成信号 → 全局信号仲裁 → 资金分配计划 → 计算净值 → 信号收益跟踪 → 模型监控
 # 注意：股票纸交易只允许在 09:40 开盘闭环执行，收盘闭环不回填开盘成交。
 # 用法: bash scripts/daily_close.sh [strategy_name]
 
@@ -61,7 +61,7 @@ _resolve_qlib_python() {
     echo "QLIB_PYTHON=$QLIB_PYTHON 不能同时满足 Python 3.12+ 和 import qlib；回退到 $1。" >&2
   fi
 
-  for candidate in "$1" python3.12 /opt/homebrew/bin/python3.12 /opt/homebrew/opt/python@3.12/bin/python3.12 python3; do
+  for candidate in "$PROJECT/.venv-qlib/bin/python" "$1" python3.12 /opt/homebrew/bin/python3.12 /opt/homebrew/opt/python@3.12/bin/python3.12 python3; do
     if command -v "$candidate" >/dev/null 2>&1; then
       resolved="$(command -v "$candidate")"
       if _python_is_compatible "$resolved" && _python_can_import "$resolved" qlib; then
@@ -97,54 +97,62 @@ echo "Python: $PYTHON"
 echo "Qlib Python: $QLIB_PYTHON"
 
 # 1. 停 Dashboard（释放 DB 锁）
-echo "1/12 暂停 Dashboard..."
+echo "1/14 暂停 Dashboard..."
 launchctl unload "$DASHBOARD" 2>/dev/null || true
 _dashboard_stopped=1
 trap _restart_dashboard EXIT
 sleep 3
 
 # 2. 拉取最新行情
-echo "2/12 更新行情数据..."
+echo "2/14 更新行情数据..."
 "$PYTHON" -m src.data_pipeline.main update
 
 # 3. 补当前持仓基础信息（失败不阻塞收盘闭环）
-echo "3/12 补当前持仓基础信息..."
+echo "3/14 补当前持仓基础信息..."
 "$PYTHON" -m src.portfolio.fundamentals_coverage update || true
 
-# 4. 更新指数基金
-echo "4/12 更新指数基金数据..."
+# 4. 补目标池字段覆盖（失败不阻塞收盘闭环）
+echo "4/14 补目标池字段覆盖..."
+"$PYTHON" -m src.data_pipeline.field_coverage_backfill --scopes current_holdings,signal_candidates,target_universe --skip-industry-fetch --record-health || true
+
+# 5. 更新指数基金
+echo "5/14 更新指数基金数据..."
 "$PYTHON" -m src.index_funds.pipeline update
 
-# 5. 生成指数基金信号
-echo "5/12 生成指数基金信号..."
+# 6. 生成指数基金信号
+echo "6/14 生成指数基金信号..."
 "$PYTHON" -m src.index_funds.signals generate
 
-# 6. 生成股票信号
-echo "6/12 生成交易信号..."
+# 7. 生成股票信号
+echo "7/14 生成交易信号..."
 "$PYTHON" -m src.signals.generator
 
-# 7. Qlib production 日常推理（无 production 模型时自动跳过）
-echo "7/12 Qlib production 日常推理..."
+# 8. Qlib production 日常推理（无 production 模型时自动跳过）
+echo "8/14 Qlib production 日常推理..."
 "$QLIB_PYTHON" -m src.backtest.qlib_runner predict-latest --model production || true
 
-# 8. 规则/Qlib 统一信号仲裁
-echo "8/12 全局信号仲裁..."
+# 9. 生产预测就绪门禁
+echo "9/14 生产预测就绪门禁..."
+"$PYTHON" -m src.monitoring.model_monitor assert-prediction-ready
+
+# 10. 规则/Qlib 统一信号仲裁
+echo "10/14 全局信号仲裁..."
 "$PYTHON" -m src.signals.arbiter
 
-# 9. 统一资金分配计划
-echo "9/12 生成统一资金分配计划..."
+# 11. 统一资金分配计划
+echo "11/14 生成统一资金分配计划..."
 "$PYTHON" -m src.portfolio.allocator plan
 
-# 10. 净值重算；纸交易只能由 scripts/open_paper_trade.py 在开盘窗口执行。
-echo "10/12 重算资金净值..."
+# 12. 净值重算；纸交易只能由 scripts/open_paper_trade.py 在开盘窗口执行。
+echo "12/14 重算资金净值..."
 "$PYTHON" -m src.portfolio.nav_calculator
 
-# 11. 信号收益跟踪
-echo "11/12 更新信号收益跟踪..."
+# 13. 信号收益跟踪
+echo "13/14 更新信号收益跟踪..."
 "$PYTHON" -m src.signals.outcome_tracker update
 
-# 12. 生产模型监控
-echo "12/12 生产模型监控..."
+# 14. 生产模型监控
+echo "14/14 生产模型监控..."
 "$PYTHON" -m src.monitoring.model_monitor update
 
 # 重启 Dashboard

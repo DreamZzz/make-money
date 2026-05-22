@@ -35,8 +35,8 @@ export function RebalancePlanTable({ groups }: Props) {
                 <th>标的</th>
                 <th>层</th>
                 <th>动作</th>
-                <th>金额</th>
-                <th>预算占用</th>
+                <th>当前 / 目标</th>
+                <th>预留 / 现金影响</th>
                 <th>说明</th>
               </tr>
             </thead>
@@ -67,8 +67,14 @@ function RebalanceRow({ item }: { item: RebalanceItem }) {
       <td>
         <span className={`action-pill action-pill--${String(item.action).toLowerCase()}`}>{displayAction(item)}</span>
       </td>
-      <td>{formatCurrency(item.expected_cash ?? item.budget_delta)}</td>
-      <td>{formatCurrency(item.budget_consumption)}</td>
+      <td>
+        <strong>{formatCurrency(item.current_value)}</strong>
+        <span className="muted-line">目标 {formatCurrency(item.target_value)}</span>
+      </td>
+      <td>
+        <strong>{cashImpactLabel(item)}</strong>
+        <span className="muted-line">{cashImpactHelp(item)}</span>
+      </td>
       <td>{item.bucket_reason || item.reason || "-"}</td>
     </tr>
   );
@@ -79,4 +85,25 @@ function displayAction(item: RebalanceItem): string {
     return translateBudgetAction(item.action);
   }
   return translateAction(item.action);
+}
+
+function cashImpactLabel(item: RebalanceItem): string {
+  const action = String(item.action || "").toUpperCase();
+  if (item.instrument_type === "sleeve" || String(item.execution_mode || "").toUpperCase() === "BUDGET") {
+    return formatCurrency(item.budget_consumption ?? item.expected_cash ?? item.budget_delta);
+  }
+  if (action === "REDUCE" || action === "SELL") {
+    return formatCurrency(item.expected_cash ?? item.cash_effect);
+  }
+  return formatCurrency(item.expected_cash ?? item.budget_delta);
+}
+
+function cashImpactHelp(item: RebalanceItem): string {
+  const action = String(item.action || "").toUpperCase();
+  if (item.instrument_type === "sleeve" || String(item.execution_mode || "").toUpperCase() === "BUDGET") {
+    return "资金池预留，不是订单";
+  }
+  if (action === "REDUCE" || action === "SELL") return "预计释放现金";
+  if (action === "BUY" || action === "ADD") return "预计占用现金";
+  return "无现金动作";
 }

@@ -1,7 +1,12 @@
 import pandas as pd
 
 from src.data_pipeline.fetchers.free_sources import (
+    fetch_cninfo_industry_members,
+    fetch_eastmoney_industry_members,
+    fetch_legulegu_sw_industry_members,
+    fetch_ths_industry_members,
     normalize_eastmoney_research_reports,
+    normalize_industry_members,
     normalize_mootdx_daily,
     normalize_tencent_daily,
     normalize_tencent_quote_snapshot,
@@ -108,6 +113,189 @@ def test_normalize_eastmoney_research_reports_keeps_forecast_fields():
         "pe_forecast_year_1": 5.3,
         "source_url": "https://example.com/report.pdf",
     }]
+
+
+def test_normalize_industry_members_maps_eastmoney_board_constituents():
+    raw = pd.DataFrame([
+        {"代码": "000001", "名称": "平安银行"},
+        {"股票代码": "600519", "股票名称": "贵州茅台"},
+    ])
+
+    result = normalize_industry_members(raw, industry="银行", source="eastmoney_industry_board")
+
+    assert result.attrs["source_status"] == "ok"
+    assert result.to_dict("records") == [
+        {"symbol": "000001", "name": "平安银行", "industry": "银行", "country": "CN", "source": "eastmoney_industry_board"},
+        {"symbol": "600519", "name": "贵州茅台", "industry": "银行", "country": "CN", "source": "eastmoney_industry_board"},
+    ]
+
+
+def test_fetch_eastmoney_industry_members_aggregates_board_constituents():
+    board_names = pd.DataFrame([
+        {"板块名称": "银行"},
+        {"板块名称": "白酒"},
+    ])
+    calls: list[str] = []
+
+    def fake_cons(symbol: str) -> pd.DataFrame:
+        calls.append(symbol)
+        if symbol == "银行":
+            return pd.DataFrame([{"代码": "000001", "名称": "平安银行"}])
+        return pd.DataFrame([{"代码": "600519", "名称": "贵州茅台"}])
+
+    result = fetch_eastmoney_industry_members(
+        provider_names=lambda: board_names,
+        provider_cons=fake_cons,
+        sleep_seconds=0,
+    )
+
+    assert calls == ["银行", "白酒"]
+    assert result[["symbol", "name", "industry"]].to_dict("records") == [
+        {"symbol": "000001", "name": "平安银行", "industry": "银行"},
+        {"symbol": "600519", "name": "贵州茅台", "industry": "白酒"},
+    ]
+
+
+def test_fetch_legulegu_sw_industry_members_uses_first_level_industry_pages():
+    first_info = pd.DataFrame([
+        {"行业代码": "801780.SI", "行业名称": "银行"},
+        {"行业代码": "801120.SI", "行业名称": "食品饮料"},
+    ])
+    urls: list[str] = []
+
+    def fake_requester(url: str, **_kwargs):
+        urls.append(url)
+        if "801780.SI" in url:
+            text = """
+            <table><tr><th>股票代码</th><th>股票简称</th><th>申万1级</th></tr>
+            <tr><td>000001.SZ</td><td>平安银行</td><td>银行</td></tr></table>
+            """
+        else:
+            text = """
+            <table><tr><th>股票代码</th><th>股票简称</th><th>申万1级</th></tr>
+            <tr><td>600519.SH</td><td>贵州茅台</td><td>食品饮料</td></tr></table>
+            """
+        return type("Resp", (), {"text": text})()
+
+    result = fetch_legulegu_sw_industry_members(
+        provider_first_info=lambda: first_info,
+        requester=fake_requester,
+        target_symbols=["600519"],
+        sleep_seconds=0,
+    )
+
+    assert any("801780.SI" in url for url in urls)
+    assert any("801120.SI" in url for url in urls)
+    assert result[["symbol", "name", "industry"]].to_dict("records") == [
+        {"symbol": "000001", "name": "平安银行", "industry": "银行"},
+        {"symbol": "600519", "name": "贵州茅台", "industry": "食品饮料"},
+    ]
+
+
+def test_fetch_ths_industry_members_parses_detail_pages_until_targets_are_found():
+    board_names = pd.DataFrame([
+        {"name": "银行", "code": "881155"},
+        {"name": "白酒", "code": "881273"},
+    ])
+    urls: list[str] = []
+
+    def fake_requester(url: str, **_kwargs):
+        urls.append(url)
+        if "881155" in url:
+            text = """
+            <table><tr><th>代码</th><th>名称</th></tr>
+            <tr><td>000001</td><td>平安银行</td></tr></table>
+            """
+        else:
+            text = """
+            <table><tr><th>代码</th><th>名称</th></tr>
+            <tr><td>600519</td><td>贵州茅台</td></tr></table>
+            """
+        return type("Resp", (), {"text": text})()
+
+    result = fetch_ths_industry_members(
+        provider_names=lambda: board_names,
+        requester=fake_requester,
+        target_symbols=["600519"],
+        sleep_seconds=0,
+        max_pages=3,
+    )
+
+    assert any("881155" in url for url in urls)
+    assert any("881273" in url for url in urls)
+    assert result[["symbol", "name", "industry"]].to_dict("records") == [
+        {"symbol": "000001", "name": "平安银行", "industry": "银行"},
+        {"symbol": "600519", "name": "贵州茅台", "industry": "白酒"},
+    ]
+
+
+def test_fetch_ths_industry_members_parses_board_list_without_akshare_wrapper():
+    def fake_requester(url: str, **_kwargs):
+        if url == "http://q.10jqka.com.cn/thshy/":
+            text = """
+            <a href="http://q.10jqka.com.cn/thshy/detail/code/881155/">银行</a>
+            """
+        else:
+            text = """
+            <table><tr><th>代码</th><th>名称</th></tr>
+            <tr><td>000001</td><td>平安银行</td></tr></table>
+            """
+        return type("Resp", (), {"text": text})()
+
+    result = fetch_ths_industry_members(
+        requester=fake_requester,
+        target_symbols=["000001"],
+        sleep_seconds=0,
+        max_pages=1,
+    )
+
+    assert result[["symbol", "name", "industry"]].to_dict("records") == [
+        {"symbol": "000001", "name": "平安银行", "industry": "银行"},
+    ]
+
+
+def test_fetch_cninfo_industry_members_prefers_sw_classification():
+    calls: list[str] = []
+
+    def fake_provider(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        calls.append(f"{symbol}:{start_date}:{end_date}")
+        return pd.DataFrame([
+            {
+                "证券代码": symbol,
+                "新证券简称": "用友网络",
+                "分类标准": "中国上市公司协会上市公司行业分类标准",
+                "行业门类": "信息传输、软件和信息技术服务业",
+                "行业次类": None,
+                "行业大类": "软件和信息技术服务业",
+                "变更日期": pd.Timestamp("2024-02-08"),
+            },
+            {
+                "证券代码": symbol,
+                "新证券简称": "用友网络",
+                "分类标准": "申银万国行业分类标准",
+                "行业门类": "计算机",
+                "行业次类": "软件开发",
+                "行业大类": "横向通用软件",
+                "变更日期": pd.Timestamp("2021-07-30"),
+            },
+        ])
+
+    result = fetch_cninfo_industry_members(
+        ["600588"],
+        provider=fake_provider,
+        end_date="20260522",
+        sleep_seconds=0,
+    )
+
+    assert calls == ["600588:20200101:20260522"]
+    assert result[["symbol", "name", "industry", "source"]].to_dict("records") == [
+        {
+            "symbol": "600588",
+            "name": "用友网络",
+            "industry": "软件开发",
+            "source": "cninfo_industry_change",
+        },
+    ]
 
 
 def test_normalize_mootdx_daily_accepts_vol_column():

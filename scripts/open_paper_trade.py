@@ -152,6 +152,25 @@ def _has_open_snapshot(conn, symbol: str, trade_date: date) -> bool:
     return row is not None
 
 
+def _fill_missing_pre_close(conn, symbol: str, trade_date: date) -> None:
+    conn.execute("""
+        UPDATE daily_price cur
+        SET pre_close = prev.close
+        FROM (
+            SELECT close
+            FROM daily_price
+            WHERE symbol = ?
+              AND trade_date < ?
+              AND close IS NOT NULL
+            ORDER BY trade_date DESC
+            LIMIT 1
+        ) prev
+        WHERE cur.symbol = ?
+          AND cur.trade_date = ?
+          AND cur.pre_close IS NULL
+    """, [symbol, trade_date, symbol, trade_date])
+
+
 def _load_target_symbols(conn) -> list[tuple[str, str]]:
     rows = conn.execute("""
         WITH latest_positions AS (
@@ -212,6 +231,9 @@ def _update_target_symbols() -> int:
                 print(f"  no_data {symbol} {market}: {source}")
                 continue
             upsert_daily_price(conn, df)
+            if "trade_date" in df.columns:
+                for trade_date in pd.to_datetime(df["trade_date"]).dt.date.dropna().unique():
+                    _fill_missing_pre_close(conn, symbol, trade_date)
             summary.updated += 1
         print(summary.to_log_line())
         print("OPEN_TARGET_UPDATE_SUMMARY_JSON: " + json.dumps(summary.to_dict(), ensure_ascii=False))

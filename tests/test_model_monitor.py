@@ -4,7 +4,12 @@ from datetime import date
 import duckdb
 
 from src.data_pipeline.loader import init_db
-from src.monitoring.model_monitor import evaluate_production_model, update_production_model_monitor
+from src.monitoring import model_monitor
+from src.monitoring.model_monitor import (
+    auto_demote_production_model,
+    evaluate_production_model,
+    update_production_model_monitor,
+)
 
 
 def _conn():
@@ -26,6 +31,23 @@ def _seed_production_model(conn, model_version: str = "alpha158-prod", experimen
     """)
 
 
+def _seed_monitor_alert(
+    conn,
+    *,
+    alert_date: date,
+    severity: str,
+    status: str = "ACTIVE",
+    metric_name: str = "production_model_health",
+) -> None:
+    conn.execute("""
+        INSERT INTO model_monitor_alerts (
+            alert_id, model_name, model_version, experiment_id, alert_date,
+            severity, metric_name, status, message
+        )
+        VALUES (?, 'alpha158', 'alpha158-prod', 'EXP-PROD', ?, ?, ?, ?, 'seeded alert')
+    """, [f"{severity}-{status}-{metric_name}-{alert_date.isoformat()}", alert_date, severity, metric_name, status])
+
+
 def test_model_monitor_alerts_when_production_prediction_is_missing():
     conn = _conn()
     _seed_production_model(conn)
@@ -39,6 +61,47 @@ def test_model_monitor_alerts_when_production_prediction_is_missing():
 
     assert result["status"] == "degraded"
     assert ("production_prediction_missing", "WARN", "ACTIVE", "production 模型尚未生成生产预测截面") in alerts
+    conn.close()
+
+
+def test_model_monitor_persists_critical_alert_when_production_model_is_missing():
+    conn = _conn()
+
+    result = update_production_model_monitor(conn, as_of=date(2026, 5, 15))
+    row = conn.execute("""
+        SELECT model_name, model_version, metric_name, severity, status, message
+        FROM model_monitor_alerts
+        WHERE metric_name = 'production_model_missing'
+    """).fetchone()
+
+    assert result["status"] == "failed"
+    assert row == ("alpha158", None, "production_model_missing", "CRITICAL", "ACTIVE", "Qlib production 模型不可用")
+    conn.close()
+
+
+def test_model_monitor_resolves_old_version_alerts_when_production_switches():
+    conn = _conn()
+    _seed_production_model(conn, model_version="alpha158-new", experiment_id="EXP-NEW")
+    conn.execute("""
+        INSERT INTO model_monitor_alerts (
+            alert_id, model_name, model_version, experiment_id, alert_date,
+            severity, metric_name, status, message
+        )
+        VALUES
+            ('OLD-ALERT', 'alpha158', 'alpha158-old', 'EXP-OLD', DATE '2026-05-14',
+             'WARN', 'alpha_h5', 'ACTIVE', 'old alert'),
+            ('MISSING-ALERT', 'alpha158', NULL, NULL, DATE '2026-05-14',
+             'CRITICAL', 'production_model_missing', 'ACTIVE', 'old missing alert')
+    """)
+
+    update_production_model_monitor(conn, as_of=date(2026, 5, 15))
+    rows = dict(conn.execute("""
+        SELECT alert_id, status
+        FROM model_monitor_alerts
+        WHERE alert_id IN ('OLD-ALERT', 'MISSING-ALERT')
+    """).fetchall())
+
+    assert rows == {"OLD-ALERT": "RESOLVED", "MISSING-ALERT": "RESOLVED"}
     conn.close()
 
 
@@ -179,4 +242,120 @@ def test_evaluate_production_model_reports_low_alpha_alert():
 
     assert result["status"] == "degraded"
     assert any(alert["metric_name"] == "alpha_h5" for alert in result["alerts"])
+    conn.close()
+
+
+def test_auto_demote_production_model_requires_consecutive_critical_active_alerts():
+    conn = _conn()
+    _seed_production_model(conn)
+    for day in range(8, 16):
+        _seed_monitor_alert(conn, alert_date=date(2026, 5, day), severity="CRITICAL")
+
+    result = auto_demote_production_model(conn, as_of=date(2026, 5, 15), min_consecutive_days=8)
+    status = conn.execute("""
+        SELECT status
+        FROM qlib_model_registry
+        WHERE model_version = 'alpha158-prod'
+    """).fetchone()[0]
+
+    assert result["demoted"] is True
+    assert result["model_name"] == "alpha158"
+    assert result["model_version"] == "alpha158-prod"
+    assert result["critical_streak_days"] == 8
+    assert status == "staging"
+    conn.close()
+
+
+def test_auto_demote_production_model_ignores_warn_alerts():
+    conn = _conn()
+    _seed_production_model(conn)
+    for day in range(8, 16):
+        _seed_monitor_alert(conn, alert_date=date(2026, 5, day), severity="WARN")
+
+    result = auto_demote_production_model(conn, as_of=date(2026, 5, 15), min_consecutive_days=8)
+    status = conn.execute("""
+        SELECT status
+        FROM qlib_model_registry
+        WHERE model_version = 'alpha158-prod'
+    """).fetchone()[0]
+
+    assert result["demoted"] is False
+    assert result["critical_streak_days"] == 0
+    assert status == "production"
+    conn.close()
+
+
+def test_auto_demote_production_model_does_not_demote_when_critical_streak_is_broken():
+    conn = _conn()
+    _seed_production_model(conn)
+    for alert_day in [date(2026, 5, 7), date(2026, 5, 8), date(2026, 5, 10), date(2026, 5, 11)]:
+        _seed_monitor_alert(conn, alert_date=alert_day, severity="CRITICAL")
+
+    result = auto_demote_production_model(conn, as_of=date(2026, 5, 11), min_consecutive_days=4)
+    status = conn.execute("""
+        SELECT status
+        FROM qlib_model_registry
+        WHERE model_version = 'alpha158-prod'
+    """).fetchone()[0]
+
+    assert result["demoted"] is False
+    assert result["critical_streak_days"] == 2
+    assert status == "production"
+    conn.close()
+
+
+def test_auto_demote_cli_uses_alpha158_and_eight_day_defaults(monkeypatch, capsys):
+    calls = []
+
+    def fake_auto_demote(*, model_name: str, min_consecutive_days: int, as_of: date | None = None):
+        calls.append((model_name, min_consecutive_days, as_of))
+        return {"demoted": False, "status": "monitoring"}
+
+    monkeypatch.setattr(model_monitor, "auto_demote_production_model", fake_auto_demote)
+
+    exit_code = model_monitor.main(["auto-demote"])
+    output = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert calls == [("alpha158", 8, None)]
+    assert output == {"demoted": False, "status": "monitoring"}
+
+
+def test_auto_demote_cli_accepts_as_of_date(monkeypatch, capsys):
+    calls = []
+
+    def fake_auto_demote(*, model_name: str, min_consecutive_days: int, as_of: date | None = None):
+        calls.append((model_name, min_consecutive_days, as_of))
+        return {"demoted": False, "status": "monitoring"}
+
+    monkeypatch.setattr(model_monitor, "auto_demote_production_model", fake_auto_demote)
+
+    exit_code = model_monitor.main([
+        "auto-demote",
+        "--model-name",
+        "alpha158",
+        "--min-consecutive-days",
+        "4",
+        "--as-of",
+        "2026-05-18",
+    ])
+    output = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert calls == [("alpha158", 4, date(2026, 5, 18))]
+    assert output == {"demoted": False, "status": "monitoring"}
+
+
+def test_assert_prediction_ready_cli_fails_when_prediction_is_missing(monkeypatch, capsys):
+    conn = _conn()
+    _seed_production_model(conn)
+
+    monkeypatch.setattr(model_monitor, "update_production_model_monitor", lambda as_of=None: update_production_model_monitor(conn, as_of=as_of))
+
+    exit_code = model_monitor.main(["assert-prediction-ready", "--as-of", "2026-05-15"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 2
+    assert payload["ready"] is False
+    assert "production_prediction_missing" in payload["blocking_metrics"]
     conn.close()
