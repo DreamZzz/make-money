@@ -33,6 +33,12 @@ index_funds:
 
 portfolio:
   max_daily_turnover_pct: 0.30
+  # 规则策略 BUY 全局门槛（trend/mean_reversion 等，confidence 尺度约 0.84）
+  min_rebalance_buy_confidence: 0.75
+  min_rebalance_buy_rank_score: 0.50
+  # alpha158 生产模型 BUY 专属门槛（confidence 为排名分位型分数，尺度约 0.67）
+  min_baseline_buy_confidence: 0.55
+  min_baseline_buy_rank_score: 0.30
   signal_arbiter:
     enabled: true
     consensus_baselines:
@@ -51,8 +57,9 @@ portfolio:
     drawdown_window: 120
   allocation:
     enabled: true
-    core_target_pct: 0.60
-    satellite_target_pct: 0.40
+    core_target_pct: 0.50
+    satellite_target_pct: 0.45
+    cash_target_pct: 0.05
     rebalance_tolerance_pct: 0.05
     min_trade_amount: 1000
     core_cash_priority: true

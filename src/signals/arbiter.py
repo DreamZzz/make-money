@@ -100,10 +100,21 @@ def _empty_baseline_predictions() -> pd.DataFrame:
 def _load_latest_baseline_predictions(
     conn: duckdb.DuckDBPyConnection,
     model_names: list[str],
+    as_of: date | None = None,
 ) -> pd.DataFrame:
+    """加载共识基准的最新预测。
+
+    ``as_of`` 给定时只取 prediction_date <= as_of 的预测（历史回放防 look-ahead）；
+    默认 None 取全部最新预测（前向日常调用）。
+    """
     if not model_names:
         return _empty_baseline_predictions()
     placeholders = ",".join(["?"] * len(model_names))
+    params: list[Any] = list(model_names)
+    as_of_filter = ""
+    if as_of is not None:
+        as_of_filter = "AND qp.prediction_date <= ?"
+        params.append(as_of)
     try:
         return conn.execute(
             f"""
@@ -125,6 +136,7 @@ def _load_latest_baseline_predictions(
                   ON p.model_name = qp.model_name
                  AND p.model_version = qp.model_version
                 WHERE qp.mode = 'production_inference'
+                  {as_of_filter}
             )
             SELECT model_name, symbol, prediction_date, rank, confidence, score, model_version
             FROM candidate_predictions
@@ -132,7 +144,7 @@ def _load_latest_baseline_predictions(
                 PARTITION BY model_name, symbol ORDER BY prediction_date DESC, selected DESC, rank ASC
             ) = 1
             """,
-            model_names,
+            params,
         ).fetchdf()
     except Exception:
         return _empty_baseline_predictions()
@@ -233,8 +245,15 @@ def _base_decision(
         }
 
     portfolio_cfg = config.get("portfolio", {})
-    min_conf = float(portfolio_cfg.get("min_rebalance_buy_confidence", 0.75) or 0.0)
-    min_rank_score = float(portfolio_cfg.get("min_rebalance_buy_rank_score", 0.50) or 0.0)
+    # 跨模型 confidence 不可比：alpha158 生产模型的 confidence 是排名分位型分数
+    # （均值约 0.67），用为规则策略校准的 0.75 门槛会过滤掉生产模型自己已精选的
+    # top-N。baseline-self 信号的选择本身即共识，这里只保留一个低位安全门槛。
+    if model_name in baseline_set:
+        min_conf = float(portfolio_cfg.get("min_baseline_buy_confidence", 0.55) or 0.0)
+        min_rank_score = float(portfolio_cfg.get("min_baseline_buy_rank_score", 0.30) or 0.0)
+    else:
+        min_conf = float(portfolio_cfg.get("min_rebalance_buy_confidence", 0.75) or 0.0)
+        min_rank_score = float(portfolio_cfg.get("min_rebalance_buy_rank_score", 0.50) or 0.0)
     rank_score = confidence * max(score, 0.0)
     if confidence < min_conf or rank_score < min_rank_score:
         return {

@@ -246,3 +246,25 @@ export type ResearchSummary = {
   portana: Record<string, unknown>;
   legacy_streamlit?: { label: string; url: string };
 };
+
+export type TournamentSnapshot = {
+  accounts: Array<{
+    account_id: string;
+    name: string;
+    description?: string;
+    initial_capital: number;
+    status: string;
+    is_real_candidate: boolean;
+    models: string[];
+    benchmark_index: string;
+  }>;
+  leaderboard: Array<Record<string, unknown>>;
+  tournament: {
+    ranking: Array<Record<string, unknown>>;
+    eligible_count: number;
+    recommended_winner: string | null;
+    selection_note: string;
+  };
+  nav_curves: Record<string, Array<{ date: string | null; nav: number | null }>>;
+  error?: string;
+};

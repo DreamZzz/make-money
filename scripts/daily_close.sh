@@ -152,8 +152,12 @@ echo "13/14 更新信号收益跟踪..."
 "$PYTHON" -m src.signals.outcome_tracker update
 
 # 14. 生产模型监控
-echo "14/14 生产模型监控..."
+echo "14/15 生产模型监控..."
 "$PYTHON" -m src.monitoring.model_monitor update
+
+# 15. 虚拟账户竞赛前向执行（非阻塞，绝不影响收盘主链）
+echo "15/15 虚拟账户竞赛前向执行..."
+"$PYTHON" -m src.accounts.daily forward || true
 
 # 重启 Dashboard
 _restart_dashboard

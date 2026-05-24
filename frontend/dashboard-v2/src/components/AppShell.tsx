@@ -1,15 +1,16 @@
-import { Activity, Beaker, BookOpenText, ClipboardList, HeartPulse, LayoutDashboard } from "lucide-react";
+import { Activity, Beaker, BookOpenText, ClipboardList, HeartPulse, LayoutDashboard, Trophy } from "lucide-react";
 
 import type { HealthState } from "../types";
 import { DataHealthRibbon } from "./DataHealthRibbon";
 
-export type RouteKey = "/today" | "/rebalance" | "/portfolio" | "/health" | "/research" | "/guide";
+export type RouteKey = "/today" | "/rebalance" | "/portfolio" | "/health" | "/tournament" | "/research" | "/guide";
 
 const NAV_ITEMS: Array<{ path: RouteKey; label: string; icon: React.ReactNode }> = [
   { path: "/today", label: "今日行动", icon: <LayoutDashboard size={18} /> },
   { path: "/rebalance", label: "调仓执行", icon: <ClipboardList size={18} /> },
   { path: "/portfolio", label: "组合体检", icon: <Activity size={18} /> },
   { path: "/health", label: "市场与数据健康", icon: <HeartPulse size={18} /> },
+  { path: "/tournament", label: "策略竞赛", icon: <Trophy size={18} /> },
   { path: "/research", label: "研究实验室", icon: <Beaker size={18} /> },
   { path: "/guide", label: "使用手册", icon: <BookOpenText size={18} /> },
 ];

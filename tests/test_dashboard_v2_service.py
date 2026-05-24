@@ -834,3 +834,36 @@ def test_dashboard_v2_safe_writes_persist_audit_log(tmp_path) -> None:
     assert flow_count == 1
     assert snap_count == 1
     assert audits == [("cashflow.create", "ok"), ("index_fund_snapshot.create", "ok")]
+
+
+def test_dashboard_v2_tournament_snapshot(tmp_path) -> None:
+    from src.accounts.config import AccountConfig
+    from src.accounts.leaderboard import refresh_all_metrics
+    from src.accounts.registry import upsert_account
+    from src.dashboard_v2.service import DashboardV2Service
+
+    db_path = tmp_path / "tournament.duckdb"
+    conn = duckdb.connect(str(db_path))
+    init_db(conn)
+    upsert_account(conn, "acc1", "账户一", AccountConfig(models=("alpha158",), benchmark_index="000300"))
+    from datetime import date as _date
+    for i, nv in enumerate([1.0, 1.1, 1.2]):
+        d = _date(2024, 1, 2 + i)
+        dr = 0.0 if i == 0 else [1.0, 1.1, 1.2][i] / [1.0, 1.1, 1.2][i - 1] - 1
+        conn.execute(
+            "INSERT INTO account_nav (account_id, trade_date, nav, daily_return, cash, position_value, total_value, drawdown) "
+            "VALUES ('acc1', ?, ?, ?, 0, ?, ?, 0)",
+            [d, nv, dr, nv * 1e6, nv * 1e6],
+        )
+        conn.execute("INSERT INTO index_daily (index_code, trade_date, close) VALUES ('000300', ?, 100.0)", [d])
+    refresh_all_metrics(conn)
+    conn.close()
+
+    snap = DashboardV2Service(db_path=db_path).build_tournament_snapshot()
+    assert len(snap["accounts"]) == 1
+    assert snap["accounts"][0]["account_id"] == "acc1"
+    assert len(snap["leaderboard"]) == 1
+    assert snap["leaderboard"][0]["rank"] == 1
+    assert "acc1" in snap["nav_curves"]
+    assert len(snap["nav_curves"]["acc1"]) == 3
+    assert "recommended_winner" in snap["tournament"]

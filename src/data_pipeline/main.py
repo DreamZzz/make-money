@@ -7,6 +7,7 @@
 """
 import os
 import sys
+from dataclasses import dataclass
 from datetime import date, timedelta
 
 import click
@@ -840,6 +841,61 @@ def init():
     conn.close()
 
 
+@dataclass(frozen=True)
+class UpdateHealth:
+    """增量更新健康判定结果。
+
+    瞬时源错误（限流/provider 不可达）不再 hard-fail 收盘链：只要覆盖率达标，
+    它们只降级（DEGRADED）而不中止。只有覆盖率过低或真实异常超阈值才 FAILED。
+    """
+
+    ok: bool
+    level: str  # OK / DEGRADED / FAILED
+    reason: str
+    attempted: int
+    updated: int
+    success_ratio: float
+    transient_errors: int
+    hard_failures: int
+
+
+def evaluate_update_health(stats: dict, data_cfg: dict | None = None) -> UpdateHealth:
+    data_cfg = data_cfg or {}
+    attempted = int(stats.get("cn_attempted", 0)) + int(stats.get("hk_attempted", 0))
+    updated = int(stats.get("cn_updated", 0)) + int(stats.get("hk_updated", 0))
+    transient = int(stats.get("cn_source_error", 0)) + int(stats.get("hk_source_error", 0))
+    hard = (
+        int(stats.get("cn_failed", 0))
+        + int(stats.get("hk_failed", 0))
+        + int(stats.get("index_failed", 0))
+    )
+    min_ratio = float(data_cfg.get("min_update_success_ratio", 0.5) or 0.0)
+    max_hard = int(data_cfg.get("max_update_failures", 0))
+
+    if attempted == 0:
+        return UpdateHealth(True, "OK", "无待更新标的（非交易日或数据已最新）", 0, 0, 1.0, transient, hard)
+
+    success_ratio = updated / attempted
+    problems: list[str] = []
+    if success_ratio < min_ratio:
+        problems.append(
+            f"更新成功率 {success_ratio:.0%} 低于阈值 {min_ratio:.0%}"
+            f"（updated={updated}/attempted={attempted}）"
+        )
+    if hard > max_hard:
+        problems.append(f"真实失败项 {hard} 超过阈值 {max_hard}")
+
+    if problems:
+        return UpdateHealth(False, "FAILED", "；".join(problems), attempted, updated, success_ratio, transient, hard)
+
+    level = "DEGRADED" if (transient > 0 or success_ratio < 0.95) else "OK"
+    reason = (
+        f"更新成功率 {success_ratio:.0%}（updated={updated}/attempted={attempted}），"
+        f"瞬时源错误 {transient}，真实失败 {hard}"
+    )
+    return UpdateHealth(True, level, reason, attempted, updated, success_ratio, transient, hard)
+
+
 @cli.command()
 def update():
     """每日增量更新"""
@@ -849,18 +905,11 @@ def update():
     config = _load_config()
     stats = update_all(conn, config)
     conn.close()
-    failure_count = (
-        stats.get("cn_failed", 0)
-        + stats.get("hk_failed", 0)
-        + stats.get("cn_source_error", 0)
-        + stats.get("hk_source_error", 0)
-        + stats.get("index_failed", 0)
-    )
-    max_failures = config.get("data", {}).get("max_update_failures", 0)
-    if failure_count > max_failures:
-        raise click.ClickException(
-            f"增量更新存在 {failure_count} 个失败项，超过阈值 {max_failures}。"
-        )
+    health = evaluate_update_health(stats, config.get("data", {}))
+    log = logger.info if health.ok else logger.error
+    log(f"增量更新健康度 [{health.level}]: {health.reason}")
+    if not health.ok:
+        raise click.ClickException(f"增量更新不可用 [{health.level}]：{health.reason}")
 
 
 @cli.command("update-snapshot")

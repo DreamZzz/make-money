@@ -372,3 +372,27 @@ Copy this block below the previous weekly entry.
 - Landed: daily close script and Dashboard job workflow update signal outcomes after paper trading, NAV, and performance review.
 - Current local run: `python3 -m src.signals.outcome_tracker update` returned `updated=0`, meaning no eligible filled signals currently require outcome rows.
 - Verification evidence: focused signal outcome and Dashboard workflow tests passed; latest `scripts/quality_check.sh` passed with 157 tests.
+
+### 2026-05-24 Pre-Go-Live Iteration (P1-D / P0-B / P0-C / P1-E / P0-A)
+
+Triggered by a fresh end-to-end readiness review against the goal of guiding retail trading. Root causes were verified against the live DuckDB before any change.
+
+- P1-D close-chain reliability (Landed): `src.data_pipeline.main.evaluate_update_health` replaces the absolute `failure_count > max_update_failures(=0)` gate. Transient `*_source_error` (rate-limit / provider unreachable) no longer hard-fail the chain; only low coverage (`min_update_success_ratio`, default 0.5) or genuine `*_failed` exceptions over `max_update_failures` abort. This fixes the 2026-05-22 close FAILED caused by a rate-limit burst while data was still fresh. Qlib runtime confirmed healthy: `daily_close.sh` resolves `.venv-qlib/bin/python` first; `qlib_predictions` max date == `daily_price` max date (2026-05-22).
+- P0-B satellite budget starvation (Landed): root cause was static 60/40 with 5% tolerance + core-cash-priority — satellite at 35.3% vs 40% sat within the tolerance band, so it received 0 budget while under-target core absorbed all cash. Per product decision (individual stock signals are the core value), `config/settings.yaml` allocation re-weighted to core 0.50 / satellite 0.45 / cash 0.05. Verified with `--no-persist`: satellite_budget moves from 0 to ~46,659 on the 2026-05-22 account state. Next close applies it automatically.
+- P0-C arbiter BUY gate calibration (Landed): the global confidence floor (0.75, calibrated for rule strategies ~0.84) was rejecting 12/15 of alpha158's own production BUYs (confidence scale ~0.67). Added baseline-specific floors `min_baseline_buy_confidence` (0.55) / `min_baseline_buy_rank_score` (0.30) applied to baseline-self signals; rule-strategy floors unchanged. Decision: do NOT loosen rule-strategy floors — with a 26-36% realized hit rate, looser gates would only execute more losing trades. The "Qlib共识过期" rejection bucket is a symptom of P1-D freshness lag and self-resolves with fresh daily predictions (`max_prediction_stale_days=3` kept).
+- P1-E execution regression coverage (Verified): the headline execution bugs already have green regression tests — `test_paper_engine_deduplicates_same_strategy_symbol_side_execution_day` (duplicate same-day BUY, 600808) and `test_current_position_helpers_ignore_stale_positions_after_strategy_is_flat` (stale holdings gate). 27 execution tests pass. Remaining: the close-vs-open fill timing (order_ts) residual is mitigated by trade_key dedup + the budget fix and is a watch-item for the 5-trading-day stabilization window, not a code emergency.
+- P0-A go-live gate (Defined; expectation reframe): "high win rate" is the wrong target for a monthly-rebalance trend/ML system (low win rate, positive expectancy by design). Go-live gate before guiding real retail trading: (1) >= 100 READY `signal_outcomes` rows accumulated from the fixed chain; (2) T+20 `alpha_vs_benchmark` weighted average sustained positive over the sample; (3) open-execution NO_ACTION rate back under ~0.5 for 3+ consecutive trading days; (4) 5 consecutive clean open+close chains (P0-09). Current state (2026-05-24): 67 READY rows, T+1 hit 36% / T+5 hit 26%, NO_ACTION ~0.93 — gate NOT met. Realistic timeline is weeks, not next week.
+- Verification evidence: `pytest -q` 379 passed, 1 pre-existing unrelated failure (`test_survivorship_impact` DuckDB timestamp representation, fails on stock HEAD too); `ruff check` clean on all changed files; new tests in `tests/test_daily_update.py` (4) and `tests/test_signal_arbiter.py` (1).
+
+### 2026-05-24 多账户竞赛验证系统（虚拟账户并行对标）
+
+- 动机：单账户串行纸交易验证周期太长。改为管理多个虚拟账户，各跑不同模型/策略配置，相同行情下并行对标，选最优指导实盘。
+- 账户粒度 = 一套完整可部署配置（模型组合 + 套利门槛 + 配比 + 风险档）。`virtual_accounts` 注册表 + 账户级 `account_orders/positions/nav/decisions/performance` 表（复用已账户化的 cashbook）。5 个种子账户。
+- 真隔离执行引擎 `src/accounts/engine.py`：每账户用自己配置独立套利（复用 `arbiter._build_decisions` 纯函数）、在隔离现金/持仓上成交（复用 `estimate_buy_execution`/`check_open_tradeable`），不碰现有 default 链路。
+- 历史回放预热 `src/accounts/replay.py`：解决"周期太长"。alpha158 用 `walk_forward` 预测（构造上 point-in-time，覆盖 2024+；非 `production_inference`(仅5个月)、非 `selected`(全FALSE)）按月度 top-N 轮动；规则策略确定性重算；as-of 套利 + T+1 成交 + 按日 mark-to-market；信号池只算一次跨账户复用。
+- 竞赛榜 + 晋级闸门 `src/accounts/leaderboard.py` / `promotion.py`：年化/超额/Sharpe/回撤/换手/命中率/IR；闸门含选择偏差守卫（N选1冠军需明显优于亚军）。
+- Dashboard V2 `/tournament` 页（`build_tournament_snapshot` + `/api/v2/tournament` + 前端 TournamentPage）。
+- 接入 `daily_close.sh` 步骤15（前向执行，非阻塞）+ CLI `python -m src.accounts.daily {seed,forward,replay,metrics}`。
+- 真实首跑（2024-2026，基准 000300）：5 账户全部跑输 CSI300（超额 -7.4%~-24.2%），晋级闸门正确推荐冠军=None。alpha158_pure 相对最优（年化9.6%/Sharpe0.54/回撤-25%/命中46%/103平仓）。真实执行约束下当前配置都不够格上实盘——系统在诚实工作。
+- 待办：后续可加更多账户配置（不同 top_n/调仓频率/风险档）继续对标；前向链累积真实战绩后与回放对照。
+- 验证：新增 `test_accounts_registry/engine/replay/leaderboard` + dashboard tournament 测试；`ruff check` 干净；前端 `build` + `test` 通过。

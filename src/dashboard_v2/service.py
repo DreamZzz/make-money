@@ -195,6 +195,30 @@ class DashboardV2Service:
                 "legacy_streamlit": {"label": "打开 Streamlit 研究工作台", "url": "http://localhost:8501"},
             }
 
+    def build_tournament_snapshot(self) -> dict[str, Any]:
+        from src.accounts.leaderboard import build_leaderboard
+        from src.accounts.promotion import evaluate_tournament
+        from src.accounts.registry import list_accounts
+
+        with self._managed_connection(read_only=True) as conn:
+            accounts = [
+                {
+                    "account_id": a.account_id, "name": a.name, "description": a.description,
+                    "initial_capital": a.initial_capital, "status": a.status,
+                    "is_real_candidate": a.is_real_candidate,
+                    "models": list(a.config.models), "benchmark_index": a.config.benchmark_index,
+                }
+                for a in list_accounts(conn)
+            ]
+            leaderboard = build_leaderboard(conn, window_label="replay", rank_by="excess_return")
+            tournament = evaluate_tournament(conn, window_label="replay")
+            return {
+                "accounts": accounts,
+                "leaderboard": leaderboard,
+                "tournament": tournament,
+                "nav_curves": _load_account_nav_curves(conn),
+            }
+
     def start_job(self, job_key: str) -> dict[str, Any]:
         self.reject_job_start(job_key)
         raise PermissionError(f"Dashboard V2 只展示定时任务状态，不允许启动任务：{job_key}")
@@ -374,6 +398,19 @@ def _latest_trade_date(conn: duckdb.DuckDBPyConnection) -> str | None:
 def _latest_signal_date(conn: duckdb.DuckDBPyConnection) -> str | None:
     row = conn.execute("SELECT MAX(CAST(signal_ts AS DATE)) FROM signals").fetchone()
     return _date_to_iso(row[0] if row else None)
+
+
+def _load_account_nav_curves(conn: duckdb.DuckDBPyConnection) -> dict[str, list[dict[str, Any]]]:
+    """各虚拟账户的 NAV 曲线（对标图用）。"""
+    rows = conn.execute(
+        "SELECT account_id, trade_date, nav FROM account_nav ORDER BY account_id, trade_date"
+    ).fetchall()
+    curves: dict[str, list[dict[str, Any]]] = {}
+    for account_id, trade_date, nav in rows:
+        curves.setdefault(str(account_id), []).append(
+            {"date": _date_to_iso(trade_date), "nav": float(nav) if nav is not None else None}
+        )
+    return curves
 
 
 def _load_account_summary(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:

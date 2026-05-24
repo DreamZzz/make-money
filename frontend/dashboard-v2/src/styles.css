@@ -1244,3 +1244,42 @@ td {
     font-size: 23px;
   }
 }
+
+/* 策略竞赛页 */
+.panel--ok {
+  border-left: 4px solid var(--green);
+  background: var(--green-bg);
+}
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  margin-left: 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.badge--ok {
+  background: var(--green-bg);
+  border-color: var(--green);
+  color: var(--green);
+}
+.account-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+.account-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: var(--surface);
+}
+.account-card__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}

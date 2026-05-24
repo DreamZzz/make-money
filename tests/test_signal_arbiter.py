@@ -416,6 +416,48 @@ def test_alpha158_consensus_baseline_preserves_rule_buy_behavior():
     conn.close()
 
 
+def test_baseline_buy_uses_lower_floor_than_rule_buy():
+    # alpha158 生产模型 confidence 尺度低（约 0.67）。confidence=0.60 的 alpha158 BUY
+    # 应通过 baseline 专属门槛（0.55），而同样 0.60 的规则策略 BUY 仍被 0.75 全局门槛拒。
+    conn = duckdb.connect(":memory:")
+    _seed_base(conn)
+    _insert_signal(
+        conn,
+        signal_id="alpha-buy-lowconf",
+        model_name="alpha158",
+        symbol="000001",
+        confidence=0.60,
+        score=0.60,
+    )
+    _insert_signal(
+        conn,
+        signal_id="trend-buy-lowconf",
+        model_name="trend_following",
+        symbol="000002",
+        confidence=0.60,
+        score=0.60,
+    )
+
+    result = arbitrate_pending_signals(
+        conn,
+        as_of=date(2026, 5, 20),
+        config=_arbiter_config(["alpha158"]),
+    )
+
+    rows = {
+        row[0]: row[1:]
+        for row in conn.execute("""
+            SELECT signal_id, decision, consensus_status
+            FROM signal_decisions
+            WHERE signal_id IN ('alpha-buy-lowconf', 'trend-buy-lowconf')
+        """).fetchall()
+    }
+    assert rows["alpha-buy-lowconf"] == ("ACCEPTED", "BASELINE_SELF")
+    assert rows["trend-buy-lowconf"] == ("REJECTED", "LOW_SIGNAL_SCORE")
+    assert result.accepted == 1
+    conn.close()
+
+
 def test_rule_buy_accepts_when_any_configured_baseline_agrees():
     conn = duckdb.connect(":memory:")
     _seed_base(conn)

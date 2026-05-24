@@ -731,3 +731,114 @@ CREATE TABLE IF NOT EXISTS dashboard_audit_log (
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (audit_id)
 );
+
+-- ============================================
+-- 16. 虚拟账户竞赛（多账户并行对标 → 选最优指导实盘）
+-- ============================================
+-- 每个虚拟账户 = 一套完整可部署配置（模型组合 + 套利门槛 + 配比 + 风险档），
+-- 拥有隔离的现金/持仓/订单/NAV，与其它账户在相同行情下并行对标。
+CREATE TABLE IF NOT EXISTS virtual_accounts (
+    account_id        VARCHAR NOT NULL,
+    name              VARCHAR NOT NULL,
+    description       VARCHAR,
+    initial_capital   DOUBLE NOT NULL DEFAULT 1000000,
+    market            VARCHAR NOT NULL DEFAULT 'CN',
+    config_json       TEXT NOT NULL,           -- AccountConfig：模型集/套利门槛/配比/风险档
+    status            VARCHAR NOT NULL DEFAULT 'ACTIVE', -- ACTIVE / PAUSED / PROMOTED / ARCHIVED
+    is_real_candidate BOOLEAN DEFAULT FALSE,    -- 是否已选为实盘指导候选
+    inception_date    DATE,                    -- 账户起始日（回放/纸盘起点）
+    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (account_id)
+);
+
+-- 账户级订单（隔离现金会话执行结果，含历史回放与前向纸盘）
+CREATE TABLE IF NOT EXISTS account_orders (
+    account_id      VARCHAR NOT NULL,
+    order_id        VARCHAR NOT NULL,
+    signal_id       VARCHAR,
+    symbol          VARCHAR NOT NULL,
+    side            VARCHAR NOT NULL,        -- BUY / SELL
+    order_qty       DOUBLE,
+    order_price     DOUBLE,
+    order_value     DOUBLE,
+    fee             DOUBLE,
+    cash_before     DOUBLE,
+    cash_after      DOUBLE,
+    order_ts        TIMESTAMP NOT NULL,
+    source          VARCHAR DEFAULT 'forward', -- forward（前向纸盘）/ replay（历史回放预热）
+    status          VARCHAR DEFAULT 'FILLED',
+    status_reason   VARCHAR,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (account_id, order_id)
+);
+
+-- 账户级每日持仓
+CREATE TABLE IF NOT EXISTS account_positions (
+    account_id      VARCHAR NOT NULL,
+    trade_date      DATE NOT NULL,
+    symbol          VARCHAR NOT NULL,
+    quantity        DOUBLE NOT NULL DEFAULT 0,
+    avg_cost        DOUBLE,
+    current_price   DOUBLE,
+    market_value    DOUBLE,
+    pnl             DOUBLE,
+    pnl_pct         DOUBLE,
+    weight          DOUBLE,
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (account_id, trade_date, symbol)
+);
+
+-- 账户级净值
+CREATE TABLE IF NOT EXISTS account_nav (
+    account_id      VARCHAR NOT NULL,
+    trade_date      DATE NOT NULL,
+    nav             DOUBLE,                  -- 净值（初始=1.0）
+    daily_return    DOUBLE,
+    cash            DOUBLE,
+    position_value  DOUBLE,
+    total_value     DOUBLE,
+    drawdown        DOUBLE,
+    benchmark_nav   DOUBLE,                  -- 同期基准净值（对标用）
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (account_id, trade_date)
+);
+
+-- 账户级套利决策（去重只在账户内，与全局 signal_decisions 隔离）
+CREATE TABLE IF NOT EXISTS account_decisions (
+    account_id      VARCHAR NOT NULL,
+    decision_id     VARCHAR NOT NULL,
+    signal_id       VARCHAR NOT NULL,
+    decision_date   DATE NOT NULL,
+    model_name      VARCHAR,
+    symbol          VARCHAR NOT NULL,
+    side            VARCHAR,
+    decision        VARCHAR NOT NULL,        -- ACCEPTED / REJECTED
+    decision_reason VARCHAR,
+    consensus_status VARCHAR,
+    priority_score  DOUBLE,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (account_id, decision_id)
+);
+
+-- 账户级绩效快照（竞赛榜）
+CREATE TABLE IF NOT EXISTS account_performance (
+    account_id        VARCHAR NOT NULL,
+    as_of_date        DATE NOT NULL,
+    window_label      VARCHAR NOT NULL,      -- live / replay / combined
+    sample_days       INTEGER,
+    annual_return     DOUBLE,
+    cumulative_return DOUBLE,
+    annual_volatility DOUBLE,
+    sharpe_ratio      DOUBLE,
+    max_drawdown      DOUBLE,
+    turnover          DOUBLE,
+    hit_rate          DOUBLE,
+    benchmark_return  DOUBLE,
+    excess_return     DOUBLE,
+    info_ratio        DOUBLE,
+    ready_outcomes    INTEGER,               -- 已结算 outcome 样本量（给晋级闸门用）
+    metrics_json      TEXT,
+    updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (account_id, as_of_date, window_label)
+);

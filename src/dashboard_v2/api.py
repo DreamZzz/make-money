@@ -50,6 +50,10 @@ def create_app(service: Any | None = None) -> FastAPI:
     def get_research_summary() -> dict[str, Any]:
         return _call_or_degrade(svc.build_research_summary, _fallback_research)
 
+    @app.get("/api/v2/tournament")
+    def get_tournament() -> dict[str, Any]:
+        return _call_or_degrade(svc.build_tournament_snapshot, _fallback_tournament)
+
     @app.post("/api/v2/jobs/{job_key}/start")
     def start_job(job_key: str) -> dict[str, Any]:
         if hasattr(svc, "reject_job_start"):
@@ -217,6 +221,16 @@ def _fallback_research(exc: Exception) -> dict[str, Any]:
         "portana": {"available": False},
         "legacy_streamlit": {"label": "打开 Streamlit 研究工作台", "url": "http://localhost:8501"},
         "error": message,
+    }
+
+
+def _fallback_tournament(exc: Exception) -> dict[str, Any]:
+    return {
+        "accounts": [],
+        "leaderboard": [],
+        "tournament": {"ranking": [], "eligible_count": 0, "recommended_winner": None, "selection_note": ""},
+        "nav_curves": {},
+        "error": _data_unavailable_message(exc),
     }
 
 

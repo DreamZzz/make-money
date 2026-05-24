@@ -8,14 +8,15 @@ import { PortfolioPage } from "./pages/PortfolioPage";
 import { RebalancePage } from "./pages/RebalancePage";
 import { ResearchPage } from "./pages/ResearchPage";
 import { TodayPage } from "./pages/TodayPage";
+import { TournamentPage } from "./pages/TournamentPage";
 import { UserGuidePage } from "./pages/UserGuidePage";
-import type { HealthSnapshot, PortfolioSnapshot, RebalanceSnapshot, ResearchSummary, TodaySnapshot } from "./types";
+import type { HealthSnapshot, PortfolioSnapshot, RebalanceSnapshot, ResearchSummary, TodaySnapshot, TournamentSnapshot } from "./types";
 
 const DEFAULT_HEALTH = { status: "degraded", label: "数据加载中", blocking: false, messages: ["正在连接 Dashboard V2 API"] };
 
 function currentRoute(): RouteKey {
   const path = window.location.pathname as RouteKey;
-  if (["/today", "/rebalance", "/portfolio", "/health", "/research", "/guide"].includes(path)) return path;
+  if (["/today", "/rebalance", "/portfolio", "/health", "/tournament", "/research", "/guide"].includes(path)) return path;
   return "/today";
 }
 
@@ -26,6 +27,7 @@ export function App() {
   const [rebalance, setRebalance] = useState<RebalanceSnapshot | null>(null);
   const [portfolio, setPortfolio] = useState<PortfolioSnapshot | null>(null);
   const [research, setResearch] = useState<ResearchSummary | null>(null);
+  const [tournament, setTournament] = useState<TournamentSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const healthState = useMemo(() => health || today?.health || DEFAULT_HEALTH, [health, today]);
@@ -47,6 +49,7 @@ export function App() {
       if (next === "/today") setToday(await apiGet<TodaySnapshot>("/api/v2/today"));
       if (next === "/rebalance") setRebalance(await apiGet<RebalanceSnapshot>("/api/v2/rebalance/latest"));
       if (next === "/portfolio") setPortfolio(await apiGet<PortfolioSnapshot>("/api/v2/portfolio"));
+      if (next === "/tournament") setTournament(await apiGet<TournamentSnapshot>("/api/v2/tournament"));
       if (next === "/research") setResearch(await apiGet<ResearchSummary>("/api/v2/research/summary"));
     } catch (err) {
       if (next === "/guide") return;
@@ -72,6 +75,9 @@ export function App() {
     }
     if (next === "/health") {
       return health ? <HealthPage data={health} /> : <LoadingPanel message="正在加载数据健康" />;
+    }
+    if (next === "/tournament") {
+      return tournament ? <TournamentPage data={tournament} /> : <LoadingPanel message="正在加载策略竞赛" />;
     }
     if (next === "/guide") {
       return <UserGuidePage />;

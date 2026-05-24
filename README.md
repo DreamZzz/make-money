@@ -79,6 +79,7 @@ V2 读取的是同一套本地 DuckDB 和现有 domain service，不是 mock 数
 | 调仓执行 | `/rebalance` | 同屏查看 Core 基金、Satellite 个股、暂缓项和资金缺口 |
 | 组合体检 | `/portfolio` | 检查现金、持仓、暴露风险和信号收益跟踪 |
 | 市场与数据健康 | `/health` | 判断数据源、字段覆盖、任务状态和模型状态是否可用于决策 |
+| 策略竞赛 | `/tournament` | 多虚拟账户并行对标（历史回放+前向纸盘），竞赛榜与晋级闸门，选最优指导实盘 |
 | 研究实验室 | `/research` | 收纳 Qlib、IC/ICIR、实验摘要和旧 Streamlit 入口 |
 | 使用手册 | `/guide` | 查看投资预期、首次使用、复盘阈值、异常处理和术语解释 |
 
@@ -144,6 +145,12 @@ V2 首期只支持安全写入，不会替你真实下单。
 ```bash
 # 启动 Dashboard V2
 scripts/run_dashboard_v2.sh
+
+# 虚拟账户竞赛（多账户并行对标）
+python -m src.accounts.daily seed                                      # 创建种子账户
+python -m src.accounts.daily replay --start 2024-01-01 --end 2026-05-22 # 历史回放预热
+python -m src.accounts.daily forward                                   # 每日前向执行（已接入收盘链）
+python -m src.accounts.daily metrics                                   # 刷新竞赛榜
 
 # 运行全部 Python 测试
 pytest -q

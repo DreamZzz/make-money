@@ -48,6 +48,7 @@ DEFAULT_CONFIG = {
         "duckdb_path": "data/duckdb/market.db",
         "raw_data_path": "data/raw",
         "max_update_failures": 0,
+        "min_update_success_ratio": 0.5,
         "akshare_cn_min_interval_seconds": 0.8,
         "akshare_cn_error_circuit_threshold": 12,
         "cn_backup_after_akshare_circuit": True,
