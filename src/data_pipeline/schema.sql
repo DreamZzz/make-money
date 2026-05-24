@@ -842,3 +842,45 @@ CREATE TABLE IF NOT EXISTS account_performance (
     updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (account_id, as_of_date, window_label)
 );
+
+-- ============================================
+-- 17. 市场估值历史（全A股 PE/PB 中位数 + 历史分位，判断"市场贵不贵"）
+-- ============================================
+CREATE TABLE IF NOT EXISTS market_valuation (
+    trade_date      DATE NOT NULL,
+    pe_ttm_median   DOUBLE,                  -- 全A股 PE-TTM 中位数
+    pe_ttm_pct_10y  DOUBLE,                  -- PE-TTM 近10年分位 (0-1)
+    pe_ttm_pct_all  DOUBLE,                  -- PE-TTM 全历史分位 (0-1)
+    pb_median       DOUBLE,                  -- 全A股 PB 中位数
+    pb_pct_10y      DOUBLE,                  -- PB 近10年分位 (0-1)
+    pb_pct_all      DOUBLE,                  -- PB 全历史分位 (0-1)
+    close           DOUBLE,                  -- 全A等权参考点位
+    source          VARCHAR DEFAULT 'akshare_lg',
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (trade_date)
+);
+
+-- ============================================
+-- 18. 市场状态（阶段+宽度+热度+分化+相对强弱+估值的综合体检）
+-- ============================================
+CREATE TABLE IF NOT EXISTS market_state (
+    trade_date          DATE NOT NULL,
+    benchmark           VARCHAR NOT NULL DEFAULT '000300',
+    stage               VARCHAR,             -- 强势上升/温和上升/震荡/弱势整理/下跌/危机
+    stage_score         DOUBLE,              -- 趋势分 -100~100
+    heat_score          DOUBLE,              -- 市场热度分 0-100
+    breadth_above_ma50  DOUBLE,              -- %站上MA50
+    breadth_above_ma200 DOUBLE,              -- %站上MA200
+    advance_ratio       DOUBLE,              -- 当日上涨家数占比
+    new_high_low_ratio  DOUBLE,              -- 60日新高/(新高+新低)
+    dispersion          DOUBLE,              -- 横截面日收益分化(年化)
+    volume_ratio        DOUBLE,              -- 量能 vs 60日均量
+    limit_up_ratio      DOUBLE,              -- 涨停代理(当日涨幅>9.5%占比)
+    pe_pct_10y          DOUBLE,              -- 估值分位(PE近10年)
+    pb_pct_10y          DOUBLE,              -- 估值分位(PB近10年)
+    rs_leader           VARCHAR,             -- 相对强弱领先指数
+    rs_json             TEXT,                -- 各指数动量明细
+    summary             VARCHAR,             -- 一句专业解读
+    updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (trade_date, benchmark)
+);
