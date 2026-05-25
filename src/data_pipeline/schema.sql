@@ -903,3 +903,19 @@ CREATE TABLE IF NOT EXISTS market_exposure (
     updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (trade_date, benchmark)
 );
+
+-- ============================================
+-- 20. 指数搭配（权益预算内按相对强弱分配到各指数基金）
+-- ============================================
+CREATE TABLE IF NOT EXISTS index_allocation (
+    trade_date      DATE NOT NULL,
+    fund_code       VARCHAR NOT NULL,
+    index_code      VARCHAR,
+    index_name      VARCHAR,
+    rs_score        DOUBLE,              -- 相对强弱(动量)分
+    rs_rank         INTEGER,             -- 强弱排名(1=最强)
+    weight          DOUBLE,              -- 占总资产的目标权重
+    equity_budget   DOUBLE,              -- 当期权益预算(来自 market_exposure)
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (trade_date, fund_code)
+);
