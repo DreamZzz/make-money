@@ -52,11 +52,18 @@ def test_point_in_time_universe_respects_prediction_date_ranges():
         index_codes=("000300", "000905"),
     )
 
-    assert filtered[["datetime", "instrument"]].to_records(index=False).tolist() == [
-        (pd.Timestamp("2021-01-15"), "000001"),
-        (pd.Timestamp("2021-01-15"), "000002"),
-        (pd.Timestamp("2021-03-15"), "000001"),
-        (pd.Timestamp("2021-03-15"), "000003"),
+    # 按列分别取值比较，避免 to_records().tolist() 在某些 numpy 版本下把
+    # datetime64[ns] 转成 int 纳秒导致的脆弱断言。
+    rows = list(zip(
+        [pd.Timestamp(ts).date().isoformat() for ts in filtered["datetime"].tolist()],
+        filtered["instrument"].tolist(),
+        strict=True,
+    ))
+    assert rows == [
+        ("2021-01-15", "000001"),
+        ("2021-01-15", "000002"),
+        ("2021-03-15", "000001"),
+        ("2021-03-15", "000003"),
     ]
 
 
