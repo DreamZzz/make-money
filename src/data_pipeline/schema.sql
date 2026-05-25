@@ -884,3 +884,22 @@ CREATE TABLE IF NOT EXISTS market_state (
     updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (trade_date, benchmark)
 );
+
+-- ============================================
+-- 19. 仓位信号（市场状态 → 目标权益仓位 + T+1 增减仓建议）
+-- ============================================
+CREATE TABLE IF NOT EXISTS market_exposure (
+    trade_date          DATE NOT NULL,
+    benchmark           VARCHAR NOT NULL DEFAULT '000300',
+    stage               VARCHAR,
+    base_exposure       DOUBLE,              -- 阶段基准权益仓位 0-1
+    valuation_adj       DOUBLE,              -- 估值调整(贵则减/便宜则加)
+    breadth_adj         DOUBLE,              -- 宽度调整
+    heat_adj            DOUBLE,              -- 热度调整(过热则减)
+    target_exposure     DOUBLE,              -- 目标权益仓位 0-1
+    current_exposure    DOUBLE,              -- 参考当前仓位(可空)
+    action              VARCHAR,             -- ADD / REDUCE / HOLD
+    advice              VARCHAR,             -- 一句中文建议
+    updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (trade_date, benchmark)
+);
