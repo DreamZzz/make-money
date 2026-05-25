@@ -59,9 +59,11 @@ def load_current_stock_holdings(conn: Any, as_of: date | None = None) -> pd.Data
     return conn.execute(f"""
         WITH {current_positions},
         latest_price AS (
+            -- 取最近一个"有估值"的行，结转上一交易日的 PE/PB，
+            -- 避免盘中部分更新(pe/pb 为空)把持仓估值覆盖清零。
             SELECT symbol, pe_ttm, pb
             FROM daily_price
-            WHERE 1 = 1
+            WHERE (pe_ttm IS NOT NULL OR pb IS NOT NULL)
               {price_date_filter}
             QUALIFY ROW_NUMBER() OVER (
                 PARTITION BY symbol ORDER BY trade_date DESC

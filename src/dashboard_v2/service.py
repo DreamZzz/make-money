@@ -2310,10 +2310,13 @@ def _coverage_counts_for_symbols(
             FROM (VALUES {",".join(["(?)"] * len(symbols))}) AS t(symbol)
         ),
         latest_price AS (
+            -- 取最近一个"有估值"的行：盘中部分更新的新行(pe/pb 为空)不应把覆盖清零，
+            -- 结转上一交易日已回填的 PE/PB。
             SELECT symbol, pe_ttm, pb
             FROM daily_price
             WHERE symbol IN ({placeholders})
               AND trade_date <= ?
+              AND (pe_ttm IS NOT NULL OR pb IS NOT NULL)
             QUALIFY ROW_NUMBER() OVER (
                 PARTITION BY symbol ORDER BY trade_date DESC
             ) = 1

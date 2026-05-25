@@ -900,3 +900,23 @@ def test_dashboard_v2_market_snapshot(tmp_path) -> None:
     assert snap["exposure"]["target_exposure"] == 0.87
     assert len(snap["allocation"]) == 1
     assert snap["allocation"][0]["fund_code"] == "012963"
+
+
+def test_field_coverage_carries_forward_last_valuation(tmp_path) -> None:
+    # 盘中部分更新写入无估值的新行，不应把覆盖清零——应结转上一交易日的 PE/PB
+    from datetime import date as _date
+
+    from src.dashboard_v2.service import _coverage_counts_for_symbols
+
+    db_path = tmp_path / "cov.duckdb"
+    conn = duckdb.connect(str(db_path))
+    init_db(conn)
+    conn.execute("INSERT INTO stock_info (symbol, country, name) VALUES ('000001','CN','A')")
+    # 05-22 有完整估值；05-25 是盘中部分行，pe/pb 为空
+    conn.execute("INSERT INTO daily_price (symbol, trade_date, close, pe_ttm, pb) VALUES ('000001', DATE '2026-05-22', 10.0, 12.0, 1.5)")
+    conn.execute("INSERT INTO daily_price (symbol, trade_date, close, pe_ttm, pb) VALUES ('000001', DATE '2026-05-25', 10.1, NULL, NULL)")
+
+    cov = _coverage_counts_for_symbols(conn, ["000001"], _date(2026, 5, 25))
+    assert cov["pe_ttm"] == 1  # 结转 05-22 的估值，而非按 05-25 空行算 0
+    assert cov["pb"] == 1
+    conn.close()
