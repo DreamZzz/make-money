@@ -173,11 +173,28 @@ export type RiskAlert = {
   affected_holdings?: Record<string, unknown>[];
 };
 
+export type TodayMarket = {
+  state: {
+    stage?: string;
+    stage_score?: number;
+    heat_score?: number;
+    pe_pct_10y?: number | null;
+    summary?: string;
+  } | null;
+  exposure: { target_exposure?: number; action?: string; advice?: string } | null;
+  allocation: Array<{ fund_code: string; index_name?: string; weight?: number; rs_rank?: number }>;
+  current_exposure: number | null;
+  target_exposure: number | null;
+  exposure_gap: number | null;
+  satellite_shadow_signals: number;
+};
+
 export type TodaySnapshot = {
   trade_date: string | null;
   health: HealthState;
   account: Record<string, unknown>;
   capital?: CapitalBreakdown;
+  market?: TodayMarket;
   regime_policy?: RegimePolicy;
   operation_summary: OperationSummaryData;
   blockers: RiskAlert[];

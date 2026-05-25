@@ -189,8 +189,10 @@ def build_market_state(
             rs_closes[code] = s.set_index("trade_date")["close"]
     rs_leader, rs = compute_relative_strength(rs_closes)
 
+    # 取最近一个"已计算分位"的估值行：当日源数据分位常为空(EOD才算)，结转上一日，避免显示"估值未知"
     val = conn.execute(
-        "SELECT pe_ttm_pct_10y, pb_pct_10y FROM market_valuation WHERE trade_date<=? "
+        "SELECT pe_ttm_pct_10y, pb_pct_10y FROM market_valuation "
+        "WHERE trade_date<=? AND pe_ttm_pct_10y IS NOT NULL "
         "ORDER BY trade_date DESC LIMIT 1", [as_of],
     ).fetchone()
     pe_pct = float(val[0]) if val and val[0] is not None else None
@@ -282,7 +284,7 @@ def backfill_market_state(
         rs_leader, rs = compute_relative_strength({c: s for c, s in rs_now.items() if len(s) > 60})
         pe_pct = pb_pct = None
         if not val.empty:
-            asof = val[val["trade_date"] <= d]
+            asof = val[(val["trade_date"] <= d) & val["pe_ttm_pct_10y"].notna()]
             if not asof.empty:
                 pe_pct = _as_float(asof.iloc[-1]["pe_ttm_pct_10y"])
                 pb_pct = _as_float(asof.iloc[-1]["pb_pct_10y"])

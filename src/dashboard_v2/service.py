@@ -55,13 +55,14 @@ class DashboardV2Service:
             health = _build_health_status(conn)
             blockers = _build_blockers(health, account, plan)
             next_action = _next_action(health, operation_summary, blockers)
+            market = _load_today_market(conn, account)
             latest_job = _latest_operational_job_run()
             evidence = {
                 "data_date": latest_date,
                 "signal_date": _latest_signal_date(conn),
                 "model_version": _production_model_version(conn),
                 "cost_model": "paper_engine_t1_open_with_fee_and_lot",
-                "risk_rules": ["core_satellite_budget", "execution_guards", "risk_profile"],
+                "risk_rules": ["market_exposure", "core_satellite_budget", "execution_guards", "risk_profile"],
                 "latest_job_status": latest_job.get("status") if latest_job else None,
             }
             return {
@@ -69,6 +70,7 @@ class DashboardV2Service:
                 "health": health,
                 "account": account,
                 "capital": capital,
+                "market": market,
                 "regime_policy": regime_policy,
                 "operation_summary": operation_summary,
                 "blockers": blockers,
@@ -449,6 +451,40 @@ def _load_latest_row(conn: duckdb.DuckDBPyConnection, table: str, order_col: str
         elif pd.isna(v):
             rec[k] = None
     return rec
+
+
+def _load_today_market(conn: duckdb.DuckDBPyConnection, account: dict[str, Any]) -> dict[str, Any]:
+    """市场驾驶舱核心块：市场状态 + T+1 目标仓位 + 指数搭配 + 当前vs目标 + 卫星 shadow 信号数。"""
+    state = _load_latest_row(conn, "market_state", "trade_date")
+    exposure = _load_latest_row(conn, "market_exposure", "trade_date")
+    allocation = conn.execute(
+        """
+        SELECT fund_code, index_code, index_name, rs_rank, weight
+        FROM index_allocation
+        WHERE trade_date = (SELECT MAX(trade_date) FROM index_allocation)
+        ORDER BY weight DESC
+        """
+    ).fetchdf().to_dict(orient="records")
+
+    total = _safe_float(account.get("total_value"))
+    position_value = _safe_float(account.get("position_value"))
+    current_exposure = position_value / total if total > 0 else None
+    target = _safe_float(exposure.get("target_exposure")) if exposure else None
+    exposure_gap = (target - current_exposure) if (target is not None and current_exposure is not None) else None
+
+    shadow_signals = conn.execute(
+        "SELECT COUNT(*) FROM signals WHERE side='BUY' AND COALESCE(status,'ACTIVE')='ACTIVE'"
+    ).fetchone()[0]
+
+    return {
+        "state": state,
+        "exposure": exposure,
+        "allocation": allocation,
+        "current_exposure": current_exposure,
+        "target_exposure": target,
+        "exposure_gap": exposure_gap,
+        "satellite_shadow_signals": int(shadow_signals),
+    }
 
 
 def _load_account_nav_curves(conn: duckdb.DuckDBPyConnection) -> dict[str, list[dict[str, Any]]]:
