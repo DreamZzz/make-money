@@ -136,32 +136,32 @@ echo "9/14 生产预测就绪门禁..."
 "$PYTHON" -m src.monitoring.model_monitor assert-prediction-ready
 
 # 10. 规则/Qlib 统一信号仲裁
-echo "10/14 全局信号仲裁..."
+echo "10/16 全局信号仲裁..."
 "$PYTHON" -m src.signals.arbiter
 
-# 11. 统一资金分配计划
-echo "11/14 生成统一资金分配计划..."
+# 11. 市场层：估值刷新 + 市场状态 + T+1 仓位信号 + 指数搭配（在分配前，让权益预算用上当日仓位信号；非阻塞）
+echo "11/16 市场温度计（市场状态/仓位信号/指数搭配）..."
+"$PYTHON" -m src.market.daily --backfill-valuation || true
+
+# 12. 统一资金分配计划（权益/现金分割由 M3 目标仓位驱动）
+echo "12/16 生成统一资金分配计划..."
 "$PYTHON" -m src.portfolio.allocator plan
 
-# 12. 净值重算；纸交易只能由 scripts/open_paper_trade.py 在开盘窗口执行。
-echo "12/14 重算资金净值..."
+# 13. 净值重算；纸交易只能由 scripts/open_paper_trade.py 在开盘窗口执行。
+echo "13/16 重算资金净值..."
 "$PYTHON" -m src.portfolio.nav_calculator
 
-# 13. 信号收益跟踪
-echo "13/14 更新信号收益跟踪..."
+# 14. 信号收益跟踪
+echo "14/16 更新信号收益跟踪..."
 "$PYTHON" -m src.signals.outcome_tracker update
 
-# 14. 生产模型监控
-echo "14/15 生产模型监控..."
+# 15. 生产模型监控
+echo "15/16 生产模型监控..."
 "$PYTHON" -m src.monitoring.model_monitor update
 
-# 15. 虚拟账户竞赛前向执行（非阻塞，绝不影响收盘主链）
-echo "15/16 虚拟账户竞赛前向执行..."
+# 16. 虚拟账户竞赛前向执行（非阻塞，绝不影响收盘主链）
+echo "16/16 虚拟账户竞赛前向执行..."
 "$PYTHON" -m src.accounts.daily forward || true
-
-# 16. 市场层：估值刷新 + 市场状态 + T+1 仓位信号 + 指数搭配（非阻塞）
-echo "16/16 市场温度计（市场状态/仓位信号/指数搭配）..."
-"$PYTHON" -m src.market.daily --backfill-valuation || true
 
 # 重启 Dashboard
 _restart_dashboard

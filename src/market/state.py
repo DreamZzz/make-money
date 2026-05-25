@@ -213,6 +213,131 @@ def build_market_state(
     return state
 
 
+def backfill_market_state(
+    conn: duckdb.DuckDBPyConnection,
+    start: date,
+    end: date,
+    benchmark: str = "000300",
+) -> int:
+    """回灌历史 market_state（趋势图用）。面板滚动指标只算一次，逐日切片，高效。"""
+
+    idx = conn.execute(
+        "SELECT trade_date, close, volume FROM index_daily WHERE index_code=? AND trade_date<=? "
+        "AND trade_date>=? - INTERVAL '400 days' ORDER BY trade_date",
+        [benchmark, end, start],
+    ).fetchdf()
+    if idx.empty:
+        return 0
+    idx["trade_date"] = pd.to_datetime(idx["trade_date"])
+    idx = idx.set_index("trade_date")
+
+    panel = conn.execute(
+        """
+        SELECT trade_date, symbol, close FROM daily_price
+        WHERE symbol IN (SELECT symbol FROM stock_info WHERE country='CN')
+          AND trade_date <= ? AND trade_date >= ? - INTERVAL '400 days'
+        """,
+        [end, start],
+    ).fetchdf()
+    if panel.empty:
+        return 0
+    panel["trade_date"] = pd.to_datetime(panel["trade_date"])
+    panel = panel.pivot_table(index="trade_date", columns="symbol", values="close").sort_index()
+    ma50 = panel.rolling(50, min_periods=20).mean()
+    ma200 = panel.rolling(200, min_periods=60).mean()
+    rets = panel.pct_change()
+
+    rs_series = {}
+    for code in RS_INDEXES:
+        s = conn.execute(
+            "SELECT trade_date, close FROM index_daily WHERE index_code=? AND trade_date<=? "
+            "AND trade_date>=? - INTERVAL '400 days' ORDER BY trade_date", [code, end, start],
+        ).fetchdf()
+        if not s.empty:
+            rs_series[code] = s.assign(trade_date=pd.to_datetime(s["trade_date"])).set_index("trade_date")["close"]
+
+    val = conn.execute(
+        "SELECT trade_date, pe_ttm_pct_10y, pb_pct_10y FROM market_valuation WHERE trade_date<=? ORDER BY trade_date",
+        [end],
+    ).fetchdf()
+    if not val.empty:
+        val["trade_date"] = pd.to_datetime(val["trade_date"])
+
+    days = [d for d in panel.index if start <= d.date() <= end]
+    rows = []
+    for d in days:
+        stage, stage_score = compute_stage(idx.loc[idx.index <= d, "close"])
+        vr = compute_volume_ratio(idx.loc[idx.index <= d, "volume"])
+        last = panel.loc[d].dropna()
+        if last.empty:
+            continue
+        a50 = float((last > ma50.loc[d].reindex(last.index)).mean())
+        a200 = float((last > ma200.loc[d].reindex(last.index)).mean())
+        r = rets.loc[d].reindex(last.index)
+        advance = float((r > 0).mean())
+        limit_up = float((r > 0.095).mean())
+        dispersion = float(r.std() * np.sqrt(TRADING_DAYS)) if len(r) > 1 else None
+        heat = compute_heat_score(vr, limit_up, dispersion, advance)
+        rs_now = {c: s.loc[s.index <= d] for c, s in rs_series.items()}
+        rs_leader, rs = compute_relative_strength({c: s for c, s in rs_now.items() if len(s) > 60})
+        pe_pct = pb_pct = None
+        if not val.empty:
+            asof = val[val["trade_date"] <= d]
+            if not asof.empty:
+                pe_pct = _as_float(asof.iloc[-1]["pe_ttm_pct_10y"])
+                pb_pct = _as_float(asof.iloc[-1]["pb_pct_10y"])
+        sd = {
+            "trade_date": d.date(), "benchmark": benchmark, "stage": stage, "stage_score": stage_score,
+            "heat_score": heat, "breadth_above_ma50": round(a50, 4), "breadth_above_ma200": round(a200, 4),
+            "advance_ratio": round(advance, 4), "new_high_low_ratio": None,
+            "dispersion": round(dispersion, 4) if dispersion is not None else None,
+            "volume_ratio": vr, "limit_up_ratio": round(limit_up, 4),
+            "pe_pct_10y": pe_pct, "pb_pct_10y": pb_pct, "rs_leader": rs_leader,
+            "rs_json": json.dumps(rs, ensure_ascii=False),
+        }
+        sd["summary"] = _summary(sd)
+        rows.append(sd)
+    if not rows:
+        return 0
+    df = pd.DataFrame(rows)
+    conn.execute("DELETE FROM market_state WHERE benchmark=? AND trade_date BETWEEN ? AND ?", [benchmark, start, end])
+    conn.register("_ms_df", df)
+    conn.execute(
+        """
+        INSERT INTO market_state (trade_date, benchmark, stage, stage_score, heat_score,
+            breadth_above_ma50, breadth_above_ma200, advance_ratio, new_high_low_ratio, dispersion,
+            volume_ratio, limit_up_ratio, pe_pct_10y, pb_pct_10y, rs_leader, rs_json, summary)
+        SELECT trade_date, benchmark, stage, stage_score, heat_score, breadth_above_ma50,
+            breadth_above_ma200, advance_ratio, new_high_low_ratio, dispersion, volume_ratio,
+            limit_up_ratio, pe_pct_10y, pb_pct_10y, rs_leader, rs_json, summary FROM _ms_df
+        """
+    )
+    conn.unregister("_ms_df")
+    return len(rows)
+
+
+def _as_float(v: Any) -> float | None:
+    try:
+        return None if v is None or pd.isna(v) else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def load_market_state_history(conn, benchmark: str = "000300", limit: int = 120) -> list[dict[str, Any]]:
+    """取最近 N 个交易日的 stage_score/heat_score 序列（趋势图用）。"""
+    rows = conn.execute(
+        "SELECT trade_date, stage_score, heat_score FROM market_state WHERE benchmark=? "
+        "ORDER BY trade_date DESC LIMIT ?", [benchmark, limit],
+    ).fetchall()
+    out = [{"date": _date_to_iso(d), "stage_score": float(s) if s is not None else None,
+            "heat_score": float(h) if h is not None else None} for d, s, h in rows]
+    return list(reversed(out))
+
+
+def _date_to_iso(d: Any) -> str | None:
+    return d.isoformat() if hasattr(d, "isoformat") else (str(d) if d is not None else None)
+
+
 def _latest_trade_date(conn) -> date | None:
     row = conn.execute("SELECT MAX(trade_date) FROM index_daily").fetchone()
     return row[0] if row and row[0] else None

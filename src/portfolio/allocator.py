@@ -276,10 +276,12 @@ def create_allocation_plan(
     as_of: date | None = None,
     config: AllocationConfig | None = None,
     regime_policy: Any | None = None,
+    target_exposure: float | None = None,
     persist: bool = True,
 ) -> AllocationPlan:
     cfg = config or AllocationConfig.from_app_config()
     cfg = _apply_regime_policy(cfg, regime_policy)
+    cfg = apply_exposure_to_allocation_config(cfg, target_exposure)
     plan = compute_allocation_plan(
         load_allocation_inputs(conn, account_id=account_id, as_of=as_of),
         cfg,
@@ -304,6 +306,41 @@ def resolve_regime_policy_for_plan(
     from src.portfolio.regime_policy import load_latest_regime_policy
 
     return load_latest_regime_policy(conn, as_of=as_of, config=config or load_config())
+
+
+def resolve_exposure_for_plan(conn: Any) -> float | None:
+    """读取 M3 市场仓位信号的目标权益仓位，作为资金分配的权益/现金分割。"""
+    try:
+        row = conn.execute(
+            "SELECT target_exposure FROM market_exposure ORDER BY trade_date DESC LIMIT 1"
+        ).fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+    except Exception:
+        return None
+
+
+def apply_exposure_to_allocation_config(
+    config: AllocationConfig,
+    target_exposure: float | None,
+) -> AllocationConfig:
+    """用 M3 目标权益仓位驱动权益/现金分割：cash=1-exposure，core/satellite 按原比例缩放到 exposure。"""
+    if target_exposure is None:
+        return config
+    exposure = max(min(float(target_exposure), 1.0), 0.0)
+    cfg = config.normalized()
+    equity = cfg.core_target_pct + cfg.satellite_target_pct
+    if equity <= 0:
+        return cfg
+    core_ratio = cfg.core_target_pct / equity
+    return AllocationConfig(
+        enabled=cfg.enabled,
+        core_target_pct=exposure * core_ratio,
+        satellite_target_pct=exposure * (1.0 - core_ratio),
+        cash_target_pct=1.0 - exposure,
+        rebalance_tolerance_pct=cfg.rebalance_tolerance_pct,
+        min_trade_amount=cfg.min_trade_amount,
+        core_cash_priority=cfg.core_cash_priority,
+    ).normalized()
 
 
 def _apply_regime_policy(config: AllocationConfig, regime_policy: Any | None) -> AllocationConfig:
@@ -628,11 +665,13 @@ def main(argv: list[str] | None = None) -> int:
         try:
             init_db(conn)
             regime_policy = resolve_regime_policy_for_plan(conn, as_of=as_of)
+            target_exposure = resolve_exposure_for_plan(conn)
             plan = create_allocation_plan(
                 conn,
                 account_id=args.account_id,
                 as_of=as_of,
                 regime_policy=regime_policy,
+                target_exposure=target_exposure,
                 persist=not args.no_persist,
             )
             print(json.dumps(plan.to_dict(), ensure_ascii=False, default=str, indent=2))

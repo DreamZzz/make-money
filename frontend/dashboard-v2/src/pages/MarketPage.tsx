@@ -1,4 +1,5 @@
 import { DataTable } from "../components/DataTable";
+import { Sparkline } from "../components/Sparkline";
 import type { MarketSnapshot } from "../types";
 import { formatNumber, formatPercent } from "../utils";
 
@@ -42,6 +43,28 @@ export function MarketPage({ data }: Props) {
         <h2>专业判读</h2>
         <p><strong>{s.summary}</strong></p>
       </section>
+
+      {data.history && data.history.length >= 2 ? (
+        <section className="panel">
+          <h2>趋势（近 {data.history.length} 个交易日）</h2>
+          <Sparkline
+            label="趋势分 stage_score（-100~100，虚线=0）"
+            values={data.history.map((h) => h.stage_score)}
+            min={-100}
+            max={100}
+            refLine={0}
+            color="#1d6f5b"
+          />
+          <Sparkline
+            label="热度分 heat_score（0~100，虚线=50 常态）"
+            values={data.history.map((h) => h.heat_score)}
+            min={0}
+            max={100}
+            refLine={50}
+            color="#b4540a"
+          />
+        </section>
+      ) : null}
 
       <section className="two-column">
         <div className="panel">

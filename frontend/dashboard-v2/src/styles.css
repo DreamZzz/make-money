@@ -1283,3 +1283,13 @@ td {
   gap: 4px;
   margin-bottom: 6px;
 }
+
+/* 市场温度计趋势图 */
+.sparkline {
+  margin: 10px 0;
+}
+.sparkline__label {
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}

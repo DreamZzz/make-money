@@ -214,10 +214,22 @@ class DashboardV2Service:
                     state["relative_strength"] = _json.loads(state["rs_json"])
                 except (ValueError, TypeError):
                     state["relative_strength"] = {}
+            history = conn.execute(
+                """
+                SELECT trade_date, stage_score, heat_score FROM market_state
+                WHERE benchmark = '000300' ORDER BY trade_date DESC LIMIT 120
+                """
+            ).fetchall()
+            history_series = [
+                {"date": _date_to_iso(d), "stage_score": float(s) if s is not None else None,
+                 "heat_score": float(h) if h is not None else None}
+                for d, s, h in reversed(history)
+            ]
             return {
                 "market_state": state,
                 "exposure": exposure,
                 "allocation": allocation,
+                "history": history_series,
             }
 
     def build_tournament_snapshot(self) -> dict[str, Any]:

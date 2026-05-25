@@ -229,7 +229,8 @@ def _fallback_research(exc: Exception) -> dict[str, Any]:
 
 
 def _fallback_market(exc: Exception) -> dict[str, Any]:
-    return {"market_state": None, "exposure": None, "allocation": [], "error": _data_unavailable_message(exc)}
+    return {"market_state": None, "exposure": None, "allocation": [], "history": [],
+            "error": _data_unavailable_message(exc)}
 
 
 def _fallback_tournament(exc: Exception) -> dict[str, Any]:

@@ -402,3 +402,27 @@ def test_create_allocation_plan_keeps_pause_fund_signals_without_spending_core_b
     assert fund_items["action"].tolist() == ["BUY", "PAUSE"]
     assert fund_items["budget_delta"].tolist() == pytest.approx([30_000, 0])
     conn.close()
+
+
+def test_apply_exposure_drives_equity_cash_split():
+    from src.portfolio.allocator import AllocationConfig, apply_exposure_to_allocation_config
+
+    cfg = AllocationConfig(core_target_pct=0.50, satellite_target_pct=0.45, cash_target_pct=0.05)
+    out = apply_exposure_to_allocation_config(cfg, 0.87)
+    # 现金 = 1 - 仓位
+    assert abs(out.cash_target_pct - 0.13) < 1e-6
+    # 权益(core+satellite) = 目标仓位
+    assert abs((out.core_target_pct + out.satellite_target_pct) - 0.87) < 1e-6
+    # core:satellite 原比例(0.50:0.45)保持
+    assert abs(out.core_target_pct / out.satellite_target_pct - 0.50 / 0.45) < 1e-3
+    # None 不改变
+    assert apply_exposure_to_allocation_config(cfg, None) == cfg
+
+
+def test_exposure_lower_target_raises_cash():
+    from src.portfolio.allocator import AllocationConfig, apply_exposure_to_allocation_config
+
+    cfg = AllocationConfig(core_target_pct=0.50, satellite_target_pct=0.45, cash_target_pct=0.05)
+    defensive = apply_exposure_to_allocation_config(cfg, 0.40)
+    assert abs(defensive.cash_target_pct - 0.60) < 1e-6
+    assert abs((defensive.core_target_pct + defensive.satellite_target_pct) - 0.40) < 1e-6

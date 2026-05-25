@@ -93,3 +93,35 @@ def test_build_market_state_integration():
     # 已落表
     assert conn.execute("SELECT COUNT(*) FROM market_state").fetchone()[0] == 1
     conn.close()
+
+
+def test_backfill_market_state_produces_series():
+    from src.market.state import backfill_market_state, load_market_state_history
+
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    base = date(2024, 1, 1)
+    for code in ["000300", "000905", "HSTECH"]:
+        for i in range(300):
+            conn.execute(
+                "INSERT INTO index_daily (index_code, trade_date, close, volume) VALUES (?, ?, ?, ?)",
+                [code, base + timedelta(days=i), 3000 + i * 4, 1e8 + i],
+            )
+    conn.execute("INSERT INTO stock_info (symbol, country, name) VALUES ('000001','CN','A'),('000002','CN','B')")
+    for i in range(300):
+        d = base + timedelta(days=i)
+        conn.execute("INSERT INTO daily_price (symbol, trade_date, close) VALUES ('000001', ?, ?)", [d, 10 + i * 0.03])
+        conn.execute("INSERT INTO daily_price (symbol, trade_date, close) VALUES ('000002', ?, ?)", [d, 20 + i * 0.01])
+
+    # 回灌最后 30 天
+    start = (base + timedelta(days=270))
+    end = base + timedelta(days=299)
+    n = backfill_market_state(conn, start, end)
+    assert n >= 20  # 多日序列
+    hist = load_market_state_history(conn, limit=120)
+    assert len(hist) == n
+    assert all("stage_score" in h and "heat_score" in h for h in hist)
+    # 时间升序
+    dates = [h["date"] for h in hist]
+    assert dates == sorted(dates)
+    conn.close()

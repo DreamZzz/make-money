@@ -297,5 +297,6 @@ export type MarketSnapshot = {
     advice?: string;
   } | null;
   allocation: Array<Record<string, unknown>>;
+  history?: Array<{ date: string | null; stage_score: number | null; heat_score: number | null }>;
   error?: string;
 };
