@@ -160,8 +160,12 @@ echo "15/16 生产模型监控..."
 "$PYTHON" -m src.monitoring.model_monitor update
 
 # 16. 虚拟账户竞赛前向执行（非阻塞，绝不影响收盘主链）
-echo "16/16 虚拟账户竞赛前向执行..."
+echo "16/17 虚拟账户竞赛前向执行..."
 "$PYTHON" -m src.accounts.daily forward || true
+
+# 17. 执行链健康检查（P1-E：自动判定当日是否干净 + 连续干净天数；非阻塞）
+echo "17/17 执行链健康检查..."
+"$PYTHON" -m src.portfolio.chain_health --days 5 || true
 
 # 重启 Dashboard
 _restart_dashboard

@@ -84,3 +84,14 @@ Every daily review should update this file with:
 
 - Trading-day successful/diagnosed runs: 5/5 for the initial stabilization window.
 - Current status: 2026-05-22 is diagnosed but not stable. Open task stayed reliable (single run, exit 0, no duplicate fills), while close-window reliability regressed with duplicate attempts and final FAILED status. Freshness improved for `qlib_predictions` (now 2026-05-22), but `market_snapshot` is still stale at 2026-05-11 and close workflow still surfaces Python 3.12 Qlib runtime failures. Continue daily monitoring until close-window reliability and model/runtime health are stable together.
+
+### 2026-05-25 P1-E 自动化干净交易日判定
+
+- 手工逐日审查升级为程序化判定：`src/portfolio/chain_health.py` 把历史暴露过的执行 bug 固化为可自动检测的不变量，每个收盘自动跑（daily_close 步骤 17，非阻塞），并算"连续干净交易日"streak。
+- 干净判定（一天 clean 当且仅当三项全 0）：
+  - 同日重复成交：同 模型/标的/方向 在同一执行日多于一笔（600808 双买 bug）。
+  - 终态信号未对齐 executed：status ∈ {FILLED, NO_ACTION, EXPIRED, SUPERSEDED} 但 executed=FALSE（outcome 跟踪会漏）。注意 DEFERRED_BUDGET 是 pending、不算终态。
+  - order_ts 落在 00:00：回溯/回填执行的痕迹。
+- 用法：`python -m src.portfolio.chain_health --days 5`；门槛 = 连续 5 个交易日全 clean。
+- 历史复检（2026-05-13~05-22）：5-19 检出同日重复成交 1 组（已知历史 bug，修复前），5-22 之前误报的 5 条 DEFERRED_BUDGET 在收紧终态集合后不再误报。回归测试 33 项全过。
+- 5 日窗口需真实交易日累积（2026-05-25 起为新交易周），由该检查器客观追踪，不再手工判断。
