@@ -4,19 +4,20 @@ import { apiGet } from "./api";
 import { AppShell, type RouteKey } from "./components/AppShell";
 import { ErrorPanel, LoadingPanel } from "./components/StatePanel";
 import { HealthPage } from "./pages/HealthPage";
+import { MarketPage } from "./pages/MarketPage";
 import { PortfolioPage } from "./pages/PortfolioPage";
 import { RebalancePage } from "./pages/RebalancePage";
 import { ResearchPage } from "./pages/ResearchPage";
 import { TodayPage } from "./pages/TodayPage";
 import { TournamentPage } from "./pages/TournamentPage";
 import { UserGuidePage } from "./pages/UserGuidePage";
-import type { HealthSnapshot, PortfolioSnapshot, RebalanceSnapshot, ResearchSummary, TodaySnapshot, TournamentSnapshot } from "./types";
+import type { HealthSnapshot, MarketSnapshot, PortfolioSnapshot, RebalanceSnapshot, ResearchSummary, TodaySnapshot, TournamentSnapshot } from "./types";
 
 const DEFAULT_HEALTH = { status: "degraded", label: "数据加载中", blocking: false, messages: ["正在连接 Dashboard V2 API"] };
 
 function currentRoute(): RouteKey {
   const path = window.location.pathname as RouteKey;
-  if (["/today", "/rebalance", "/portfolio", "/health", "/tournament", "/research", "/guide"].includes(path)) return path;
+  if (["/today", "/rebalance", "/portfolio", "/market", "/health", "/tournament", "/research", "/guide"].includes(path)) return path;
   return "/today";
 }
 
@@ -28,6 +29,7 @@ export function App() {
   const [portfolio, setPortfolio] = useState<PortfolioSnapshot | null>(null);
   const [research, setResearch] = useState<ResearchSummary | null>(null);
   const [tournament, setTournament] = useState<TournamentSnapshot | null>(null);
+  const [market, setMarket] = useState<MarketSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const healthState = useMemo(() => health || today?.health || DEFAULT_HEALTH, [health, today]);
@@ -49,6 +51,7 @@ export function App() {
       if (next === "/today") setToday(await apiGet<TodaySnapshot>("/api/v2/today"));
       if (next === "/rebalance") setRebalance(await apiGet<RebalanceSnapshot>("/api/v2/rebalance/latest"));
       if (next === "/portfolio") setPortfolio(await apiGet<PortfolioSnapshot>("/api/v2/portfolio"));
+      if (next === "/market") setMarket(await apiGet<MarketSnapshot>("/api/v2/market"));
       if (next === "/tournament") setTournament(await apiGet<TournamentSnapshot>("/api/v2/tournament"));
       if (next === "/research") setResearch(await apiGet<ResearchSummary>("/api/v2/research/summary"));
     } catch (err) {
@@ -72,6 +75,9 @@ export function App() {
     }
     if (next === "/portfolio") {
       return portfolio ? <PortfolioPage data={portfolio} /> : <LoadingPanel message="正在加载组合体检" />;
+    }
+    if (next === "/market") {
+      return market ? <MarketPage data={market} /> : <LoadingPanel message="正在加载市场温度计" />;
     }
     if (next === "/health") {
       return health ? <HealthPage data={health} /> : <LoadingPanel message="正在加载数据健康" />;

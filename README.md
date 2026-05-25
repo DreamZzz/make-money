@@ -78,6 +78,7 @@ V2 读取的是同一套本地 DuckDB 和现有 domain service，不是 mock 数
 | 今日行动 | `/today` | 默认首页，判断今天数据能不能用、是否需要调仓 |
 | 调仓执行 | `/rebalance` | 同屏查看 Core 基金、Satellite 个股、暂缓项和资金缺口 |
 | 组合体检 | `/portfolio` | 检查现金、持仓、暴露风险和信号收益跟踪 |
+| 市场温度计 | `/market` | 市场阶段+宽度+热度+估值分位+相对强弱，给出 T+1 仓位建议与指数搭配 |
 | 市场与数据健康 | `/health` | 判断数据源、字段覆盖、任务状态和模型状态是否可用于决策 |
 | 策略竞赛 | `/tournament` | 多虚拟账户并行对标（历史回放+前向纸盘），竞赛榜与晋级闸门，选最优指导实盘 |
 | 研究实验室 | `/research` | 收纳 Qlib、IC/ICIR、实验摘要和旧 Streamlit 入口 |
@@ -145,6 +146,9 @@ V2 首期只支持安全写入，不会替你真实下单。
 ```bash
 # 启动 Dashboard V2
 scripts/run_dashboard_v2.sh
+
+# 市场温度计（指数核心：市场状态 → T+1 仓位 → 指数搭配）
+python -m src.market.daily --backfill-valuation                        # 估值刷新+市场状态+仓位+指数搭配（已接入收盘链）
 
 # 虚拟账户竞赛（多账户并行对标）
 python -m src.accounts.daily seed                                      # 创建种子账户

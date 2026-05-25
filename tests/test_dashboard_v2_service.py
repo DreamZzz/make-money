@@ -867,3 +867,36 @@ def test_dashboard_v2_tournament_snapshot(tmp_path) -> None:
     assert "acc1" in snap["nav_curves"]
     assert len(snap["nav_curves"]["acc1"]) == 3
     assert "recommended_winner" in snap["tournament"]
+
+
+def test_dashboard_v2_market_snapshot(tmp_path) -> None:
+    import json as _json
+
+    from src.dashboard_v2.service import DashboardV2Service
+
+    db_path = tmp_path / "market.duckdb"
+    conn = duckdb.connect(str(db_path))
+    init_db(conn)
+    conn.execute(
+        "INSERT INTO market_state (trade_date, benchmark, stage, stage_score, heat_score, "
+        "breadth_above_ma200, pe_pct_10y, rs_leader, rs_json, summary) "
+        "VALUES ('2026-05-22','000300','强势上升',60,58,0.44,0.84,'000300',?,'强势上升但偏贵')",
+        [_json.dumps({"000300": 0.04, "000905": 0.03, "HSTECH": -0.08})],
+    )
+    conn.execute(
+        "INSERT INTO market_exposure (trade_date, benchmark, stage, target_exposure, action, advice) "
+        "VALUES ('2026-05-22','000300','强势上升',0.87,'HOLD','维持')"
+    )
+    conn.execute(
+        "INSERT INTO index_allocation (trade_date, fund_code, index_code, index_name, rs_rank, weight, equity_budget) "
+        "VALUES ('2026-05-22','012963','000300','沪深300',1,0.435,0.87)"
+    )
+    conn.close()
+
+    snap = DashboardV2Service(db_path=db_path).build_market_snapshot()
+    assert snap["market_state"]["stage"] == "强势上升"
+    assert snap["market_state"]["pe_pct_10y"] == 0.84
+    assert snap["market_state"]["relative_strength"]["HSTECH"] == -0.08
+    assert snap["exposure"]["target_exposure"] == 0.87
+    assert len(snap["allocation"]) == 1
+    assert snap["allocation"][0]["fund_code"] == "012963"

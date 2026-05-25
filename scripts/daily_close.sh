@@ -156,8 +156,12 @@ echo "14/15 生产模型监控..."
 "$PYTHON" -m src.monitoring.model_monitor update
 
 # 15. 虚拟账户竞赛前向执行（非阻塞，绝不影响收盘主链）
-echo "15/15 虚拟账户竞赛前向执行..."
+echo "15/16 虚拟账户竞赛前向执行..."
 "$PYTHON" -m src.accounts.daily forward || true
+
+# 16. 市场层：估值刷新 + 市场状态 + T+1 仓位信号 + 指数搭配（非阻塞）
+echo "16/16 市场温度计（市场状态/仓位信号/指数搭配）..."
+"$PYTHON" -m src.market.daily --backfill-valuation || true
 
 # 重启 Dashboard
 _restart_dashboard

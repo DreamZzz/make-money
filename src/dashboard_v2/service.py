@@ -195,6 +195,31 @@ class DashboardV2Service:
                 "legacy_streamlit": {"label": "打开 Streamlit 研究工作台", "url": "http://localhost:8501"},
             }
 
+    def build_market_snapshot(self) -> dict[str, Any]:
+        """市场温度计：最新市场状态 + T+1 仓位信号 + 指数搭配。"""
+        with self._managed_connection(read_only=True) as conn:
+            state = _load_latest_row(conn, "market_state", "trade_date")
+            exposure = _load_latest_row(conn, "market_exposure", "trade_date")
+            allocation = conn.execute(
+                """
+                SELECT fund_code, index_code, index_name, rs_score, rs_rank, weight, equity_budget
+                FROM index_allocation
+                WHERE trade_date = (SELECT MAX(trade_date) FROM index_allocation)
+                ORDER BY weight DESC
+                """
+            ).fetchdf().to_dict(orient="records")
+            import json as _json
+            if state and state.get("rs_json"):
+                try:
+                    state["relative_strength"] = _json.loads(state["rs_json"])
+                except (ValueError, TypeError):
+                    state["relative_strength"] = {}
+            return {
+                "market_state": state,
+                "exposure": exposure,
+                "allocation": allocation,
+            }
+
     def build_tournament_snapshot(self) -> dict[str, Any]:
         from src.accounts.leaderboard import build_leaderboard
         from src.accounts.promotion import evaluate_tournament
@@ -398,6 +423,20 @@ def _latest_trade_date(conn: duckdb.DuckDBPyConnection) -> str | None:
 def _latest_signal_date(conn: duckdb.DuckDBPyConnection) -> str | None:
     row = conn.execute("SELECT MAX(CAST(signal_ts AS DATE)) FROM signals").fetchone()
     return _date_to_iso(row[0] if row else None)
+
+
+def _load_latest_row(conn: duckdb.DuckDBPyConnection, table: str, order_col: str) -> dict[str, Any] | None:
+    """取某表按 order_col 最新的一行为 dict；日期字段序列化为 ISO 字符串。"""
+    df = conn.execute(f"SELECT * FROM {table} ORDER BY {order_col} DESC LIMIT 1").fetchdf()
+    if df.empty:
+        return None
+    rec = df.iloc[0].to_dict()
+    for k, v in list(rec.items()):
+        if hasattr(v, "date"):
+            rec[k] = v.date().isoformat() if hasattr(v, "date") else str(v)
+        elif pd.isna(v):
+            rec[k] = None
+    return rec
 
 
 def _load_account_nav_curves(conn: duckdb.DuckDBPyConnection) -> dict[str, list[dict[str, Any]]]:

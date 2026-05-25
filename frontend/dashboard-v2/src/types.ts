@@ -268,3 +268,34 @@ export type TournamentSnapshot = {
   nav_curves: Record<string, Array<{ date: string | null; nav: number | null }>>;
   error?: string;
 };
+
+export type MarketSnapshot = {
+  market_state: {
+    trade_date?: string;
+    stage?: string;
+    stage_score?: number;
+    heat_score?: number;
+    breadth_above_ma50?: number | null;
+    breadth_above_ma200?: number | null;
+    advance_ratio?: number | null;
+    new_high_low_ratio?: number | null;
+    volume_ratio?: number | null;
+    pe_pct_10y?: number | null;
+    pb_pct_10y?: number | null;
+    rs_leader?: string | null;
+    relative_strength?: Record<string, number>;
+    summary?: string;
+  } | null;
+  exposure: {
+    stage?: string;
+    base_exposure?: number;
+    valuation_adj?: number;
+    breadth_adj?: number;
+    heat_adj?: number;
+    target_exposure?: number;
+    action?: string;
+    advice?: string;
+  } | null;
+  allocation: Array<Record<string, unknown>>;
+  error?: string;
+};

@@ -396,3 +396,15 @@ Triggered by a fresh end-to-end readiness review against the goal of guiding ret
 - 真实首跑（2024-2026，基准 000300）：5 账户全部跑输 CSI300（超额 -7.4%~-24.2%），晋级闸门正确推荐冠军=None。alpha158_pure 相对最优（年化9.6%/Sharpe0.54/回撤-25%/命中46%/103平仓）。真实执行约束下当前配置都不够格上实盘——系统在诚实工作。
 - 待办：后续可加更多账户配置（不同 top_n/调仓频率/风险档）继续对标；前向链累积真实战绩后与回放对照。
 - 验证：新增 `test_accounts_registry/engine/replay/leaderboard` + dashboard tournament 测试；`ruff check` 干净；前端 `build` + `test` 通过。
+
+### 2026-05-24/25 指数核心市场择时层（M1-M5）
+
+战略转向后（竞赛系统证明主动选股无可信 alpha，详见上一条），现阶段以指数为核心，新增市场择时层：
+
+- **M1 历史估值回灌** `src/data_pipeline/valuation_backfill.py`：akshare 乐咕乐股全A股 PE-TTM/PB 中位数+近10年分位（2005至今 5538 行），落 `market_valuation`，回答"市场贵不贵"。当前 PE 近10年 84 分位（偏贵）。
+- **M2 市场状态引擎** `src/market/state.py`：综合阶段（MA结构/回撤/波动）+ 宽度（站上MA50/MA200/涨跌家数/新高）+ 热度（量能/分化/涨停代理）+ 相对强弱（300/500/港股科技）+ 估值分位，输出阶段标签+0-100热度分+中文解读，落 `market_state`。当前判读："强势上升但贵且窄"（44%个股在年线上）。
+- **M3 T+1 仓位信号** `src/market/exposure.py`：市场状态→目标权益仓位+加减仓建议。**长期偏多**设计：阶段定基准，估值/宽度/热度只在限幅 [-0.20,+0.12] 内微调，只有"下跌/危机"才大幅降仓——修掉 regime_gated 牛市降仓致败的毛病。当前目标 87%。
+- **M4 指数搭配** `src/market/index_allocation.py`：权益预算内按相对强弱轮动（rank 线性权重）超配领先指数。2024-2026 对标：轮动 +50.6% vs 固定等权 +46.2%（动量倾斜加值 ~4.4pp；事后单押CSI500 +57.6%更高）。
+- **M5 Dashboard + 接入**：`/market` 市场温度计页（API + 前端）；`src/market/daily.py` CLI + 接入 `daily_close.sh` 步骤16（非阻塞）。
+- 验证：新增 valuation/state/exposure/index_allocation + dashboard market 测试；`ruff` 干净；前端 build+test 通过。
+- 边界：估值用市场级单序列（非逐股）；市场层只控指数核心仓位与搭配，主动选股仍 shadow。
