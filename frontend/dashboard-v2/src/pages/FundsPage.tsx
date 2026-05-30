@@ -86,55 +86,129 @@ function OverallCard({ data }: { data: FundsSnapshot }) {
 
 function FundCard({ f }: { f: FundEvaluation }) {
   const stale = f.snapshot_stale_days !== null && f.snapshot_stale_days > 3;
+  const isExited = f.intent === "exited";
+  const isBalanced = f.category === "balanced";
+  const isEquityLike = (f.category === "equity_index" || f.category === "qdii") && !isExited;
+  const dim = isExited ? { opacity: 0.6 } : {};
   return (
-    <section className="panel">
+    <section className="panel" style={dim}>
       <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
         <h3 style={{ margin: 0, fontFamily: "var(--font-display)" }}>{f.fund_code}</h3>
         <ActionPill action={f.action} />
       </div>
       <small style={{ color: "var(--muted)" }}>{f.fund_name}</small>
+      <div style={{ display: "flex", gap: 4, marginTop: 4, flexWrap: "wrap" }}>
+        <CategoryBadge category={f.category} />
+        <IntentBadge intent={f.intent} />
+      </div>
       <div style={{ marginTop: 10, fontSize: 13, fontFamily: "var(--font-mono)", lineHeight: 1.7 }}>
         <KV label="跟踪">{f.tracking_index_name || f.tracking_index}</KV>
         <KV label="持仓">
-          {f.shares !== null && f.nav !== null
-            ? `${formatShares(f.shares)} × ${f.nav.toFixed(4)} = ${formatCurrency(f.current_value || 0)}`
+          {f.shares !== null
+            ? `${formatShares(f.shares)} × ${(f.broker_latest_nav || f.nav || 0).toFixed(4)} = ${formatCurrency(f.current_value || 0)}`
             : "—"}
+          {f.broker_market_value !== null ? <span style={{ marginLeft: 6, color: "var(--muted)", fontSize: 11 }}>
+            (broker)
+          </span> : null}
           {stale ? <span style={{ color: "var(--negative, #ff6b6b)", marginLeft: 6 }}>
             ⚠ 快照 {f.snapshot_stale_days}d 未更新
           </span> : null}
         </KV>
-        <KV label="收益">
+        {f.broker_cost_price !== null ? (
+          <KV label="成本价">{f.broker_cost_price.toFixed(4)}</KV>
+        ) : null}
+        <KV label="累计收益">
           {f.return_pct !== null
             ? <span style={{ color: f.return_pct >= 0 ? "var(--positive, #4ade80)" : "var(--negative, #ff6b6b)" }}>
                 {formatPercent(f.return_pct)} ({formatCurrency(f.return_amount || 0)})
               </span>
             : "—"}
         </KV>
-        <KV label="价格分位">
-          {f.price_pct !== null ? `${(f.price_pct * 100).toFixed(0)}%` : "—"}
-          {f.price_pct !== null && f.price_pct >= 0.9 ? <span style={{ marginLeft: 6, color: "var(--negative, #ff6b6b)" }}>偏贵</span> : null}
-        </KV>
-        <KV label="趋势">
-          MA120 {f.trend_healthy ? "✓" : "✗"} · MA250 {f.trend_weak ? "✗" : "✓"}
-        </KV>
-        <KV label="M4 目标">
-          {f.target_weight_m4 !== null
-            ? `${formatPercent(f.target_weight_m4)} (账户级 ${formatPercent(f.target_account_weight || 0)})`
-            : "—"}
-        </KV>
-        <KV label="目标市值">
-          {f.target_value !== null ? formatCurrency(f.target_value) : "—"}
-        </KV>
-        <KV label="应执行">
-          <DeltaCell amount={f.delta_amount} />
-          {f.delta_shares !== null ? <small style={{ color: "var(--muted)", marginLeft: 4 }}>
-            ≈ {formatShares(f.delta_shares)} 份
-          </small> : null}
-        </KV>
+        {f.broker_day_return_pct !== null ? (
+          <KV label="今日">
+            <span style={{ color: f.broker_day_return_pct >= 0 ? "var(--positive, #4ade80)" : "var(--negative, #ff6b6b)" }}>
+              {formatPercent(f.broker_day_return_pct)}
+              {f.broker_yesterday_pnl !== null ? ` (${formatCurrency(f.broker_yesterday_pnl)})` : ""}
+            </span>
+          </KV>
+        ) : null}
+        {f.holding_days !== null ? (
+          <KV label="持有">{f.holding_days} 天</KV>
+        ) : null}
+        {isEquityLike ? (
+          <>
+            <KV label="价格分位">
+              {f.price_pct !== null ? `${(f.price_pct * 100).toFixed(0)}%` : "—"}
+              {f.price_pct !== null && f.price_pct >= 0.9 ? <span style={{ marginLeft: 6, color: "var(--negative, #ff6b6b)" }}>偏贵</span> : null}
+            </KV>
+            <KV label="趋势">
+              MA120 {f.trend_healthy ? "✓" : "✗"} · MA250 {f.trend_weak ? "✗" : "✓"}
+            </KV>
+            <KV label="M4 目标">
+              {f.target_weight_m4 !== null
+                ? `${formatPercent(f.target_weight_m4)} (账户级 ${formatPercent(f.target_account_weight || 0)})`
+                : "—(不进 RS 池)"}
+            </KV>
+            <KV label="目标市值">
+              {f.target_value !== null ? formatCurrency(f.target_value) : "—"}
+            </KV>
+            <KV label="应执行">
+              <DeltaCell amount={f.delta_amount} />
+              {f.delta_shares !== null ? <small style={{ color: "var(--muted)", marginLeft: 4 }}>
+                ≈ {formatShares(f.delta_shares)} 份
+              </small> : null}
+            </KV>
+          </>
+        ) : isBalanced ? (
+          <KV label="评估">
+            <span style={{ color: "var(--muted)" }}>股债混合,不适用纯权益指数口径</span>
+          </KV>
+        ) : isExited ? (
+          <KV label="状态">
+            <span style={{ color: "var(--muted)" }}>已退出,系统不再驱动</span>
+          </KV>
+        ) : null}
       </div>
       <p style={{ marginTop: 10, color: "var(--muted)", fontSize: 12, lineHeight: 1.5 }}>{f.thesis}</p>
       <RiskTags tags={f.risk_tags} />
+      {f.snapshot_source ? (
+        <small style={{ display: "block", marginTop: 8, color: "var(--muted)", fontSize: 11 }}>
+          源: {f.snapshot_source}{f.snapshot_captured_at ? ` · ${f.snapshot_captured_at}` : ""}
+        </small>
+      ) : null}
     </section>
+  );
+}
+
+function CategoryBadge({ category }: { category: string }) {
+  const map: Record<string, { label: string; color: string }> = {
+    equity_index: { label: "权益指数", color: "var(--accent, #4ade80)" },
+    qdii: { label: "QDII", color: "var(--accent, #60a5fa)" },
+    balanced: { label: "股债混合", color: "#fbbf24" },
+    bond: { label: "债券", color: "#94a3b8" },
+    other: { label: "其它", color: "var(--muted)" },
+  };
+  const m = map[category] || map.other;
+  return (
+    <span style={{
+      fontSize: 11, padding: "1px 6px", borderRadius: 3,
+      border: `1px solid ${m.color}`, color: m.color, fontFamily: "var(--font-mono)",
+    }}>{m.label}</span>
+  );
+}
+
+function IntentBadge({ intent }: { intent: string }) {
+  if (intent === "active") return null;  // 默认不显示
+  const map: Record<string, { label: string; color: string }> = {
+    exited: { label: "已退出", color: "var(--muted)" },
+    watching: { label: "观察", color: "#94a3b8" },
+  };
+  const m = map[intent] || { label: intent, color: "var(--muted)" };
+  return (
+    <span style={{
+      fontSize: 11, padding: "1px 6px", borderRadius: 3,
+      border: `1px dashed ${m.color}`, color: m.color, fontFamily: "var(--font-mono)",
+    }}>{m.label}</span>
   );
 }
 
@@ -184,6 +258,9 @@ function RiskTags({ tags }: { tags: string[] }) {
     no_snapshot: "无快照",
     nav_stale: "净值滞后",
     m4_missing: "M4 缺失",
+    exited: "已退出",
+    balanced_no_equity_rules: "非权益规则",
+    broker_mismatch: "broker 偏差",
   };
   return (
     <span style={{ display: "inline-flex", gap: 4, flexWrap: "wrap" }}>

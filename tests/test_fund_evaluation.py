@@ -147,3 +147,118 @@ def test_evaluate_funds_persist_writes_fund_evaluations_table(monkeypatch):
     assert rows[0]["fund_code"] == "012963"
     assert rows[0]["action"] in {"HOLD", "ADD", "BUY", "REDUCE", "PAUSE"}
     conn.close()
+
+
+def _make_item(fund_code, *, category="equity_index", intent="active", tracking="000300"):
+    from src.index_funds.config import FundWatchItem
+    return FundWatchItem(
+        fund_code=fund_code, name=f"测试{fund_code}", fund_type="OPEN",
+        tracking_index=tracking, tracking_index_name=tracking,
+        market="CN", currency="CNY", target_weight=0.33,
+        category=category, intent=intent,
+    )
+
+
+def test_e_balanced_category_skips_equity_rules(monkeypatch):
+    """E3: balanced 基金不算 price_pct/MA/M4 目标,只展示 holding PnL。"""
+    monkeypatch.setattr("src.funds.evaluation.get_watchlist",
+                        lambda: [_make_item("012963", category="balanced", intent="active")])
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    _seed_basic(conn)
+    conn.execute("UPDATE fund_info SET fund_code='012963'")
+    # 替换 snapshot fund_code 让 _seed_basic 的 snapshot 匹配
+    conn.execute("UPDATE index_fund_snapshots SET fund_code='012963'")
+    conn.execute("UPDATE fund_nav SET fund_code='012963'")
+    conn.execute("UPDATE index_allocation SET fund_code='012963'")
+    evals = evaluate_funds(conn, eval_date=date(2026, 5, 29))
+    e = evals[0]
+    assert e.category == "balanced"
+    assert e.price_pct is None  # 不算
+    assert e.target_weight_m4 is None
+    assert e.target_value is None
+    assert e.delta_amount is None
+    assert "balanced_no_equity_rules" in e.risk_tags
+    assert "股债混合" in e.thesis
+    conn.close()
+
+
+def test_e_exited_intent_no_delta_amount(monkeypatch):
+    """E3: exited 状态不算 delta_amount,thesis 标明已退出。"""
+    monkeypatch.setattr("src.funds.evaluation.get_watchlist",
+                        lambda: [_make_item("004192", category="equity_index", intent="exited",
+                                            tracking="000300")])
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    _seed_basic(conn)
+    conn.execute("UPDATE index_fund_snapshots SET fund_code='004192'")
+    conn.execute("UPDATE fund_nav SET fund_code='004192'")
+    conn.execute("UPDATE index_allocation SET fund_code='004192'")
+    evals = evaluate_funds(conn, eval_date=date(2026, 5, 29))
+    e = evals[0]
+    assert e.intent == "exited"
+    assert e.delta_amount is None
+    assert e.target_value is None
+    assert "exited" in e.risk_tags
+    assert "已退出" in e.thesis
+    conn.close()
+
+
+def test_e_broker_json_note_lifted_to_fields(monkeypatch):
+    """E2: snapshot.note 是 broker JSON 时,字段升格到 evaluation。"""
+    import json as _json
+    monkeypatch.setattr("src.funds.evaluation.get_watchlist",
+                        lambda: [_make_item("013308", category="qdii", intent="active",
+                                            tracking="000300")])
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    _seed_basic(conn)
+    conn.execute("UPDATE index_fund_snapshots SET fund_code='013308'")
+    conn.execute("UPDATE fund_nav SET fund_code='013308'")
+    conn.execute("UPDATE index_allocation SET fund_code='013308'")
+    note_json = _json.dumps({
+        "source": "manual_broker_screenshot",
+        "captured_at": "2026-05-30 19:33 Asia/Shanghai",
+        "market_value": 105088.64,
+        "latest_nav": 1.1636,
+        "cost_price_display": 1.218,
+        "holding_pnl": -4911.36,
+        "holding_return_pct": -0.0446,
+        "day_return_pct": -0.0018,
+        "yesterday_pnl": -189.66,
+        "holding_days": 92,
+    })
+    conn.execute("UPDATE index_fund_snapshots SET note = ?", [note_json])
+    evals = evaluate_funds(conn, eval_date=date(2026, 5, 29))
+    e = evals[0]
+    assert e.broker_market_value == pytest.approx(105088.64)
+    assert e.broker_latest_nav == pytest.approx(1.1636)
+    assert e.broker_cost_price == pytest.approx(1.218)
+    assert e.broker_holding_pnl == pytest.approx(-4911.36)
+    assert e.broker_holding_return_pct == pytest.approx(-0.0446)
+    assert e.holding_days == 92
+    assert e.snapshot_source == "manual_broker_screenshot"
+    # broker market_value 直接进 current_value (优先级高于 shares×nav)
+    assert e.current_value == pytest.approx(105088.64)
+    # return_pct 用 broker 值
+    assert e.return_pct == pytest.approx(-0.0446)
+    conn.close()
+
+
+def test_e_legacy_text_note_does_not_break(monkeypatch):
+    """E2: 旧版纯文本 note 不影响 evaluation。"""
+    monkeypatch.setattr("src.funds.evaluation.get_watchlist",
+                        lambda: [_make_item("012963", tracking="000300")])
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    _seed_basic(conn)
+    conn.execute("UPDATE index_fund_snapshots SET fund_code='012963', note='手填备注'")
+    conn.execute("UPDATE fund_nav SET fund_code='012963'")
+    conn.execute("UPDATE index_allocation SET fund_code='012963'")
+    evals = evaluate_funds(conn, eval_date=date(2026, 5, 29))
+    e = evals[0]
+    assert e.broker_market_value is None
+    assert e.snapshot_source is None
+    # 仍能算 current_value = shares × nav
+    assert e.current_value is not None and e.current_value > 0
+    conn.close()

@@ -1,6 +1,7 @@
 index_funds:
   enabled: true
   watchlist:
+    # 已获利清仓,仅保留小额仓位作回访,不进 M4 主动管理
     - fund_code: "004192"
       name: "招商中证500指数增强A"
       fund_type: "OPEN"
@@ -8,8 +9,10 @@ index_funds:
       tracking_index_name: "中证500"
       market: "CN"
       currency: "CNY"
-      target_weight: 0.34
+      target_weight: 0.0
       enabled: true
+      category: "equity_index"
+      intent: "exited"
 
     - fund_code: "013308"
       name: "易方达恒生科技ETF联接(QDII)A"
@@ -20,16 +23,21 @@ index_funds:
       currency: "CNY"
       target_weight: 0.33
       enabled: true
+      category: "qdii"
+      intent: "active"
 
+    # 股债混合基金,不适用纯权益指数评估;tracking_index 仅作参考
     - fund_code: "012963"
-      name: "招商稳健平衡混合A（临时以沪深300作权益基准）"
+      name: "招商稳健平衡混合A"
       fund_type: "OPEN"
       tracking_index: "000300"
-      tracking_index_name: "沪深300（临时基准）"
+      tracking_index_name: "沪深300(仅参考)"
       market: "CN"
       currency: "CNY"
-      target_weight: 0.33
+      target_weight: 0.0
       enabled: true
+      category: "balanced"
+      intent: "active"
 
 portfolio:
   max_daily_turnover_pct: 0.30

@@ -952,11 +952,26 @@ CREATE TABLE IF NOT EXISTS fund_evaluations (
     fund_name           VARCHAR,
     tracking_index      VARCHAR,
     tracking_index_name VARCHAR,
+    -- E1: 分类与意图
+    category            VARCHAR DEFAULT 'equity_index',
+    intent              VARCHAR DEFAULT 'active',
     -- 快照(用户录入)
     snapshot_date       DATE,
     snapshot_stale_days INTEGER,
     shares              DOUBLE,
     cost_amount         DOUBLE,
+    -- E2: 从 snapshot.note JSON 升格的 broker 真值
+    broker_market_value DOUBLE,
+    broker_latest_nav   DOUBLE,
+    broker_cost_price   DOUBLE,
+    broker_holding_pnl  DOUBLE,
+    broker_holding_return_pct DOUBLE,
+    broker_day_return_pct DOUBLE,
+    broker_yesterday_pnl DOUBLE,
+    holding_days        INTEGER,
+    snapshot_source     VARCHAR,
+    snapshot_captured_at VARCHAR,
+    market_value_vs_computed_pct DOUBLE,
     -- 净值
     nav                 DOUBLE,
     nav_date            DATE,

@@ -45,8 +45,24 @@ def compute_index_weights(
 
 
 def _watchlist() -> list[dict[str, Any]]:
+    """M4 RS 轮动池只接 equity_index/qdii 类别 + active intent 的基金。
+
+    E3: balanced (股债混合) 不进 RS 轮动 — 它们不是纯权益,排序无意义。
+        exited (清仓残留) 不进 RS 轮动 — 用户已退出,不该再被分配权重。
+    """
     funds = load_config().get("index_funds", {}).get("watchlist", [])
-    return [f for f in funds if f.get("enabled", True) and f.get("tracking_index")]
+    out = []
+    for f in funds:
+        if not f.get("enabled", True) or not f.get("tracking_index"):
+            continue
+        category = str(f.get("category") or "equity_index").lower()
+        intent = str(f.get("intent") or "active").lower()
+        if intent != "active":
+            continue
+        if category not in {"equity_index", "qdii"}:
+            continue
+        out.append(f)
+    return out
 
 
 def build_index_allocation(

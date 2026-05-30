@@ -27,7 +27,18 @@ def test_compute_index_weights_empty():
     assert compute_index_weights({"a": 1.0}, 0.0) == {}
 
 
-def test_build_index_allocation_integration():
+def test_build_index_allocation_integration(monkeypatch):
+    # E3: M4 池现在过滤 category/intent;测试要显式 patch watchlist 才有 active equity 标的
+    def _fake_load_config():
+        return {"index_funds": {"watchlist": [
+            {"fund_code": "012963", "tracking_index": "000300", "category": "equity_index",
+             "intent": "active", "enabled": True},
+            {"fund_code": "004192", "tracking_index": "000905", "category": "equity_index",
+             "intent": "active", "enabled": True},
+            {"fund_code": "013308", "tracking_index": "HSTECH", "category": "qdii",
+             "intent": "active", "enabled": True},
+        ]}}
+    monkeypatch.setattr("src.market.index_allocation.load_config", _fake_load_config)
     conn = duckdb.connect(":memory:")
     init_db(conn)
     conn.execute(

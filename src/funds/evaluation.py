@@ -1,25 +1,23 @@
-"""D1: 基金每日评估服务
+"""D1+E: 基金每日评估服务
 
 把零散数据合成 `FundEvaluation` 单条记录(每基金每日一条):
-- index_fund_snapshots → 用户录入的份额/成本(取每 fund 最新一条)
+- index_fund_snapshots → 用户录入的份额/成本(取每 fund 最新一条;note JSON 升格为 broker 真值)
 - fund_nav            → 最新净值
-- index_daily         → 跟踪指数(用于 price_pct / MA 趋势)
-- index_allocation    → M4 动态目标权重
-- market_exposure     → 宏观目标权益仓位 (target)
+- index_daily         → 跟踪指数(equity_index/qdii 适用)
+- index_allocation    → M4 动态目标权重(仅 equity_index/qdii + active 进池)
+- market_exposure     → 宏观目标权益仓位
 - account_daily       → 账户总值
-- fund_info           → 基金名 / 跟踪指数
+- fund_info / watchlist → category (equity_index/balanced/qdii/...) + intent (active/exited/...)
 
-输出:
-- 当前持仓 / 收益 / 估值 / 趋势 / 应执行金额 / 风险标签
-- 决策由 calculate_signal (D3 已统一为 M4 权重) 复用,不重复实现
-
-设计原则:
-- 评估"不下单",只把已有数据合成可消费的视图;Dashboard 直接读
-- snapshot 过期 (>3 天) 用 risk_tag `snapshot_stale` 标注,delta_amount 仍算但 advice 降一档
+E 分流原则:
+- balanced 类:不算 price_pct/MA/M4 目标,只展示 holding PnL + cost 偏离
+- exited 状态:不算 delta_amount,thesis "已退出系统不驱动"
+- active equity_index/qdii:沿用 D1 流程
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+import json
+from dataclasses import asdict, dataclass, field
 from datetime import date
 from typing import Any
 
@@ -42,41 +40,60 @@ class FundEvaluation:
     fund_name: str | None
     tracking_index: str | None
     tracking_index_name: str | None
-    snapshot_date: date | None
-    snapshot_stale_days: int | None
-    shares: float | None
-    cost_amount: float | None
-    nav: float | None
-    nav_date: date | None
-    nav_stale_days: int | None
-    current_value: float | None
-    return_amount: float | None
-    return_pct: float | None
-    price_pct: float | None
-    ma_fast: float | None
-    ma_slow: float | None
-    trend_healthy: bool | None
-    trend_weak: bool | None
-    target_weight_m4: float | None
-    equity_exposure: float | None
-    target_value: float | None
-    target_account_weight: float | None
-    current_weight: float | None
-    current_account_weight: float | None
-    drift_pct: float | None
-    delta_amount: float | None
-    delta_shares: float | None
-    action: str
-    confidence: float
-    thesis: str
-    risk_tags: list[str]
-    account_total_value: float | None
+    # E1: 分类
+    category: str = "equity_index"
+    intent: str = "active"
+    # 快照(用户录入)
+    snapshot_date: date | None = None
+    snapshot_stale_days: int | None = None
+    shares: float | None = None
+    cost_amount: float | None = None
+    # E2: 从 snapshot.note JSON 升格的 broker 真值
+    broker_market_value: float | None = None
+    broker_latest_nav: float | None = None
+    broker_cost_price: float | None = None
+    broker_holding_pnl: float | None = None
+    broker_holding_return_pct: float | None = None
+    broker_day_return_pct: float | None = None
+    broker_yesterday_pnl: float | None = None
+    holding_days: int | None = None
+    snapshot_source: str | None = None
+    snapshot_captured_at: str | None = None
+    market_value_vs_computed_pct: float | None = None  # broker vs (shares × nav) 偏差校验
+    # 净值
+    nav: float | None = None
+    nav_date: date | None = None
+    nav_stale_days: int | None = None
+    current_value: float | None = None
+    return_amount: float | None = None
+    return_pct: float | None = None
+    # 估值/趋势 (仅 equity_index/qdii 适用)
+    price_pct: float | None = None
+    ma_fast: float | None = None
+    ma_slow: float | None = None
+    trend_healthy: bool | None = None
+    trend_weak: bool | None = None
+    # 权重决策
+    target_weight_m4: float | None = None
+    equity_exposure: float | None = None
+    target_value: float | None = None
+    target_account_weight: float | None = None
+    current_weight: float | None = None
+    current_account_weight: float | None = None
+    drift_pct: float | None = None
+    delta_amount: float | None = None
+    delta_shares: float | None = None
+    action: str = "HOLD"
+    confidence: float = 0.0
+    thesis: str = ""
+    risk_tags: list[str] = field(default_factory=list)
+    account_total_value: float | None = None
 
 
 def _latest_snapshot_per_fund(conn: duckdb.DuckDBPyConnection) -> dict[str, dict[str, Any]]:
     rows = conn.execute(
         """
-        SELECT fund_code, snapshot_date, shares, cost_amount
+        SELECT fund_code, snapshot_date, shares, cost_amount, note
         FROM index_fund_snapshots
         QUALIFY ROW_NUMBER() OVER (
             PARTITION BY fund_code
@@ -84,8 +101,25 @@ def _latest_snapshot_per_fund(conn: duckdb.DuckDBPyConnection) -> dict[str, dict
         ) = 1
         """
     ).fetchall()
-    return {fc: {"snapshot_date": sd, "shares": float(s or 0), "cost_amount": float(c or 0)}
-            for fc, sd, s, c in rows}
+    return {fc: {"snapshot_date": sd, "shares": float(s or 0), "cost_amount": float(c or 0),
+                 "note": note or ""}
+            for fc, sd, s, c, note in rows}
+
+
+def _parse_snapshot_note(note: str) -> dict[str, Any]:
+    """E2: snapshot.note 字段可能是 broker 截图导出的 JSON,把字段升格出来。
+
+    兼容:空串/旧版纯文本 → 返回 {}。
+    """
+    if not note or not note.strip().startswith("{"):
+        return {}
+    try:
+        parsed = json.loads(note)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return parsed
 
 
 def _latest_nav(conn: duckdb.DuckDBPyConnection, fund_code: str) -> tuple[float | None, date | None]:
@@ -133,6 +167,11 @@ def evaluate_fund(
     rules: dict[str, Any],
     eval_date: date,
 ) -> FundEvaluation | None:
+    category = (item.category or "equity_index").lower()
+    intent = (item.intent or "active").lower()
+    is_active = intent == "active"
+    is_exited = intent == "exited"
+
     nav, nav_date = _latest_nav(conn, item.fund_code)
     nav_stale = _stale_days(eval_date, nav_date)
 
@@ -141,78 +180,150 @@ def evaluate_fund(
     cost = float(snap["cost_amount"]) if snap else None
     snap_date = snap["snapshot_date"] if snap else None
     snap_stale = _stale_days(eval_date, snap_date) if snap_date else None
-    current_value = (shares * nav) if (shares is not None and nav is not None) else None
-    return_amount = (current_value - cost) if (current_value is not None and cost is not None) else None
-    return_pct = (return_amount / cost) if (return_amount is not None and cost and cost > 0) else None
 
-    # 拉指数日线给 signal 复用
-    idx_df = conn.execute(
-        "SELECT trade_date, close FROM index_daily WHERE index_code = ? ORDER BY trade_date",
-        [item.tracking_index],
-    ).fetchdf()
+    # E2: 解析 broker 快照 note JSON,优先用 broker 真值
+    note = snap.get("note") if snap else ""
+    note_data = _parse_snapshot_note(note) if note else {}
+    broker_mv = _opt_float(note_data, "market_value")
+    broker_nav = _opt_float(note_data, "latest_nav")
+    broker_cost_price = _opt_float(note_data, "cost_price_display")
+    broker_holding_pnl = _opt_float(note_data, "holding_pnl")
+    broker_holding_ret = _opt_float(note_data, "holding_return_pct")
+    broker_day_ret = _opt_float(note_data, "day_return_pct")
+    broker_yest_pnl = _opt_float(note_data, "yesterday_pnl")
+    holding_days = note_data.get("holding_days")
+    holding_days = int(holding_days) if isinstance(holding_days, (int, float)) else None
+    snap_source = note_data.get("source") if isinstance(note_data.get("source"), str) else None
+    snap_captured_at = note_data.get("captured_at") if isinstance(note_data.get("captured_at"), str) else None
 
-    # 复用 calculate_signal 决定 action/thesis;以"账户级权重"作 current_weight
-    current_account_weight = (current_value / account_total) if (current_value is not None and account_total) else 0.0
-    m4_w = m4_weights.get(item.fund_code)
-    target_weight_m4 = m4_w
-    # 信号层用 "M4 权重" 作目标(D3 已支持),current 用账户级权重
-    if m4_w is not None:
-        tgt_override = float(m4_w)
-        tgt_source = "m4"
-    else:
-        tgt_override = None
-        tgt_source = "config_fallback"
-    signal = calculate_signal(
-        item, idx_df, rules,
-        current_weight=current_account_weight,
-        target_weight_override=tgt_override,
-        target_weight_source=tgt_source,
+    # E2: broker 真实 market_value 优先, 缺时 fallback shares × nav
+    current_value = broker_mv if broker_mv is not None else (
+        (shares * nav) if (shares is not None and nav is not None) else None
     )
+    # broker vs computed 偏差校验
+    mv_vs_computed_pct = None
+    if broker_mv is not None and shares is not None and nav is not None and nav > 0:
+        computed = shares * nav
+        if computed > 0:
+            mv_vs_computed_pct = (broker_mv - computed) / computed
 
+    # E2: 收益用 broker 真值优先
+    if broker_holding_pnl is not None:
+        return_amount = broker_holding_pnl
+    elif current_value is not None and cost is not None:
+        return_amount = current_value - cost
+    else:
+        return_amount = None
+    if broker_holding_ret is not None:
+        return_pct = broker_holding_ret
+    elif return_amount is not None and cost and cost > 0:
+        return_pct = return_amount / cost
+    else:
+        return_pct = None
+
+    current_account_weight = (current_value / account_total) if (current_value is not None and account_total) else 0.0
+
+    # E3: 按 category/intent 分流
+    risk_tags: list[str] = []
+    thesis_parts: list[str] = []
     price_pct = ma_fast = ma_slow = None
     trend_healthy = trend_weak = None
-    if signal is not None:
-        from src.index_funds.signals import compute_index_state
-        st = compute_index_state(idx_df, rules)
-        if st:
-            price_pct = st.get("price_percentile")
-            ma_fast = st.get("ma_fast")
-            ma_slow = st.get("ma_slow")
-            trend_healthy = bool(st.get("trend_healthy"))
-            trend_weak = bool(st.get("trend_weak"))
+    target_weight_m4: float | None = None
+    target_account_weight: float | None = None
+    target_value: float | None = None
+    drift_pct: float | None = None
+    delta_amount: float | None = None
+    delta_shares: float | None = None
+    action = "HOLD"
+    confidence = 0.0
 
-    # 目标账户级权重 = 宏观权益仓位 * M4 权重
-    target_account_weight = None
-    target_value = None
-    drift_pct = None
-    delta_amount = None
-    delta_shares = None
-    if equity_exposure is not None and target_weight_m4 is not None:
-        target_account_weight = float(equity_exposure) * float(target_weight_m4)
-    if account_total is not None and target_account_weight is not None:
-        target_value = account_total * target_account_weight
-    if current_value is not None and target_value is not None:
-        drift = (current_value - target_value)
-        if target_value > 0:
-            drift_pct = drift / target_value
-        delta_amount = target_value - current_value
-    if delta_amount is not None and nav and nav > 0:
-        delta_shares = delta_amount / nav
+    if is_exited:
+        # 已清仓,系统不再驱动加减;只展示真实 PnL 和持有天数
+        action = "HOLD"
+        risk_tags.append("exited")
+        if return_pct is not None and return_pct > 0:
+            thesis_parts.append(
+                f"已退出 (用户清仓后残留 ¥{current_value or 0:,.0f}),系统不再驱动调仓;"
+                f"残留收益 {return_pct:.1%}"
+            )
+        else:
+            thesis_parts.append("已退出,系统不再驱动调仓")
+    elif category == "balanced":
+        # 股债混合,不适用 price_pct/MA/M4;只展示持有 PnL + cost 偏离
+        action = "HOLD"
+        risk_tags.append("balanced_no_equity_rules")
+        if return_pct is not None:
+            verdict = "盈利" if return_pct >= 0 else "浮亏"
+            thesis_parts.append(
+                f"股债混合基金({verdict} {return_pct:.2%}),不适用纯权益指数评估口径;"
+                f"参考指数 {item.tracking_index_name},仅做趋势参考不强制对齐"
+            )
+        else:
+            thesis_parts.append("股债混合基金,持仓收益不可算")
+    else:
+        # equity_index / qdii + active: 沿用 D1 流程
+        idx_df = conn.execute(
+            "SELECT trade_date, close FROM index_daily WHERE index_code = ? ORDER BY trade_date",
+            [item.tracking_index],
+        ).fetchdf()
+        m4_w = m4_weights.get(item.fund_code) if is_active else None
+        target_weight_m4 = m4_w
+        if m4_w is not None:
+            tgt_override = float(m4_w)
+            tgt_source = "m4"
+        else:
+            tgt_override = None
+            tgt_source = "config_fallback"
+        signal = calculate_signal(
+            item, idx_df, rules,
+            current_weight=current_account_weight,
+            target_weight_override=tgt_override,
+            target_weight_source=tgt_source,
+        )
+        if signal is not None:
+            action = signal.action
+            confidence = float(signal.confidence)
+            risk_tags.extend(signal.risk_tags)
+            thesis_parts.append(signal.thesis)
+            from src.index_funds.signals import compute_index_state
+            st = compute_index_state(idx_df, rules)
+            if st:
+                price_pct = st.get("price_percentile")
+                ma_fast = st.get("ma_fast")
+                ma_slow = st.get("ma_slow")
+                trend_healthy = bool(st.get("trend_healthy"))
+                trend_weak = bool(st.get("trend_weak"))
 
-    risk_tags = list(signal.risk_tags) if signal else []
-    thesis_parts = [signal.thesis] if signal else []
+        if equity_exposure is not None and target_weight_m4 is not None:
+            target_account_weight = float(equity_exposure) * float(target_weight_m4)
+        if account_total is not None and target_account_weight is not None:
+            target_value = account_total * target_account_weight
+        if current_value is not None and target_value is not None:
+            drift = current_value - target_value
+            if target_value > 0:
+                drift_pct = drift / target_value
+            delta_amount = target_value - current_value
+        if delta_amount is not None and nav and nav > 0:
+            delta_shares = delta_amount / nav
+        if target_weight_m4 is None and is_active:
+            risk_tags.append("m4_missing")
+
+    # 通用风险标签
     if snap is None:
         risk_tags.append("no_snapshot")
-        thesis_parts.append("缺少用户录入的份额/成本,持仓与收益无法计算")
+        thesis_parts.append("缺少用户录入的份额/成本")
     elif snap_stale is not None and snap_stale > SNAPSHOT_STALE_DAYS:
         risk_tags.append("snapshot_stale")
-        thesis_parts.append(f"快照已 {snap_stale} 天未刷新,持仓数据可能滞后,建议先在 Dashboard 录入今日份额")
+        thesis_parts.append(f"快照已 {snap_stale} 天未刷新,请在 Dashboard 录入今日份额")
     if nav_stale is not None and nav_stale > NAV_STALE_DAYS:
         risk_tags.append("nav_stale")
-        thesis_parts.append(f"净值已 {nav_stale} 天未更新,估值可能失真")
-    if target_weight_m4 is None:
-        risk_tags.append("m4_missing")
+        thesis_parts.append(f"净值已 {nav_stale} 天未更新")
+    if mv_vs_computed_pct is not None and abs(mv_vs_computed_pct) > 0.01:
+        risk_tags.append("broker_mismatch")
+        thesis_parts.append(f"broker 市值与 shares×nav 偏差 {mv_vs_computed_pct:+.2%}")
+
     thesis = "；".join([p for p in thesis_parts if p])
+    risk_tags = list(dict.fromkeys(risk_tags))
 
     return FundEvaluation(
         eval_date=eval_date,
@@ -220,10 +331,23 @@ def evaluate_fund(
         fund_name=item.name,
         tracking_index=item.tracking_index,
         tracking_index_name=item.tracking_index_name,
+        category=category,
+        intent=intent,
         snapshot_date=snap_date,
         snapshot_stale_days=snap_stale,
         shares=shares,
         cost_amount=cost,
+        broker_market_value=broker_mv,
+        broker_latest_nav=broker_nav,
+        broker_cost_price=broker_cost_price,
+        broker_holding_pnl=broker_holding_pnl,
+        broker_holding_return_pct=broker_holding_ret,
+        broker_day_return_pct=broker_day_ret,
+        broker_yesterday_pnl=broker_yest_pnl,
+        holding_days=holding_days,
+        snapshot_source=snap_source,
+        snapshot_captured_at=snap_captured_at,
+        market_value_vs_computed_pct=mv_vs_computed_pct,
         nav=nav,
         nav_date=nav_date,
         nav_stale_days=nav_stale,
@@ -239,17 +363,27 @@ def evaluate_fund(
         equity_exposure=equity_exposure,
         target_value=target_value,
         target_account_weight=target_account_weight,
-        current_weight=current_account_weight,  # 此处与账户级权重同口径,前端同步显示
+        current_weight=current_account_weight,
         current_account_weight=current_account_weight,
         drift_pct=drift_pct,
         delta_amount=delta_amount,
         delta_shares=delta_shares,
-        action=signal.action if signal else "HOLD",
-        confidence=float(signal.confidence) if signal else 0.0,
+        action=action,
+        confidence=confidence,
         thesis=thesis,
-        risk_tags=list(dict.fromkeys(risk_tags)) or ["normal"],
+        risk_tags=risk_tags or ["normal"],
         account_total_value=account_total,
     )
+
+
+def _opt_float(d: dict[str, Any], key: str) -> float | None:
+    v = d.get(key)
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def evaluate_funds(
@@ -293,7 +427,12 @@ def _persist(conn: duckdb.DuckDBPyConnection, evals: list[FundEvaluation]) -> No
         """
         INSERT INTO fund_evaluations (
             eval_date, fund_code, fund_name, tracking_index, tracking_index_name,
+            category, intent,
             snapshot_date, snapshot_stale_days, shares, cost_amount,
+            broker_market_value, broker_latest_nav, broker_cost_price,
+            broker_holding_pnl, broker_holding_return_pct, broker_day_return_pct,
+            broker_yesterday_pnl, holding_days, snapshot_source, snapshot_captured_at,
+            market_value_vs_computed_pct,
             nav, nav_date, nav_stale_days, current_value, return_amount, return_pct,
             price_pct, ma_fast, ma_slow, trend_healthy, trend_weak,
             target_weight_m4, equity_exposure, target_value, target_account_weight,
@@ -302,7 +441,12 @@ def _persist(conn: duckdb.DuckDBPyConnection, evals: list[FundEvaluation]) -> No
         )
         SELECT
             eval_date, fund_code, fund_name, tracking_index, tracking_index_name,
+            category, intent,
             snapshot_date, snapshot_stale_days, shares, cost_amount,
+            broker_market_value, broker_latest_nav, broker_cost_price,
+            broker_holding_pnl, broker_holding_return_pct, broker_day_return_pct,
+            broker_yesterday_pnl, holding_days, snapshot_source, snapshot_captured_at,
+            market_value_vs_computed_pct,
             nav, nav_date, nav_stale_days, current_value, return_amount, return_pct,
             price_pct, ma_fast, ma_slow, trend_healthy, trend_weak,
             target_weight_m4, equity_exposure, target_value, target_account_weight,

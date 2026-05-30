@@ -18,6 +18,17 @@ class FundWatchItem:
     currency: str
     target_weight: float
     enabled: bool = True
+    # E1: 基金分类,决定评估策略
+    # equity_index = 纯权益指数基金/ETF,适用 price_pct/MA/M4 RS 轮动
+    # balanced    = 股债混合,不适用纯权益评估;tracking_index 仅作参考
+    # qdii        = 海外指数(港股/美股),适用权益评估但 stale 容忍度更高
+    # bond / other
+    category: str = "equity_index"
+    # E1: 用户意图
+    # active   = 系统主动驱动调仓 (进 M4 RS 池)
+    # exited   = 已清仓,残留仓位不再主动管理 (不进 M4 / 不算 delta_amount)
+    # watching = 仅观察,不进 M4
+    intent: str = "active"
 
 
 def load_index_fund_config() -> dict[str, Any]:
@@ -53,6 +64,8 @@ def get_watchlist(config: dict[str, Any] | None = None, active_only: bool = True
                 currency=str(raw.get("currency") or "CNY"),
                 target_weight=max(target_weight, 0.0),
                 enabled=enabled,
+                category=str(raw.get("category") or "equity_index").lower(),
+                intent=str(raw.get("intent") or "active").lower(),
             )
         )
     return items
