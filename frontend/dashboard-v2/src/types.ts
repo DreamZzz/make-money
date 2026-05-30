@@ -374,6 +374,46 @@ export type FundEvaluation = {
   account_total_value: number | null;
 };
 
+export type FundHoldingAlert = {
+  eval_date: string | null;
+  fund_code: string;
+  alert_type: string;
+  alert_level: "info" | "warning" | "critical" | string;
+  metric_name: string;
+  metric_value: number | null;
+  threshold: number | null;
+  suggested_action: string;
+  headline: string;
+};
+
+export type FundRecommendation = {
+  fund_code: string;
+  fund_name: string | null;
+  etf_subcategory: string | null;
+  tracking_index: string | null;
+  scale_yi: number | null;
+  total_score: number;
+  signal_tag: string;
+  price_pct: number | null;
+  trend_score: number | null;
+  macro_score: number | null;
+  return_6m: number | null;
+  thesis: string;
+  rank: number;
+  excluded_reasons: string[];
+};
+
+export type FundsRecommendations = {
+  eval_date: string | null;
+  in_window: FundRecommendation[];
+  watch_high_value: FundRecommendation[];
+  excluded_holdings: string[];
+  overlap_tracking: string[];
+  holding_categories: string[];
+  total_candidates: number;
+  overall_advice: string;
+};
+
 export type FundsSnapshot = {
   eval_date: string | null;
   account_total_value: number | null;
@@ -383,6 +423,8 @@ export type FundsSnapshot = {
   core_total_delta_amount: number;
   overall_advice: { headline: string; actions: string[] };
   funds: FundEvaluation[];
+  holding_alerts: FundHoldingAlert[];
+  recommendations: FundsRecommendations;
   error?: string;
 };
 

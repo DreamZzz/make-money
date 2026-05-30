@@ -241,10 +241,12 @@ class DashboardV2Service:
             }
 
     def build_funds_snapshot(self) -> dict[str, Any]:
-        """D2: 基金评估面板 — 三支(或当前 watchlist)基金每日评估。"""
+        """D2 + F3 + F4: 基金评估面板 + 严格告警 + 候选推荐 三大区。"""
         from dataclasses import asdict
 
         from src.funds.evaluation import evaluate_funds
+        from src.funds.monitoring import monitor_holdings
+        from src.funds.recommendations import build_recommendations
 
         with self._managed_connection(read_only=True) as conn:
             evals = evaluate_funds(conn)
@@ -254,6 +256,8 @@ class DashboardV2Service:
             account_total = rows[0]["account_total_value"] if rows else None
             equity_exposure = rows[0]["equity_exposure"] if rows else None
             advice = _build_funds_overall_advice(rows, account_total, equity_exposure)
+            holding_alerts = [asdict(a) for a in monitor_holdings(conn)]
+            recommendations = asdict(build_recommendations(conn))
             return {
                 "eval_date": rows[0]["eval_date"].isoformat() if rows and rows[0].get("eval_date") else None,
                 "account_total_value": account_total,
@@ -263,6 +267,8 @@ class DashboardV2Service:
                 "core_total_delta_amount": total_target_value - total_current_value,
                 "overall_advice": advice,
                 "funds": rows,
+                "holding_alerts": holding_alerts,
+                "recommendations": recommendations,
             }
 
     def build_tournament_snapshot(self) -> dict[str, Any]:

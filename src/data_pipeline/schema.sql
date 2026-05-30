@@ -1051,3 +1051,21 @@ CREATE TABLE IF NOT EXISTS fund_screening_results (
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (eval_date, fund_code)
 );
+
+-- ============================================
+-- 24. fund_holding_alerts: 持仓基金每日风险告警
+-- F3: 严格口径 — 亏损 > 5% / 跌破 MA60 / 10d 回撤 > 8% 等
+-- ============================================
+CREATE TABLE IF NOT EXISTS fund_holding_alerts (
+    eval_date           DATE NOT NULL,
+    fund_code           VARCHAR NOT NULL,
+    alert_type          VARCHAR NOT NULL,   -- stop_loss / ma60_break / drawdown_10d / trend_weak / target_drift / add_window_open
+    alert_level         VARCHAR NOT NULL,   -- info / warning / critical
+    metric_name         VARCHAR,
+    metric_value        DOUBLE,
+    threshold           DOUBLE,
+    suggested_action    VARCHAR,            -- hold / reduce_partial / exit_stop_loss / add_window_open / monitor
+    headline            VARCHAR,
+    created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (eval_date, fund_code, alert_type)
+);

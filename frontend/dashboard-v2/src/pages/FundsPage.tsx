@@ -1,4 +1,6 @@
-import type { FundEvaluation, FundsSnapshot } from "../types";
+import { useState } from "react";
+
+import type { FundEvaluation, FundHoldingAlert, FundRecommendation, FundsSnapshot } from "../types";
 import { formatCurrency, formatPercent } from "../utils";
 
 type Props = { data: FundsSnapshot };
@@ -17,9 +19,11 @@ export function FundsPage({ data }: Props) {
         {data.eval_date ? <span className="funding-gap"><small>as of</small><strong>{data.eval_date}</strong></span> : null}
       </div>
       <OverallCard data={data} />
+      <HoldingAlertsSection alerts={data.holding_alerts} />
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: 14, marginTop: 14 }}>
-        {data.funds.map((f) => <FundCard key={f.fund_code} f={f} />)}
+        {data.funds.map((f) => <FundCard key={f.fund_code} f={f} alerts={data.holding_alerts.filter(a => a.fund_code === f.fund_code)} />)}
       </div>
+      <RecommendationsSection rec={data.recommendations} />
       <section className="panel" style={{ marginTop: 14, overflowX: "auto" }}>
         <h2>决策矩阵</h2>
         <table className="data-table">
@@ -84,7 +88,118 @@ function OverallCard({ data }: { data: FundsSnapshot }) {
   );
 }
 
-function FundCard({ f }: { f: FundEvaluation }) {
+function HoldingAlertsSection({ alerts }: { alerts: FundHoldingAlert[] }) {
+  if (!alerts.length) return null;
+  const critical = alerts.filter(a => a.alert_level === "critical");
+  const warning = alerts.filter(a => a.alert_level === "warning");
+  const info = alerts.filter(a => a.alert_level === "info");
+  return (
+    <section className="panel" style={{ marginTop: 14 }}>
+      <h2>持仓告警 (严格档)</h2>
+      <div style={{ display: "flex", gap: 14, fontFamily: "var(--font-mono)", fontSize: 13, marginTop: 4 }}>
+        <span><strong style={{ color: "var(--negative, #ff6b6b)" }}>{critical.length}</strong> 严重</span>
+        <span><strong style={{ color: "#fbbf24" }}>{warning.length}</strong> 警告</span>
+        <span><strong style={{ color: "var(--muted)" }}>{info.length}</strong> 提示</span>
+      </div>
+      <ul style={{ marginTop: 8, paddingLeft: 18, color: "var(--muted)", lineHeight: 1.7, fontSize: 13 }}>
+        {alerts.map((a, i) => (
+          <li key={i}>
+            <span style={{
+              fontSize: 11, fontFamily: "var(--font-mono)",
+              padding: "1px 6px", borderRadius: 3, marginRight: 6,
+              border: "1px solid var(--line)",
+              color: a.alert_level === "critical" ? "var(--negative, #ff6b6b)"
+                   : a.alert_level === "warning" ? "#fbbf24" : "var(--muted)",
+            }}>{a.alert_type}</span>
+            <strong style={{ fontFamily: "var(--font-mono)" }}>{a.fund_code}</strong>
+            : {a.headline} → <em>{a.suggested_action}</em>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function RecommendationsSection({ rec }: { rec: FundsSnapshot["recommendations"] }) {
+  const [showWatch, setShowWatch] = useState(false);
+  return (
+    <>
+      <section className="panel" style={{ marginTop: 14 }}>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+          <h2>今日可加仓窗口 (in_window)</h2>
+          <small style={{ color: "var(--muted)" }}>{rec.overall_advice}</small>
+        </div>
+        {rec.in_window.length === 0 ? (
+          <div className="empty-panel" style={{ marginTop: 10 }}>
+            {rec.total_candidates === 0
+              ? "扫描器无候选数据(等候选池 nav 回灌完成)"
+              : "今日无 in_window 候选 — 趋势 + 估值 + 宏观三者未全满足"}
+          </div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12, marginTop: 10 }}>
+            {rec.in_window.map((r) => <RecCard key={r.fund_code} r={r} kind="in_window" />)}
+          </div>
+        )}
+        {(rec.excluded_holdings.length > 0 || rec.overlap_tracking.length > 0) ? (
+          <small style={{ display: "block", color: "var(--muted)", marginTop: 10, fontSize: 11 }}>
+            已排除持仓: {rec.excluded_holdings.join(",") || "无"}
+            {rec.overlap_tracking.length ? ` · 排除同跟踪指数: ${rec.overlap_tracking.join(",")}` : ""}
+          </small>
+        ) : null}
+      </section>
+      <section className="panel" style={{ marginTop: 14 }}>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+          <h2>高价值关注名单 (watch · {rec.watch_high_value.length})</h2>
+          <button type="button" onClick={() => setShowWatch(v => !v)}
+                  style={{
+                    fontSize: 12, padding: "2px 10px", borderRadius: 3,
+                    border: "1px solid var(--line-strong)",
+                    background: "transparent", color: "var(--accent, #60a5fa)",
+                    cursor: "pointer", fontFamily: "var(--font-mono)",
+                  }}>
+            {showWatch ? "收起" : "展开"}
+          </button>
+        </div>
+        {showWatch ? (
+          rec.watch_high_value.length === 0 ? (
+            <div className="empty-panel" style={{ marginTop: 10 }}>暂无 watch 候选</div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12, marginTop: 10 }}>
+              {rec.watch_high_value.map((r) => <RecCard key={r.fund_code} r={r} kind="watch" />)}
+            </div>
+          )
+        ) : null}
+      </section>
+    </>
+  );
+}
+
+function RecCard({ r, kind }: { r: FundRecommendation; kind: "in_window" | "watch" }) {
+  const cls = kind === "in_window" ? "action--add" : "action--hold";
+  return (
+    <div style={{
+      border: "1px solid var(--line)", borderRadius: 6, padding: 12,
+      background: "var(--surface)",
+    }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+        <strong style={{ fontFamily: "var(--font-display)", fontSize: 16 }}>#{r.rank} {r.fund_code}</strong>
+        <span className={`action ${cls}`} style={{ fontSize: 11 }}>{r.signal_tag}</span>
+      </div>
+      <small style={{ color: "var(--muted)" }}>{r.fund_name || "—"}</small>
+      <div style={{ marginTop: 8, fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.7 }}>
+        <KV label="综合分">{r.total_score.toFixed(0)} / 100</KV>
+        <KV label="趋势">{r.trend_score !== null ? r.trend_score.toFixed(0) : "—"}</KV>
+        <KV label="估值分位">{r.price_pct !== null ? `${(r.price_pct * 100).toFixed(0)}%` : "—"}</KV>
+        <KV label="近 6 月">{r.return_6m !== null ? formatPercent(r.return_6m) : "—"}</KV>
+        <KV label="规模">{r.scale_yi ? `${r.scale_yi.toFixed(0)}亿` : "—"}</KV>
+        <KV label="分类">{r.etf_subcategory || "—"}</KV>
+      </div>
+      <p style={{ marginTop: 8, color: "var(--muted)", fontSize: 11, lineHeight: 1.5 }}>{r.thesis}</p>
+    </div>
+  );
+}
+
+function FundCard({ f, alerts = [] }: { f: FundEvaluation; alerts?: FundHoldingAlert[] }) {
   const stale = f.snapshot_stale_days !== null && f.snapshot_stale_days > 3;
   const isExited = f.intent === "exited";
   const isBalanced = f.category === "balanced";
@@ -171,6 +286,19 @@ function FundCard({ f }: { f: FundEvaluation }) {
       </div>
       <p style={{ marginTop: 10, color: "var(--muted)", fontSize: 12, lineHeight: 1.5 }}>{f.thesis}</p>
       <RiskTags tags={f.risk_tags} />
+      {alerts.length > 0 ? (
+        <div style={{ marginTop: 8, padding: 8, borderRadius: 4, background: "var(--surface-elevated, rgba(255,255,255,0.04))",
+                      borderLeft: `3px solid ${alerts.some(a => a.alert_level === "critical") ? "var(--negative, #ff6b6b)" : "#fbbf24"}` }}>
+          {alerts.map((a, i) => (
+            <div key={i} style={{ fontSize: 11, fontFamily: "var(--font-mono)", lineHeight: 1.6 }}>
+              <span style={{ color: a.alert_level === "critical" ? "var(--negative, #ff6b6b)"
+                                 : a.alert_level === "warning" ? "#fbbf24" : "var(--muted)" }}>
+                [{a.alert_type}]
+              </span> {a.headline} → <em>{a.suggested_action}</em>
+            </div>
+          ))}
+        </div>
+      ) : null}
       {f.snapshot_source ? (
         <small style={{ display: "block", marginTop: 8, color: "var(--muted)", fontSize: 11 }}>
           源: {f.snapshot_source}{f.snapshot_captured_at ? ` · ${f.snapshot_captured_at}` : ""}

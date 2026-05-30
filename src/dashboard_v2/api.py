@@ -240,6 +240,7 @@ def _fallback_market(exc: Exception) -> dict[str, Any]:
 
 
 def _fallback_funds(exc: Exception) -> dict[str, Any]:
+    msg = _data_unavailable_message(exc)
     return {
         "eval_date": None,
         "account_total_value": None,
@@ -247,9 +248,16 @@ def _fallback_funds(exc: Exception) -> dict[str, Any]:
         "core_total_target_value": 0.0,
         "core_total_current_value": 0.0,
         "core_total_delta_amount": 0.0,
-        "overall_advice": {"headline": _data_unavailable_message(exc), "actions": []},
+        "overall_advice": {"headline": msg, "actions": []},
         "funds": [],
-        "error": _data_unavailable_message(exc),
+        "holding_alerts": [],
+        "recommendations": {
+            "eval_date": None, "in_window": [], "watch_high_value": [],
+            "excluded_holdings": [], "overlap_tracking": [],
+            "holding_categories": [], "total_candidates": 0,
+            "overall_advice": msg,
+        },
+        "error": msg,
     }
 
 
