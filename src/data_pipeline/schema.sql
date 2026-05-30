@@ -616,6 +616,9 @@ CREATE TABLE IF NOT EXISTS performance_reviews (
 -- ============================================
 -- 14. 指数基金基本信息表
 -- ============================================
+-- F1: fund_info 扩展候选池字段(在原 CREATE 后通过 ALTER 补)
+-- 字段:scale_yi(总规模亿) / etf_subcategory(broad/sector/qdii/commodity/...) /
+--      establish_date / fee_rate / manager / data_source
 CREATE TABLE IF NOT EXISTS fund_info (
     fund_code       VARCHAR NOT NULL,        -- 基金/ETF代码
     name            VARCHAR,

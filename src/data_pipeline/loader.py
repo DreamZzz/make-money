@@ -123,6 +123,14 @@ def init_db(conn: duckdb.DuckDBPyConnection) -> None:
         "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS benchmark_code VARCHAR",
         "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS benchmark_return_pct DOUBLE",
         "ALTER TABLE signal_outcomes ADD COLUMN IF NOT EXISTS alpha_vs_benchmark DOUBLE",
+        # F1 fund_info 候选池字段
+        "ALTER TABLE fund_info ADD COLUMN IF NOT EXISTS scale_yi DOUBLE",
+        "ALTER TABLE fund_info ADD COLUMN IF NOT EXISTS etf_subcategory VARCHAR",
+        "ALTER TABLE fund_info ADD COLUMN IF NOT EXISTS establish_date DATE",
+        "ALTER TABLE fund_info ADD COLUMN IF NOT EXISTS fee_rate DOUBLE",
+        "ALTER TABLE fund_info ADD COLUMN IF NOT EXISTS manager VARCHAR",
+        "ALTER TABLE fund_info ADD COLUMN IF NOT EXISTS data_source VARCHAR DEFAULT 'manual'",
+        "ALTER TABLE fund_info ADD COLUMN IF NOT EXISTS last_scanned_at TIMESTAMP",
     ]:
         try:
             conn.execute(col_ddl)
