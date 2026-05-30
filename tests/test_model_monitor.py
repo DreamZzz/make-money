@@ -359,3 +359,33 @@ def test_assert_prediction_ready_cli_fails_when_prediction_is_missing(monkeypatc
     assert payload["ready"] is False
     assert "production_prediction_missing" in payload["blocking_metrics"]
     conn.close()
+
+
+def test_model_monitor_no_action_alarm_skips_stale_batch():
+    """B1: 月频信号若已过 MAX_SIGNAL_BATCH_STALE_DAYS 天,不应每天对旧批次反复触发 NO_ACTION 告警。"""
+    from datetime import date as _date
+
+    conn = _conn()
+    _seed_production_model(conn)
+    conn.execute("INSERT INTO stock_info (symbol, country, name) VALUES ('000001','CN','A')")
+    conn.execute("""
+        INSERT INTO qlib_predictions (experiment_id, model_name, model_version, mode, prediction_date,
+            symbol, score, rank, confidence, selected)
+        VALUES ('EXP-PROD', 'alpha158', 'alpha158-prod', 'production_inference',
+                ?, '000001', 0.9, 1, 1.0, TRUE)
+    """, [_date.today()])
+    # 10 条 alpha158 信号，全部 NO_ACTION,但 signal_ts 是 30 天前（陈旧批次）
+    old = _date.today().replace(day=1)
+    for i in range(10):
+        conn.execute("""
+            INSERT INTO signals (signal_id, model_name, model_version, symbol, signal_ts, side,
+                executed, status, execution_date)
+            VALUES (?, 'alpha158', 'alpha158-prod', '000001',
+                    CAST(? AS TIMESTAMP) - INTERVAL '30 days', 'BUY', TRUE, 'NO_ACTION', ?)
+        """, [f"old-{i}", old, old])
+
+    update_production_model_monitor(conn, as_of=_date.today())
+    active = conn.execute(
+        "SELECT COUNT(*) FROM model_monitor_alerts WHERE status='ACTIVE' AND metric_name='signal_no_action_rate'"
+    ).fetchone()[0]
+    assert active == 0  # 陈旧批次不应触发该告警

@@ -24,6 +24,16 @@ OUTPUT_DIR = PROJECT_ROOT / "output"
 STATE_PATH = OUTPUT_DIR / "scheduler_state.json"
 PYTHON = os.environ.get("PYTHON") or sys.executable
 
+# C2: 让 watchdog 进入终态时落 scheduler_runs(spool + DB best-effort)
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+try:
+    from src.scheduler.runs_log import append_run as _append_scheduler_run
+    from src.scheduler.runs_log import build_run_id as _build_scheduler_run_id
+except Exception:  # noqa: BLE001
+    _append_scheduler_run = None
+    _build_scheduler_run_id = None
+
 STATUS_WAITING = "WAITING"
 STATUS_RUNNING = "RUNNING"
 STATUS_SUCCEEDED = "SUCCEEDED"
@@ -143,6 +153,10 @@ def tick(
             continue
         if now > window_end:
             _mark_missed(job_state, job, now, scheduled_at, window_end)
+            _record_terminal_run(
+                job, scheduled_at, None, now, STATUS_MISSED, None,
+                job_state.get("result"),
+            )
             continue
 
         _mark_running(job_state, now)
@@ -151,6 +165,7 @@ def tick(
         finished_at = datetime.now()
         if result.exit_code == 0:
             _mark_succeeded(job_state, run_date=now.date().isoformat(), finished_at=finished_at, result=result)
+            _record_terminal_run(job, scheduled_at, now, finished_at, STATUS_SUCCEEDED, 0, result.result)
         else:
             _mark_failed(
                 job_state,
@@ -159,6 +174,7 @@ def tick(
                 exit_code=result.exit_code,
                 result=result.result,
             )
+            _record_terminal_run(job, scheduled_at, now, finished_at, STATUS_FAILED, result.exit_code, result.result)
 
     state["updated_at"] = _latest_state_updated_at(state, now)
     save_state(state, state_path)
@@ -371,6 +387,50 @@ def _next_scheduled_after(job: JobSpec, scheduled_at: datetime) -> datetime:
         if _is_scheduled_day(job, candidate):
             return datetime.combine(candidate.date(), job.scheduled_time)
     return scheduled_at
+
+
+def _record_terminal_run(
+    job: JobSpec,
+    scheduled_at: datetime,
+    started_at: datetime | None,
+    ended_at: datetime,
+    status: str,
+    exit_code: int | None,
+    result: str | None,
+) -> None:
+    """C2: watchdog 进入终态时落 scheduler_runs spool + DB(best-effort)。
+
+    任何异常都吞掉 —— 历史归档不应阻塞 watchdog 主循环。
+    """
+    if _append_scheduler_run is None or _build_scheduler_run_id is None:
+        return
+    try:
+        _append_scheduler_run(
+            run_id=_build_scheduler_run_id(job.job_key, scheduled_at),
+            job_key=job.job_key,
+            job_label=job.label,
+            scheduled_for=scheduled_at,
+            started_at=started_at,
+            ended_at=ended_at,
+            status=status,
+            exit_code=exit_code,
+            result=result,
+            log_path=str(job.log_path),
+            schedule_alignment=_schedule_alignment(scheduled_at, started_at),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _schedule_alignment(scheduled_at: datetime, started_at: datetime | None) -> str | None:
+    if started_at is None:
+        return None
+    delta = (started_at - scheduled_at).total_seconds()
+    if abs(delta) < 60:
+        return "准点"
+    if delta < 0:
+        return f"早 {int(-delta // 60)} 分钟"
+    return f"晚 {int(delta // 60)} 分钟"
 
 
 def _iso(value: datetime) -> str:

@@ -27,6 +27,7 @@ export function RebalancePage({ data }: Props) {
             <small>max(预算预留, 订单需现金) - 现金</small>
           </div>
         </div>
+        {data.budget_reason ? <BudgetReasonCard reason={data.budget_reason} /> : null}
         <OperationSummary summary={data.summary} />
         <RegimePolicyPanel policy={data.regime_policy} compact />
         <CapitalBreakdown capital={data.capital} />
@@ -44,6 +45,28 @@ export function RebalancePage({ data }: Props) {
         <CompactRows rows={data.conflicts} empty="暂无冲突信号" />
       </section>
     </div>
+  );
+}
+
+function BudgetReasonCard({ reason }: { reason: NonNullable<RebalanceSnapshot["budget_reason"]> }) {
+  const cls = reason.status === "over_target" ? "action--reduce"
+    : reason.status === "available" ? "action--add"
+    : reason.status === "cash_short" ? "action--reduce"
+    : "action--hold";
+  return (
+    <section className="panel">
+      <h2>本轮预算根因</h2>
+      <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", marginTop: 6 }}>
+        <span className={`action ${cls}`} style={{ fontFamily: "var(--font-display)", padding: "4px 10px", borderRadius: 4, border: "1px solid var(--line-strong)" }}>
+          {reason.status === "over_target" ? "超目标·暂停 BUY"
+            : reason.status === "available" ? "预算可用"
+            : reason.status === "at_target" ? "已达目标"
+            : "现金不足"}
+        </span>
+        <strong style={{ fontFamily: "var(--font-mono)", fontSize: 14 }}>{reason.headline}</strong>
+      </div>
+      <p style={{ marginTop: 8, color: "var(--muted)" }}>{reason.advice}</p>
+    </section>
   );
 }
 

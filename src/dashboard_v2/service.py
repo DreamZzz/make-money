@@ -56,7 +56,7 @@ class DashboardV2Service:
             blockers = _build_blockers(health, account, plan)
             next_action = _next_action(health, operation_summary, blockers)
             market = _load_today_market(conn, account)
-            latest_job = _latest_operational_job_run()
+            latest_job = _latest_operational_job_run(conn)
             evidence = {
                 "data_date": latest_date,
                 "signal_date": _latest_signal_date(conn),
@@ -100,12 +100,14 @@ class DashboardV2Service:
             )
             threshold_filtered_count = _load_threshold_filtered_buy_candidate_count(conn, thresholds)
             summary["funding_gap"] = max(float(summary.get("cash_commitment") or 0) - float(capital["cash"] or 0), 0.0)
+            budget_reason = _build_budget_reason(plan, satellite_budget)
             return {
                 "plan_id": plan["plan_id"],
                 "plan_date": _date_to_iso(plan["plan_date"]),
                 "capital": capital,
                 "regime_policy": regime_policy,
                 "summary": summary,
+                "budget_reason": budget_reason,
                 "groups": groups,
                 "sell_signals": sell_signals,
                 "conflicts": _load_signal_conflicts(conn),
@@ -166,15 +168,19 @@ class DashboardV2Service:
             }
 
     def build_health_snapshot(self) -> dict[str, Any]:
+        from src.monitoring.data_health_grader import grade_data_source_health
+
         with self._managed_connection(read_only=True) as conn:
             health = _build_health_status(conn)
-            scheduled_history = _load_scheduled_job_history()
+            scheduled_history = _load_scheduled_job_history(conn)
             latest_run = _latest_scheduled_job_run(scheduled_history)
             failure = _scheduled_failure_diagnostic(latest_run)
+            data_health_summary = grade_data_source_health(conn) if _table_exists(conn, "data_source_health") else None
             return {
                 **health,
                 "regime_policy": _load_regime_policy_contract(conn),
                 "latest_quote_date": _latest_trade_date(conn),
+                "data_health_summary": data_health_summary,
                 "data_sources": _load_data_sources(conn),
                 "field_coverage": _load_field_coverage(conn),
                 "scheduled_jobs": _load_scheduled_jobs(),
@@ -451,6 +457,44 @@ def _load_latest_row(conn: duckdb.DuckDBPyConnection, table: str, order_col: str
         elif pd.isna(v):
             rec[k] = None
     return rec
+
+
+def _build_budget_reason(plan: dict[str, Any], satellite_budget: float) -> dict[str, Any]:
+    """解释 satellite 预算为什么是当前值：超目标暂停 BUY / 预算可用 / 现金不足 / 已达目标。"""
+    total = _safe_float(plan.get("total_value"))
+    sat_value = _safe_float(plan.get("satellite_value"))
+    sat_target_pct = _safe_float(plan.get("satellite_target_pct"))
+    sat_target_value = total * sat_target_pct
+    over = sat_value - sat_target_value
+
+    if over > 1.0:
+        return {
+            "status": "over_target",
+            "headline": f"Satellite 当前 ¥{sat_value:,.0f} > 目标 ¥{sat_target_value:,.0f}（超 ¥{over:,.0f}）",
+            "advice": "本轮仅处理 SELL / 减仓，新增 BUY 暂停（系统按设计拦截）",
+            "current": sat_value, "target": sat_target_value, "over": over,
+        }
+    if satellite_budget > 1.0:
+        return {
+            "status": "available",
+            "headline": f"Satellite 预算 ¥{satellite_budget:,.0f} 可用于新增 BUY",
+            "advice": "在执行门槛与一手约束内分配",
+            "current": sat_value, "target": sat_target_value, "over": over,
+        }
+    if abs(over) <= 1.0:
+        return {
+            "status": "at_target",
+            "headline": f"Satellite 已接近目标（当前 ¥{sat_value:,.0f} ≈ 目标 ¥{sat_target_value:,.0f}）",
+            "advice": "本轮无需新增 BUY",
+            "current": sat_value, "target": sat_target_value, "over": over,
+        }
+    # 低于目标但预算 0 → 通常是现金不足
+    return {
+        "status": "cash_short",
+        "headline": f"Satellite 低于目标 ¥{-over:,.0f}，但本轮预算 0",
+        "advice": "可能是 Core 优先吃光现金 / 现金不足；查看资金缺口",
+        "current": sat_value, "target": sat_target_value, "over": over,
+    }
 
 
 def _load_today_market(conn: duckdb.DuckDBPyConnection, account: dict[str, Any]) -> dict[str, Any]:
@@ -1950,7 +1994,15 @@ def _load_scheduler_watchdog_state(path: Path | None = None) -> dict[str, Any]:
     }
 
 
-def _load_scheduled_job_history(limit: int = 12) -> list[dict[str, Any]]:
+def _load_scheduled_job_history(
+    conn: duckdb.DuckDBPyConnection | None = None,
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    """C2: 优先读 scheduler_runs 结构化表, 表空时回落到 log 文本解析。"""
+    if conn is not None and _table_exists(conn, "scheduler_runs"):
+        rows = _load_scheduler_runs_from_db(conn, limit)
+        if rows:
+            return rows
     output_dir = Path(PROJECT_ROOT) / "output"
     rows: list[dict[str, Any]] = []
     for job_key, job_name, filename in [
@@ -1967,6 +2019,39 @@ def _load_scheduled_job_history(limit: int = 12) -> list[dict[str, Any]]:
         rows.extend(_parse_scheduled_job_log(job_key, job_name, text, filename))
     rows.sort(key=lambda row: str(row.get("started_at") or ""), reverse=True)
     return rows[:limit]
+
+
+def _load_scheduler_runs_from_db(
+    conn: duckdb.DuckDBPyConnection,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """读 scheduler_runs 表并转为 dashboard 期望的格式。"""
+    from src.scheduler.runs_log import load_runs
+    rows = []
+    for r in load_runs(conn, limit=limit):
+        scheduled_for = r.get("scheduled_for")
+        scheduled_time = None
+        if scheduled_for:
+            try:
+                scheduled_time = str(scheduled_for)[11:16]
+            except Exception:
+                scheduled_time = None
+        status = str(r.get("status") or "UNKNOWN")
+        rows.append({
+            "job_key": r.get("job_key"),
+            "job_name": r.get("job_label") or r.get("job_key"),
+            "scheduled_time": scheduled_time,
+            "started_at": str(r.get("started_at") or ""),
+            "ended_at": str(r.get("ended_at") or ""),
+            "duration_seconds": r.get("duration_seconds"),
+            "schedule_alignment": r.get("schedule_alignment"),
+            "status": status,
+            "status_label": _scheduled_status_label(status),
+            "result": r.get("result"),
+            "schedule_note": r.get("schedule_note"),
+            "source_log": r.get("log_path"),
+        })
+    return rows
 
 
 def _latest_scheduled_job_run(history: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -2004,8 +2089,8 @@ def _latest_scheduled_job_run(history: list[dict[str, Any]]) -> dict[str, Any] |
     }
 
 
-def _latest_operational_job_run() -> dict[str, Any] | None:
-    scheduled = _latest_scheduled_job_run(_load_scheduled_job_history())
+def _latest_operational_job_run(conn: duckdb.DuckDBPyConnection | None = None) -> dict[str, Any] | None:
+    scheduled = _latest_scheduled_job_run(_load_scheduled_job_history(conn))
     if scheduled:
         return scheduled
     return _job_to_dict(job_manager.latest_run())

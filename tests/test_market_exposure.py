@@ -63,3 +63,28 @@ def test_compute_exposure_persists():
     row = conn.execute("SELECT stage, action, target_exposure FROM market_exposure").fetchone()
     assert row[0] == "强势上升"
     conn.close()
+
+
+def test_compute_exposure_auto_loads_current_from_account():
+    # current_exposure 不传时应从 account_daily 算 position_value/total_value
+    import duckdb
+
+    from src.data_pipeline.loader import init_db
+    from src.market.exposure import compute_exposure, load_current_equity_exposure
+
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    conn.execute(
+        "INSERT INTO market_state (trade_date, benchmark, stage, stage_score, heat_score, "
+        "breadth_above_ma200, pe_pct_10y) VALUES ('2026-05-29','000300','强势上升',60,58,0.44,0.84)"
+    )
+    conn.execute(
+        "INSERT INTO account_daily (account_id, trade_date, cash, position_value, total_value) "
+        "VALUES ('default','2026-05-29', 30000, 70000, 100000)"
+    )
+    assert load_current_equity_exposure(conn) == 0.7
+
+    sig = compute_exposure(conn)  # 不传 current_exposure
+    assert sig is not None
+    assert sig.current_exposure == 0.7  # 自动算出来
+    conn.close()

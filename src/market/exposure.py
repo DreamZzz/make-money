@@ -126,13 +126,32 @@ def _action_and_advice(stage, target, current, v_adj, b_adj, h_adj) -> tuple[str
     return "HOLD", f"{stage}，维持当前仓位 {current:.0%}（已接近目标 {target:.0%}，{note_txt}）"
 
 
+def load_current_equity_exposure(
+    conn: duckdb.DuckDBPyConnection,
+    account_id: str = "default",
+) -> float | None:
+    """从 account_daily 最新行算当前权益仓位 = position_value / total_value。"""
+    row = conn.execute(
+        "SELECT position_value, total_value FROM account_daily "
+        "WHERE account_id = ? ORDER BY trade_date DESC LIMIT 1",
+        [account_id],
+    ).fetchone()
+    if not row or row[1] is None or float(row[1]) <= 0:
+        return None
+    pos = float(row[0] or 0.0)
+    return round(pos / float(row[1]), 4)
+
+
 def compute_exposure(
     conn: duckdb.DuckDBPyConnection,
     current_exposure: float | None = None,
     benchmark: str = "000300",
     persist: bool = True,
 ) -> ExposureSignal | None:
-    """读取最新 market_state，推导仓位信号并落 market_exposure 表。"""
+    """读取最新 market_state，推导仓位信号并落 market_exposure 表。
+
+    current_exposure 为 None 时自动从 account_daily 计算（position_value/total_value）。
+    """
     from src.market.state import load_latest_market_state
 
     state = load_latest_market_state(conn, benchmark=benchmark)
@@ -144,6 +163,8 @@ def compute_exposure(
             state["trade_date"] = datetime.fromisoformat(state["trade_date"]).date()
         except ValueError:
             state["trade_date"] = None
+    if current_exposure is None:
+        current_exposure = load_current_equity_exposure(conn)
     signal = derive_exposure(state, current_exposure=current_exposure)
     if persist:
         _persist(conn, signal)

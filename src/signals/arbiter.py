@@ -48,7 +48,16 @@ def arbitrate_pending_signals(
     baselines = _consensus_baselines(config)
     regime_policy = load_latest_regime_policy(conn, as_of=as_of, config=config)
     baseline_predictions = _load_latest_baseline_predictions(conn, baselines)
-    decisions = _build_decisions(signals, baseline_predictions, config, baselines, regime_policy=regime_policy)
+    # B2: 加载当前持仓集合，让无持仓 SELL 在套利层前置标记为 REJECTED
+    try:
+        from src.portfolio.current_holdings import load_current_position_symbols
+        current_holdings = set(load_current_position_symbols(conn, as_of=as_of))
+    except Exception:
+        current_holdings = set()
+    decisions = _build_decisions(
+        signals, baseline_predictions, config, baselines,
+        regime_policy=regime_policy, current_holdings=current_holdings,
+    )
     _persist_decisions(conn, decisions)
     _apply_rejections_to_signals(conn, decisions)
     accepted = int((decisions["decision"] == ACCEPTED).sum())
@@ -156,6 +165,7 @@ def _build_decisions(
     config: dict,
     baselines: list[str],
     regime_policy: Any | None = None,
+    current_holdings: set[str] | None = None,
 ) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     signal_df = signals.copy()
@@ -171,6 +181,7 @@ def _build_decisions(
         for _, row in sorted_predictions.iterrows():
             baseline_by_symbol.setdefault(str(row["symbol"]), []).append(row)
 
+    held = current_holdings if current_holdings is not None else set()
     for _, row in signal_df.iterrows():
         rows.append(_base_decision(
             row,
@@ -178,6 +189,7 @@ def _build_decisions(
             config,
             baselines,
             regime_policy=regime_policy,
+            current_holdings=held,
         ))
 
     decisions = pd.DataFrame(rows)
@@ -189,12 +201,13 @@ def _build_decisions(
     return decisions
 
 
-def _base_decision(
+def _base_decision(  # noqa: PLR0913
     signal: pd.Series,
     baseline_rows: list[pd.Series],
     config: dict,
     baselines: list[str],
     regime_policy: Any | None = None,
+    current_holdings: set[str] | None = None,
 ) -> dict[str, Any]:
     side = str(signal.get("side_norm") or "").upper()
     model_name = str(signal.get("model_name") or "")
@@ -221,6 +234,14 @@ def _base_decision(
         }
 
     if side in {"SELL", "SHORT"}:
+        # B2: 无持仓的 SELL 前置标记为 REJECTED("无需执行"),减少 paper_engine 噪音
+        if current_holdings is not None and str(signal.get("symbol") or "") not in current_holdings:
+            return {
+                **common(),
+                "decision": REJECTED,
+                "decision_reason": "当前无持仓，SELL 无需执行（已在套利层前置过滤）",
+                "consensus_status": "NO_HOLDING_SKIP",
+            }
         return {
             **common(),
             "decision": ACCEPTED,

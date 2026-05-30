@@ -13,6 +13,8 @@ import pandas as pd
 
 MIN_READY_OUTCOMES = 5
 MIN_SIGNALS_FOR_RATE_ALERT = 5
+# 月频/低频模型不应每天对旧批次重复告警 NO_ACTION 率：仅在批次新鲜时评估。
+MAX_SIGNAL_BATCH_STALE_DAYS = 5
 MIN_ALPHA_VS_BENCHMARK = 0.0
 MIN_HIT_RATE = 0.45
 MAX_NO_ACTION_RATE = 0.50
@@ -244,14 +246,31 @@ def _signal_metrics(conn: Any, production: dict[str, Any]) -> dict[str, Any]:
     """, [production["model_name"], production["model_version"]]).fetchone()
     total = int(row[0] or 0)
     no_action = int(row[4] or 0)
+    latest_signal_date = row[1]
+    # 仅看最新一批信号的 NO_ACTION 率，避免月频/低频模型每天用旧批次反复触发告警
+    latest_batch_total = latest_batch_no_action = 0
+    if latest_signal_date is not None:
+        batch = conn.execute("""
+            SELECT COUNT(*), SUM(CASE WHEN status = 'NO_ACTION' THEN 1 ELSE 0 END)
+            FROM signals WHERE model_name = ? AND model_version = ?
+              AND CAST(signal_ts AS DATE) = ?
+        """, [production["model_name"], production["model_version"], latest_signal_date]).fetchone()
+        latest_batch_total = int(batch[0] or 0)
+        latest_batch_no_action = int(batch[1] or 0)
+    from datetime import date as _date
+    stale_days = ((_date.today() - latest_signal_date).days
+                  if latest_signal_date is not None else None)
     return {
         "signal_count": total,
-        "latest_signal_date": _date_to_iso(row[1]),
+        "latest_signal_date": _date_to_iso(latest_signal_date),
         "active_count": int(row[2] or 0),
         "filled_count": int(row[3] or 0),
         "no_action_count": no_action,
         "executed_count": int(row[5] or 0),
         "no_action_rate": no_action / total if total else None,
+        "latest_batch_signal_count": latest_batch_total,
+        "latest_batch_no_action_rate": (latest_batch_no_action / latest_batch_total) if latest_batch_total else None,
+        "signal_batch_stale_days": stale_days,
     }
 
 
@@ -330,17 +349,26 @@ def _signal_alerts(production: dict[str, Any], alert_date: date, signals: dict[s
                 message="production 模型尚未写入交易信号",
             )
         ]
-    no_action_rate = signals.get("no_action_rate")
-    if signals["signal_count"] >= MIN_SIGNALS_FOR_RATE_ALERT and no_action_rate is not None and no_action_rate > MAX_NO_ACTION_RATE:
+    # 只对"最新一批信号"评估 NO_ACTION 率，并且只在批次新鲜时告警
+    batch_rate = signals.get("latest_batch_no_action_rate")
+    batch_total = signals.get("latest_batch_signal_count") or 0
+    stale_days = signals.get("signal_batch_stale_days")
+    if (
+        batch_total >= MIN_SIGNALS_FOR_RATE_ALERT
+        and batch_rate is not None
+        and batch_rate > MAX_NO_ACTION_RATE
+        and stale_days is not None
+        and stale_days <= MAX_SIGNAL_BATCH_STALE_DAYS
+    ):
         return [
             _alert(
                 production=production,
                 alert_date=alert_date,
                 severity="WARN",
                 metric_name="signal_no_action_rate",
-                observed_value=float(no_action_rate),
+                observed_value=float(batch_rate),
                 threshold_value=MAX_NO_ACTION_RATE,
-                message="production 信号纸交易 NO_ACTION 比例过高",
+                message=f"最新一批信号 NO_ACTION 比例过高（{stale_days} 天前的批次）",
                 context=signals,
             )
         ]

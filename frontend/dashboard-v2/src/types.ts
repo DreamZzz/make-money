@@ -208,6 +208,14 @@ export type RebalanceSnapshot = {
   capital?: CapitalBreakdown;
   regime_policy?: RegimePolicy;
   summary: OperationSummaryData;
+  budget_reason?: {
+    status: "over_target" | "available" | "at_target" | "cash_short";
+    headline: string;
+    advice: string;
+    current?: number;
+    target?: number;
+    over?: number;
+  } | null;
   groups: RebalanceGroups;
   sell_signals?: SellSignalRow[];
   conflicts: Record<string, unknown>[];
@@ -244,8 +252,38 @@ export type PortfolioSnapshot = {
   evidence?: Record<string, unknown>;
 };
 
+export type DataHealthDomain = {
+  market: string;
+  operation: string;
+  effective_status: "decidable" | "backup_active" | "degraded" | "failed" | string;
+  headline: string;
+  primary_source?: string | null;
+  primary_status?: string | null;
+  ok_sources: string[];
+  partial_sources: string[];
+  failed_sources: string[];
+  is_critical: boolean;
+  sources: Array<Record<string, unknown> & {
+    source: string;
+    effective_source_status: "ok" | "partial" | "failed" | "unknown" | string;
+    update_ratio: number;
+  }>;
+};
+
+export type DataHealthSummary = {
+  as_of: string | null;
+  overall: {
+    today_decidable: boolean;
+    status: "decidable" | "backup_active" | "degraded" | "failed" | "no_data" | string;
+    headline: string;
+    blockers: string[];
+  };
+  domains: DataHealthDomain[];
+};
+
 export type HealthSnapshot = HealthState & {
   latest_quote_date: string | null;
+  data_health_summary?: DataHealthSummary | null;
   data_sources: Record<string, unknown>[];
   field_coverage: Record<string, unknown>[];
   scheduled_jobs: Record<string, unknown>[];

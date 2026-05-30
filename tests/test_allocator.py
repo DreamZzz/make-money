@@ -426,3 +426,61 @@ def test_exposure_lower_target_raises_cash():
     defensive = apply_exposure_to_allocation_config(cfg, 0.40)
     assert abs(defensive.cash_target_pct - 0.60) < 1e-6
     assert abs((defensive.core_target_pct + defensive.satellite_target_pct) - 0.40) < 1e-6
+
+
+def test_m4_index_weights_drive_per_fund_core_targets():
+    """A2: M4 index_allocation 权重应覆盖 fund_signals 的静态 target_weight,
+    并按 delta 推 ADD/REDUCE,而非沿用 fund signal 的 BUY/PAUSE。"""
+    from src.portfolio.allocator import (
+        AllocationConfig,
+        AllocationInputs,
+        attach_core_execution_plan,
+        compute_allocation_plan,
+    )
+
+    cfg = AllocationConfig(core_target_pct=0.50, satellite_target_pct=0.45, cash_target_pct=0.05)
+    plan = compute_allocation_plan(
+        AllocationInputs(plan_date=date(2026, 5, 29), cash=50_000, core_value=50_000, satellite_value=0, total_value=100_000),
+        cfg,
+    )
+    # 两只基金,fund_signal 都是 PAUSE(老逻辑会忽略它们)
+    signals = pd.DataFrame([
+        {"fund_code": "012963", "action": "PAUSE", "target_weight": 0.33, "confidence": 0.5, "thesis": ""},
+        {"fund_code": "004192", "action": "PAUSE", "target_weight": 0.33, "confidence": 0.5, "thesis": ""},
+    ])
+    # M4 权重: 012963 当前 0 但目标 30%(应 ADD 30k); 004192 持仓 40k 但目标 10%(应 REDUCE 30k)
+    holdings = pd.DataFrame([{"fund_code": "004192", "market_value": 40_000}])
+    new_plan = attach_core_execution_plan(
+        plan, signals, holdings, cfg,
+        index_weights={"012963": 0.30, "004192": 0.10},
+    )
+    fund_items = [it for it in new_plan.items if it.instrument_type == "index_fund"]
+    by_fund = {it.instrument_id: it for it in fund_items}
+    # 012963: target 30k, current 0 -> ADD
+    assert by_fund["012963"].action == "ADD"
+    assert by_fund["012963"].target_value == 30_000
+    # 004192: target 10k, current 40k -> REDUCE
+    assert by_fund["004192"].action == "REDUCE"
+    assert by_fund["004192"].target_value == 10_000
+
+
+def test_attach_core_falls_back_when_no_index_weights():
+    """A2 向后兼容: 不传 index_weights 时沿用 fund_signal 的 BUY/PAUSE 与静态 target_weight"""
+    from src.portfolio.allocator import (
+        AllocationConfig,
+        AllocationInputs,
+        attach_core_execution_plan,
+        compute_allocation_plan,
+    )
+
+    cfg = AllocationConfig(core_target_pct=0.50, satellite_target_pct=0.45, cash_target_pct=0.05)
+    plan = compute_allocation_plan(
+        AllocationInputs(plan_date=date(2026, 5, 29), cash=50_000, core_value=0, satellite_value=0, total_value=100_000),
+        cfg,
+    )
+    signals = pd.DataFrame([
+        {"fund_code": "012963", "action": "BUY", "target_weight": 1.0, "confidence": 0.5, "thesis": ""},
+    ])
+    new_plan = attach_core_execution_plan(plan, signals, None, cfg)  # 无 index_weights
+    fund_items = [it for it in new_plan.items if it.instrument_type == "index_fund"]
+    assert fund_items[0].action == "BUY"  # 沿用 fund_signal 的 BUY

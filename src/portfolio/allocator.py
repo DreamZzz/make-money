@@ -291,6 +291,7 @@ def create_allocation_plan(
         _load_latest_index_fund_signals(conn, plan.plan_date),
         _load_core_holdings(conn),
         cfg,
+        index_weights=resolve_index_weights_for_plan(conn),
     )
     if persist:
         persist_allocation_plan(conn, plan)
@@ -317,6 +318,18 @@ def resolve_exposure_for_plan(conn: Any) -> float | None:
         return float(row[0]) if row and row[0] is not None else None
     except Exception:
         return None
+
+
+def resolve_index_weights_for_plan(conn: Any) -> dict[str, float]:
+    """读取 M4 相对强弱轮动的指数搭配权重 {fund_code: weight}，驱动 Core 各基金 target。"""
+    try:
+        rows = conn.execute(
+            "SELECT fund_code, weight FROM index_allocation "
+            "WHERE trade_date = (SELECT MAX(trade_date) FROM index_allocation)"
+        ).fetchall()
+        return {str(fc): float(w) for fc, w in rows if w is not None}
+    except Exception:
+        return {}
 
 
 def apply_exposure_to_allocation_config(
@@ -362,8 +375,14 @@ def attach_core_execution_plan(
     signals: pd.DataFrame,
     holdings: pd.DataFrame | None = None,
     config: AllocationConfig | None = None,
+    index_weights: dict[str, float] | None = None,
 ) -> AllocationPlan:
-    """Attach fund-level advisory actions that consume the core sleeve budget."""
+    """Attach fund-level advisory actions that consume the core sleeve budget.
+
+    index_weights 给定时(来自 M4 index_allocation):每只基金的 target_value 直接由
+    M4 相对强弱权重 × 总资产决定,action 由 delta 与当前持仓推导(ADD/REDUCE/HOLD),
+    覆盖 fund_signals 的静态 BUY/PAUSE,贯通 M3→M4→Core 执行最后一公里。
+    """
     if plan.status != "ACTIVE" or signals.empty:
         return plan
 
@@ -387,15 +406,27 @@ def attach_core_execution_plan(
 
     current_values = _core_holding_values(holdings)
     core_target_value = plan.total_value * plan.core_target_pct
+    use_m4 = bool(index_weights)
     rows = []
     desired_buys: list[tuple[int, float]] = []
     for idx, row in fund_signals.reset_index(drop=True).iterrows():
-        target_value = core_target_value * float(row["_target_weight_norm"])
-        current_value = current_values.get(str(row["fund_code"]), 0.0)
-        action = str(row["action"])
+        fund_code = str(row["fund_code"])
+        current_value = current_values.get(fund_code, 0.0)
+        if use_m4 and fund_code in index_weights:
+            target_value = plan.total_value * float(index_weights[fund_code])
+            delta = target_value - current_value
+            if delta > cfg.min_trade_amount:
+                action = "ADD"
+            elif -delta > cfg.min_trade_amount:
+                action = "REDUCE"
+            else:
+                action = "HOLD"
+        else:
+            target_value = core_target_value * float(row["_target_weight_norm"])
+            action = str(row["action"])
         desired = max(target_value - current_value, 0.0) if action in {"BUY", "ADD"} else 0.0
         rows.append({
-            "fund_code": str(row["fund_code"]),
+            "fund_code": fund_code,
             "action": action,
             "current_value": current_value,
             "target_value": target_value,

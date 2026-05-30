@@ -1,7 +1,7 @@
 import { DataTable } from "../components/DataTable";
 import { JobRunTimeline } from "../components/JobRunTimeline";
 import { RegimePolicyPanel } from "../components/RegimePolicyPanel";
-import type { HealthSnapshot } from "../types";
+import type { DataHealthDomain, DataHealthSummary, HealthSnapshot } from "../types";
 
 type Props = {
   data: HealthSnapshot;
@@ -16,6 +16,7 @@ export function HealthPage({ data }: Props) {
           <p>回答今天的数据能不能用于决策；任务由本机定时器执行，Dashboard 只展示状态和异常提醒。</p>
         </div>
       </div>
+      {data.data_health_summary ? <TodayDecidableCard summary={data.data_health_summary} /> : null}
       <section className="panel">
         <h2>定时任务</h2>
         <DataTable
@@ -78,5 +79,71 @@ export function HealthPage({ data }: Props) {
         />
       </section>
     </section>
+  );
+}
+
+function TodayDecidableCard({ summary }: { summary: DataHealthSummary }) {
+  const overall = summary.overall;
+  const statusCls = overall.status === "decidable" ? "action--add"
+    : overall.status === "backup_active" ? "action--hold"
+    : "action--reduce";
+  const label = overall.status === "decidable" ? "今日可决策"
+    : overall.status === "backup_active" ? "备源接管"
+    : overall.status === "degraded" ? "数据有缺口"
+    : overall.status === "failed" ? "今日不可决策"
+    : overall.status === "no_data" ? "无数据" : overall.status;
+  return (
+    <section className="panel">
+      <h2>今天可决策吗</h2>
+      <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", marginTop: 6 }}>
+        <span className={`action ${statusCls}`}
+              style={{ fontFamily: "var(--font-display)", padding: "4px 10px", borderRadius: 4,
+                       border: "1px solid var(--line-strong)" }}>
+          {label}
+        </span>
+        <strong style={{ fontFamily: "var(--font-mono)", fontSize: 14 }}>{overall.headline}</strong>
+        {summary.as_of ? <small style={{ color: "var(--muted)" }}>as of {summary.as_of}</small> : null}
+      </div>
+      {overall.blockers.length > 0 ? (
+        <ul style={{ marginTop: 8, paddingLeft: 20, color: "var(--muted)", lineHeight: 1.6 }}>
+          {overall.blockers.map((b, i) => <li key={i}>{b}</li>)}
+        </ul>
+      ) : null}
+      <div style={{ marginTop: 14, overflowX: "auto" }}>
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>市场</th><th>操作</th><th>效力</th><th>说明</th>
+              <th>OK 源</th><th>失败源</th><th>关键</th>
+            </tr>
+          </thead>
+          <tbody>
+            {summary.domains.map((d, i) => <DomainRow key={i} d={d} />)}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function DomainRow({ d }: { d: DataHealthDomain }) {
+  const cls = d.effective_status === "decidable" ? "action--add"
+    : d.effective_status === "backup_active" ? "action--hold"
+    : "action--reduce";
+  const label = d.effective_status === "decidable" ? "可决策"
+    : d.effective_status === "backup_active" ? "备源接管"
+    : d.effective_status === "degraded" ? "有缺口"
+    : d.effective_status === "failed" ? "失败"
+    : d.effective_status;
+  return (
+    <tr>
+      <td>{d.market}</td>
+      <td>{d.operation}</td>
+      <td><span className={`action ${cls}`}>{label}</span></td>
+      <td style={{ color: "var(--muted)", fontSize: 12 }}>{d.headline}</td>
+      <td>{d.ok_sources.join(",") || "—"}</td>
+      <td>{d.failed_sources.join(",") || "—"}</td>
+      <td>{d.is_critical ? "是" : "否"}</td>
+    </tr>
   );
 }

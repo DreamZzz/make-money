@@ -100,6 +100,21 @@ def _insert_signal(
     )
 
 
+def _seed_holding(conn: duckdb.DuckDBPyConnection, symbol: str,
+                  strategy: str = "alpha158", trade_date: str = "2024-01-02") -> None:
+    """B2 测试用:为某 symbol 在 paper_positions+portfolio_nav 写入正持仓,
+    让 arbiter 的无持仓 SELL 前置过滤认其为"已持仓"。"""
+    conn.execute(
+        "INSERT INTO portfolio_nav (strategy_name, trade_date, total_value) VALUES (?, ?, 100000)",
+        [strategy, trade_date],
+    )
+    conn.execute(
+        "INSERT INTO paper_positions (strategy_name, trade_date, symbol, quantity, market_value) "
+        "VALUES (?, ?, ?, 100, 1000)",
+        [strategy, trade_date, symbol],
+    )
+
+
 def _arbiter_config(consensus_baselines: list[str]) -> dict:
     return {
         "portfolio": {
@@ -207,6 +222,7 @@ def test_arbiter_rejects_buy_when_same_symbol_has_sell():
     conn = duckdb.connect(":memory:")
     _seed_base(conn)
     _seed_model_registry(conn)
+    _seed_holding(conn, "000001")
     conn.execute("""
         INSERT INTO qlib_predictions (
             experiment_id, model_name, model_version, mode, prediction_date,
@@ -291,6 +307,7 @@ def test_arbiter_keeps_only_best_same_symbol_same_side_signal():
 def test_arbiter_keeps_all_sell_signals_for_same_symbol():
     conn = duckdb.connect(":memory:")
     _seed_base(conn)
+    _seed_holding(conn, "000001")
     conn.execute("""
         INSERT INTO signals (
             signal_id, model_name, model_version, symbol, signal_ts,
@@ -535,6 +552,7 @@ def test_empty_consensus_baselines_disables_rule_buy_consensus_gate():
 def test_regime_policy_blocks_all_buy_signals_before_execution():
     conn = duckdb.connect(":memory:")
     _seed_base(conn)
+    _seed_holding(conn, "000002", strategy="trend_following")
     _seed_production_prediction(conn, symbol="000001", rank=10, confidence=0.95)
     _insert_signal(
         conn,
@@ -596,4 +614,25 @@ def test_regime_policy_blocks_all_buy_signals_before_execution():
     assert signal[0] is True
     assert signal[1] == "NO_ACTION"
     assert "宏观风控暂停BUY" in signal[2]
+    conn.close()
+
+
+def test_arbiter_b2_rejects_sell_when_no_holding():
+    """B2: 无持仓的 SELL 信号应在套利层直接 REJECTED,减少 paper_engine 噪音。"""
+    conn = duckdb.connect(":memory:")
+    _seed_base(conn)
+    # 不 seed paper_positions —— 标的 000001 无持仓
+    conn.execute("""
+        INSERT INTO signals (signal_id, model_name, model_version, symbol, signal_ts,
+            side, score, confidence, max_position_pct, executed, status)
+        VALUES ('sell-no-holding', 'trend_following', '1.0', '000001',
+                TIMESTAMP '2024-01-02 15:00:00', 'SELL', 1, 0.9, 0.0, FALSE, 'ACTIVE')
+    """)
+    arbitrate_pending_signals(conn, config=DEFAULT_CONFIG)
+    row = conn.execute(
+        "SELECT decision, consensus_status, decision_reason FROM signal_decisions WHERE signal_id='sell-no-holding'"
+    ).fetchone()
+    assert row[0] == "REJECTED"
+    assert row[1] == "NO_HOLDING_SKIP"
+    assert "无持仓" in row[2]
     conn.close()

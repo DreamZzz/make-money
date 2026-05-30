@@ -919,3 +919,25 @@ CREATE TABLE IF NOT EXISTS index_allocation (
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (trade_date, fund_code)
 );
+
+-- ============================================
+-- 21. scheduler_runs: launchctl watchdog 每次终态转换的结构化历史
+-- C2: 取代 scheduler_state.json + cron.log/open_trade.log 文本解析
+-- ============================================
+CREATE TABLE IF NOT EXISTS scheduler_runs (
+    run_id          VARCHAR PRIMARY KEY,   -- 形如 daily_close-2026-05-29-200000
+    job_key         VARCHAR NOT NULL,      -- daily_close / open_paper_trade
+    job_label       VARCHAR,
+    scheduled_for   TIMESTAMP,             -- 当日计划执行时刻
+    started_at      TIMESTAMP,             -- 实际启动时刻
+    ended_at        TIMESTAMP,             -- 终态时刻
+    duration_seconds DOUBLE,
+    status          VARCHAR NOT NULL,      -- SUCCEEDED / FAILED / MISSED / DEGRADED
+    exit_code       INTEGER,
+    result          VARCHAR,               -- watchdog 文本结果
+    log_path        VARCHAR,
+    source          VARCHAR DEFAULT 'watchdog',
+    schedule_alignment VARCHAR,            -- 计划偏移人话(早 / 准点 / 晚)
+    schedule_note   VARCHAR,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
