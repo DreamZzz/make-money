@@ -1009,3 +1009,45 @@ CREATE TABLE IF NOT EXISTS fund_evaluations (
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (eval_date, fund_code)
 );
+
+-- ============================================
+-- 23. fund_screening_results: 基金每日多维评分扫描结果
+-- F2: 估值/趋势/动量/风险/流动性/宏观契合 六维 + signal_tag
+-- ============================================
+CREATE TABLE IF NOT EXISTS fund_screening_results (
+    eval_date           DATE NOT NULL,
+    fund_code           VARCHAR NOT NULL,
+    fund_name           VARCHAR,
+    etf_subcategory     VARCHAR,
+    tracking_index      VARCHAR,
+    scale_yi            DOUBLE,
+    -- 六维子分(0-100)
+    valuation_score     DOUBLE,
+    trend_score         DOUBLE,
+    momentum_score      DOUBLE,
+    risk_score          DOUBLE,
+    liquidity_score     DOUBLE,
+    macro_score         DOUBLE,
+    total_score         DOUBLE,
+    -- 关键中间量,前端展示
+    price_pct           DOUBLE,           -- 价格 / nav 分位
+    ma120_above         BOOLEAN,
+    ma250_above         BOOLEAN,
+    return_1m           DOUBLE,
+    return_3m           DOUBLE,
+    return_6m           DOUBLE,
+    excess_return_3m    DOUBLE,           -- vs 基准
+    volatility_20d      DOUBLE,           -- 年化
+    max_drawdown_120d   DOUBLE,
+    sharpe_1y           DOUBLE,
+    nav_history_days    INTEGER,
+    -- 信号
+    signal_tag          VARCHAR,          -- in_window / watch_high_value / avoid / insufficient_data
+    thesis              VARCHAR,
+    risk_tags           VARCHAR[],
+    -- 来源
+    macro_stage         VARCHAR,
+    benchmark_code      VARCHAR,
+    created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (eval_date, fund_code)
+);
