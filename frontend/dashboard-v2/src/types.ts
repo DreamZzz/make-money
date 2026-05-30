@@ -324,6 +324,55 @@ export type TournamentSnapshot = {
   error?: string;
 };
 
+export type FundEvaluation = {
+  eval_date: string | null;
+  fund_code: string;
+  fund_name: string | null;
+  tracking_index: string | null;
+  tracking_index_name: string | null;
+  snapshot_date: string | null;
+  snapshot_stale_days: number | null;
+  shares: number | null;
+  cost_amount: number | null;
+  nav: number | null;
+  nav_date: string | null;
+  nav_stale_days: number | null;
+  current_value: number | null;
+  return_amount: number | null;
+  return_pct: number | null;
+  price_pct: number | null;
+  ma_fast: number | null;
+  ma_slow: number | null;
+  trend_healthy: boolean | null;
+  trend_weak: boolean | null;
+  target_weight_m4: number | null;
+  equity_exposure: number | null;
+  target_value: number | null;
+  target_account_weight: number | null;
+  current_weight: number | null;
+  current_account_weight: number | null;
+  drift_pct: number | null;
+  delta_amount: number | null;
+  delta_shares: number | null;
+  action: string;
+  confidence: number;
+  thesis: string;
+  risk_tags: string[];
+  account_total_value: number | null;
+};
+
+export type FundsSnapshot = {
+  eval_date: string | null;
+  account_total_value: number | null;
+  equity_exposure: number | null;
+  core_total_target_value: number;
+  core_total_current_value: number;
+  core_total_delta_amount: number;
+  overall_advice: { headline: string; actions: string[] };
+  funds: FundEvaluation[];
+  error?: string;
+};
+
 export type MarketSnapshot = {
   market_state: {
     trade_date?: string;

@@ -38,8 +38,14 @@ def calculate_signal(
     index_df: pd.DataFrame,
     rules: dict,
     current_weight: float | None = None,
+    target_weight_override: float | None = None,
+    target_weight_source: str = "config",
 ) -> IndexFundSignal | None:
-    """Create one independent index-fund signal from index trend/percentile and allocation drift."""
+    """Create one independent index-fund signal from index trend/percentile and allocation drift.
+
+    D3: target_weight_override 让 M4 动态权重(index_allocation 表)接管"目标权重",
+        config 的固定 33% 只在 M4 不可用时兜底。
+    """
     if index_df.empty or "close" not in index_df.columns:
         return None
 
@@ -51,7 +57,10 @@ def calculate_signal(
     high_p = float(rules.get("high_valuation_percentile", 0.80))
     threshold = float(rules.get("rebalance_threshold_pct", 0.05))
     min_conf = float(rules.get("min_confidence", 0.45))
-    target_weight = float(item.target_weight or 0.0)
+    if target_weight_override is not None:
+        target_weight = float(target_weight_override)
+    else:
+        target_weight = float(item.target_weight or 0.0)
     weight = current_weight if current_weight is not None else 0.0
     underweight = target_weight > 0 and weight < target_weight - threshold
     overweight = target_weight > 0 and weight > target_weight + threshold
@@ -92,6 +101,9 @@ def calculate_signal(
 
     confidence = signal_confidence(action, percentile, low_p, high_p, trend_weak, underweight, overweight)
     confidence = max(min_conf, confidence) if action != "HOLD" else min(confidence, 0.65)
+    if target_weight_source == "config_fallback":
+        risk_tags.append("m4_missing")
+        reasons.append("M4 动态权重不可用,回落 config 固定目标")
     thesis = "；".join(reasons)
 
     return IndexFundSignal(
@@ -104,6 +116,20 @@ def calculate_signal(
         thesis=thesis,
         risk_tags=risk_tags or ["normal"],
     )
+
+
+def load_m4_weights(conn) -> dict[str, float]:
+    """读 index_allocation 最新一日,返回 {fund_code: weight}。"""
+    try:
+        rows = conn.execute(
+            """
+            SELECT fund_code, weight FROM index_allocation
+            WHERE trade_date = (SELECT MAX(trade_date) FROM index_allocation)
+            """
+        ).fetchall()
+    except Exception:
+        return {}
+    return {str(fc): float(w) for fc, w in rows if fc is not None and w is not None}
 
 
 def compute_index_state(index_df: pd.DataFrame, rules: dict) -> dict:
@@ -194,6 +220,7 @@ def generate_signals(persist: bool = True) -> pd.DataFrame:
     try:
         init_db(conn)
         weights = load_current_weights(conn)
+        m4_weights = load_m4_weights(conn)
         signals = []
         for item in watchlist:
             idx_df = conn.execute("""
@@ -203,7 +230,19 @@ def generate_signals(persist: bool = True) -> pd.DataFrame:
                 ORDER BY trade_date
             """, [item.tracking_index]).fetchdf()
             current_weight = weights.get(item.fund_code, 0.0) if item.fund_code else 0.0
-            signal = calculate_signal(item, idx_df, rules, current_weight=current_weight)
+            m4_w = m4_weights.get(item.fund_code) if item.fund_code else None
+            if m4_w is not None:
+                tgt_override = m4_w
+                tgt_source = "m4"
+            else:
+                tgt_override = None
+                tgt_source = "config_fallback"
+            signal = calculate_signal(
+                item, idx_df, rules,
+                current_weight=current_weight,
+                target_weight_override=tgt_override,
+                target_weight_source=tgt_source,
+            )
             if signal:
                 signals.append(signal)
         df = signals_to_frame(signals)

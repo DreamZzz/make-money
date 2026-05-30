@@ -941,3 +941,53 @@ CREATE TABLE IF NOT EXISTS scheduler_runs (
     schedule_note   VARCHAR,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- ============================================
+-- 22. fund_evaluations: 基金每日多维评估快照
+-- D1: 整合 snapshot + nav + index + signal + M4 + macro 给出可执行建议
+-- ============================================
+CREATE TABLE IF NOT EXISTS fund_evaluations (
+    eval_date           DATE NOT NULL,
+    fund_code           VARCHAR NOT NULL,
+    fund_name           VARCHAR,
+    tracking_index      VARCHAR,
+    tracking_index_name VARCHAR,
+    -- 快照(用户录入)
+    snapshot_date       DATE,
+    snapshot_stale_days INTEGER,
+    shares              DOUBLE,
+    cost_amount         DOUBLE,
+    -- 净值
+    nav                 DOUBLE,
+    nav_date            DATE,
+    nav_stale_days      INTEGER,
+    current_value       DOUBLE,
+    return_amount       DOUBLE,
+    return_pct          DOUBLE,
+    -- 估值/趋势(沿用 index_fund_signals 的派生)
+    price_pct           DOUBLE,
+    ma_fast             DOUBLE,
+    ma_slow             DOUBLE,
+    trend_healthy       BOOLEAN,
+    trend_weak          BOOLEAN,
+    -- 权重决策
+    target_weight_m4    DOUBLE,
+    equity_exposure     DOUBLE,         -- 宏观目标权益仓位
+    target_value        DOUBLE,         -- account_total * equity_exposure * target_weight_m4
+    target_account_weight DOUBLE,       -- target_value / account_total
+    current_weight      DOUBLE,         -- 在 Core 池中的权重 (与 signal 口径一致)
+    current_account_weight DOUBLE,      -- current_value / account_total
+    drift_pct           DOUBLE,
+    delta_amount        DOUBLE,         -- 应加(+)/减(-)金额
+    delta_shares        DOUBLE,         -- delta_amount / nav
+    -- 信号
+    action              VARCHAR,
+    confidence          DOUBLE,
+    thesis              VARCHAR,
+    risk_tags           VARCHAR[],
+    -- 来源
+    account_total_value DOUBLE,
+    source              VARCHAR DEFAULT 'fund_evaluator_v1',
+    created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (eval_date, fund_code)
+);

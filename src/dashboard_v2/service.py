@@ -240,6 +240,31 @@ class DashboardV2Service:
                 "history": history_series,
             }
 
+    def build_funds_snapshot(self) -> dict[str, Any]:
+        """D2: 基金评估面板 — 三支(或当前 watchlist)基金每日评估。"""
+        from dataclasses import asdict
+
+        from src.funds.evaluation import evaluate_funds
+
+        with self._managed_connection(read_only=True) as conn:
+            evals = evaluate_funds(conn)
+            rows = [asdict(e) for e in evals]
+            total_target_value = sum((r.get("target_value") or 0.0) for r in rows)
+            total_current_value = sum((r.get("current_value") or 0.0) for r in rows)
+            account_total = rows[0]["account_total_value"] if rows else None
+            equity_exposure = rows[0]["equity_exposure"] if rows else None
+            advice = _build_funds_overall_advice(rows, account_total, equity_exposure)
+            return {
+                "eval_date": rows[0]["eval_date"].isoformat() if rows and rows[0].get("eval_date") else None,
+                "account_total_value": account_total,
+                "equity_exposure": equity_exposure,
+                "core_total_target_value": total_target_value,
+                "core_total_current_value": total_current_value,
+                "core_total_delta_amount": total_target_value - total_current_value,
+                "overall_advice": advice,
+                "funds": rows,
+            }
+
     def build_tournament_snapshot(self) -> dict[str, Any]:
         from src.accounts.leaderboard import build_leaderboard
         from src.accounts.promotion import evaluate_tournament
@@ -1992,6 +2017,39 @@ def _load_scheduler_watchdog_state(path: Path | None = None) -> dict[str, Any]:
         "updated_at": data.get("updated_at"),
         "jobs": jobs,
     }
+
+
+def _build_funds_overall_advice(
+    rows: list[dict[str, Any]],
+    account_total: float | None,
+    equity_exposure: float | None,
+) -> dict[str, Any]:
+    """D2: 把三支基金状态压成一句"今天 Core 该怎么操作"。"""
+    if not rows:
+        return {"headline": "未配置基金 watchlist", "actions": []}
+    actions = []
+    for r in rows:
+        delta = r.get("delta_amount")
+        if delta is None:
+            continue
+        if abs(delta) < 1000:
+            continue
+        verb = "加" if delta > 0 else "减"
+        actions.append(
+            f"{r['fund_code']} {r.get('fund_name') or ''}: 建议 {verb} ¥{abs(delta):,.0f}"
+            f" (action={r.get('action')} · price_pct {(r.get('price_pct') or 0)*100:.0f}%)"
+        )
+    add_total = sum((r.get("delta_amount") or 0) for r in rows if (r.get("delta_amount") or 0) > 0)
+    reduce_total = -sum((r.get("delta_amount") or 0) for r in rows if (r.get("delta_amount") or 0) < 0)
+    if add_total > 0 and reduce_total > 0:
+        headline = f"Core 需 +¥{add_total:,.0f} / -¥{reduce_total:,.0f},内部轮动"
+    elif add_total > 0:
+        headline = f"Core 整体欠配 ¥{add_total:,.0f}"
+    elif reduce_total > 0:
+        headline = f"Core 整体超配 ¥{reduce_total:,.0f}"
+    else:
+        headline = "Core 在容忍区间内,无需操作"
+    return {"headline": headline, "actions": actions}
 
 
 def _load_scheduled_job_history(

@@ -58,6 +58,10 @@ def create_app(service: Any | None = None) -> FastAPI:
     def get_market() -> dict[str, Any]:
         return _call_or_degrade(svc.build_market_snapshot, _fallback_market)
 
+    @app.get("/api/v2/funds")
+    def get_funds() -> dict[str, Any]:
+        return _call_or_degrade(svc.build_funds_snapshot, _fallback_funds)
+
     @app.post("/api/v2/jobs/{job_key}/start")
     def start_job(job_key: str) -> dict[str, Any]:
         if hasattr(svc, "reject_job_start"):
@@ -233,6 +237,20 @@ def _fallback_research(exc: Exception) -> dict[str, Any]:
 def _fallback_market(exc: Exception) -> dict[str, Any]:
     return {"market_state": None, "exposure": None, "allocation": [], "history": [],
             "error": _data_unavailable_message(exc)}
+
+
+def _fallback_funds(exc: Exception) -> dict[str, Any]:
+    return {
+        "eval_date": None,
+        "account_total_value": None,
+        "equity_exposure": None,
+        "core_total_target_value": 0.0,
+        "core_total_current_value": 0.0,
+        "core_total_delta_amount": 0.0,
+        "overall_advice": {"headline": _data_unavailable_message(exc), "actions": []},
+        "funds": [],
+        "error": _data_unavailable_message(exc),
+    }
 
 
 def _fallback_tournament(exc: Exception) -> dict[str, Any]:

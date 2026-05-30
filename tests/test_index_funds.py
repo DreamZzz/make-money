@@ -125,3 +125,51 @@ def test_default_watchlist_has_index_slots_without_hardcoded_fund_codes():
 
 def test_compute_max_drawdown():
     assert compute_max_drawdown(pd.Series([1.0, 1.2, 0.9, 1.1])) == pytest.approx(-0.25)
+
+
+def test_d3_target_weight_override_takes_precedence_over_config():
+    """D3: target_weight_override (来自 M4) 应覆盖 item.target_weight。"""
+    closes = list(range(80, 110))
+    # item.target_weight=0.50, override=0.30 → current 0.45 在 0.30 之上 = overweight
+    signal = calculate_signal(
+        _item(target_weight=0.50),
+        _index_df(closes),
+        RULES,
+        current_weight=0.45,
+        target_weight_override=0.30,
+        target_weight_source="m4",
+    )
+    assert signal.target_weight == pytest.approx(0.30)
+    assert signal.action == "REDUCE"
+    assert "30.0%" in signal.thesis  # 用的是 override 而非 50%
+    assert "m4_missing" not in signal.risk_tags
+
+
+def test_d3_config_fallback_tags_m4_missing():
+    closes = list(range(80, 110))
+    signal = calculate_signal(
+        _item(target_weight=0.50),
+        _index_df(closes),
+        RULES,
+        current_weight=0.45,
+        target_weight_override=None,
+        target_weight_source="config_fallback",
+    )
+    assert "m4_missing" in signal.risk_tags
+    assert "M4 动态权重不可用" in signal.thesis
+
+
+def test_d3_load_m4_weights_reads_latest_allocation():
+    """load_m4_weights 取 index_allocation 最新一日。"""
+    from src.index_funds.signals import load_m4_weights
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    conn.execute(
+        "INSERT INTO index_allocation (trade_date, fund_code, weight) VALUES "
+        "(DATE '2026-05-28', '012963', 0.40), "
+        "(DATE '2026-05-29', '012963', 0.435), "
+        "(DATE '2026-05-29', '004192', 0.29)"
+    )
+    weights = load_m4_weights(conn)
+    assert weights == {"012963": pytest.approx(0.435), "004192": pytest.approx(0.29)}
+    conn.close()
