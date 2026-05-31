@@ -158,3 +158,41 @@ def test_scan_funds_persists_and_loads_by_signal_tag():
     # 按 total_score 倒序
     assert rows[0]["total_score"] >= rows[1]["total_score"]
     conn.close()
+
+
+def test_classify_signal_oversold_candidate_low_pct_and_deep_dd():
+    """估值低位 + 深度回撤 → oversold_candidate(优先于 trend_broken avoid)。"""
+    tag, headline = _classify_signal(
+        trend=10, valuation=80, price_pct=0.10, macro=60, total=45,
+        max_drawdown=-0.40,
+    )
+    assert tag == "oversold_candidate"
+    assert "超跌" in headline
+    assert "低位" in headline
+
+
+def test_classify_signal_oversold_loses_to_too_expensive_first():
+    """过贵优先级 > 超跌(不会矛盾,但保护规则顺序)。"""
+    tag, _ = _classify_signal(
+        trend=10, valuation=20, price_pct=0.95, macro=60, total=40,
+        max_drawdown=-0.40,
+    )
+    assert tag == "avoid"
+
+
+def test_classify_signal_low_pct_without_deep_dd_falls_through():
+    """估值低但没有深度回撤(回撤 -10% 不算深) → 不算 oversold,趋势破回 avoid。"""
+    tag, _ = _classify_signal(
+        trend=10, valuation=80, price_pct=0.10, macro=60, total=45,
+        max_drawdown=-0.10,
+    )
+    assert tag == "avoid"
+
+
+def test_classify_signal_deep_dd_without_low_pct_falls_through():
+    """回撤深但估值不在低位(35% 分位) → 不算 oversold,趋势破回 avoid。"""
+    tag, _ = _classify_signal(
+        trend=10, valuation=40, price_pct=0.35, macro=60, total=50,
+        max_drawdown=-0.40,
+    )
+    assert tag == "avoid"

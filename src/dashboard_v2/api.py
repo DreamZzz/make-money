@@ -253,6 +253,7 @@ def _fallback_funds(exc: Exception) -> dict[str, Any]:
         "holding_alerts": [],
         "recommendations": {
             "eval_date": None, "in_window": [], "watch_high_value": [],
+            "oversold_candidates": [],
             "excluded_holdings": [], "overlap_tracking": [],
             "holding_categories": [], "total_candidates": 0,
             "overall_advice": msg,

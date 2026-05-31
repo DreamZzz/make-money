@@ -22,6 +22,7 @@ from src.index_funds.config import get_watchlist
 
 DEFAULT_TOP_IN_WINDOW = 5
 DEFAULT_TOP_WATCH = 10
+DEFAULT_TOP_OVERSOLD = 10
 DEFAULT_MAX_PER_CATEGORY = 2
 
 
@@ -48,6 +49,7 @@ class RecommendationsSnapshot:
     eval_date: str | None
     in_window: list[FundRecommendation]
     watch_high_value: list[FundRecommendation]
+    oversold_candidates: list[FundRecommendation]   # F2 增强:估值低 + 深度回撤,等趋势确立
     excluded_holdings: list[str]
     overlap_tracking: list[str]    # 持仓的 tracking_index 列表(用于过滤同标的)
     holding_categories: list[str]  # 持仓 etf_subcategory(用于多样性提示)
@@ -266,6 +268,7 @@ def build_recommendations(
     *,
     top_in_window: int = DEFAULT_TOP_IN_WINDOW,
     top_watch: int = DEFAULT_TOP_WATCH,
+    top_oversold: int = DEFAULT_TOP_OVERSOLD,
     max_per_category: int = DEFAULT_MAX_PER_CATEGORY,
     exclude_held: bool = True,
     exclude_same_tracking: bool = True,
@@ -299,6 +302,7 @@ def build_recommendations(
 
     in_window_raw = _load_candidates(conn, signal_tags=["in_window"])
     watch_raw = _load_candidates(conn, signal_tags=["watch_high_value"])
+    oversold_raw = _load_candidates(conn, signal_tags=["oversold_candidate"])
 
     in_window = _filter_and_rank(
         in_window_raw,
@@ -317,27 +321,43 @@ def build_recommendations(
         equity_exposure=equity_exposure, account_total=account_total,
         m4_weights=m4_weights,
     )
+    oversold = _filter_and_rank(
+        oversold_raw,
+        excluded_codes=held_codes | {r.fund_code for r in in_window} | {r.fund_code for r in watch},
+        holdings_by_tracking=holdings_by_tracking,
+        max_per_category=max_per_category, limit=top_oversold,
+        exclude_intent_exited=exited,
+        equity_exposure=equity_exposure, account_total=account_total,
+        m4_weights=m4_weights,
+    )
 
-    total_candidates = len(in_window_raw) + len(watch_raw)
+    total_candidates = len(in_window_raw) + len(watch_raw) + len(oversold_raw)
     eval_date = None
-    if in_window_raw or watch_raw:
-        rec = (in_window_raw + watch_raw)[0]
+    if in_window_raw or watch_raw or oversold_raw:
+        rec = (in_window_raw + watch_raw + oversold_raw)[0]
         ed = rec.get("eval_date")
         eval_date = str(ed) if ed else None
 
     if in_window:
         advice = f"今日 {len(in_window)} 支基金进入加仓窗口期"
+        if oversold:
+            advice += f";另有 {len(oversold)} 支超跌候选等趋势确立"
     elif watch:
         advice = f"无窗口期候选,{len(watch)} 支高价值关注名单,等回调"
+        if oversold:
+            advice += f";{len(oversold)} 支超跌候选等趋势确立"
+    elif oversold:
+        advice = f"无窗口期/高价值候选,{len(oversold)} 支超跌候选等趋势确立"
     elif total_candidates == 0:
         advice = "扫描器无候选数据 (可能 nav 候选池未填充)"
     else:
-        advice = "今日无 in_window/watch 候选,可关注 scanner 全表"
+        advice = "今日无 in_window/watch/oversold 候选,可关注 scanner 全表"
 
     return RecommendationsSnapshot(
         eval_date=eval_date,
         in_window=in_window,
         watch_high_value=watch,
+        oversold_candidates=oversold,
         excluded_holdings=sorted(held_codes),
         overlap_tracking=sorted(holdings_by_tracking.keys()),
         holding_categories=sorted(set(held_categories)),

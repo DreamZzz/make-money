@@ -407,6 +407,7 @@ export type FundsRecommendations = {
   eval_date: string | null;
   in_window: FundRecommendation[];
   watch_high_value: FundRecommendation[];
+  oversold_candidates: FundRecommendation[];
   excluded_holdings: string[];
   overlap_tracking: string[];
   holding_categories: string[];

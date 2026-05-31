@@ -50,6 +50,11 @@ SUFFICIENT_NAV_DAYS = 120
 # 估值窗口(交易日)
 VALUATION_WINDOW = 756  # ~3 年
 
+# 超跌候选(oversold_candidate)阈值
+# 设计:估值进入低位 + 深度回撤已发生 → 价值出现,等趋势确立
+PRICE_PCT_OVERSOLD = 0.30
+MAX_DRAWDOWN_OVERSOLD = -0.20
+
 
 @dataclass
 class FundScreeningResult:
@@ -249,21 +254,37 @@ def _classify_signal(
     price_pct: float | None,
     macro: float | None,
     total: float | None,
+    max_drawdown: float | None = None,
 ) -> tuple[str, str]:
-    """返回 (signal_tag, headline)。"""
+    """返回 (signal_tag, headline)。
+
+    优先级:insufficient_data → too_expensive(avoid) → oversold_candidate →
+    trend_broken(avoid) → in_window → watch_high_value → neutral
+    """
     if total is None:
         return "insufficient_data", "数据不足无法评分"
 
-    # avoid 优先 — 分两种原因区分,thesis 才准确
-    trend_broken = trend is not None and trend < TREND_MAX_FOR_AVOID
+    # 高估值无条件 avoid
     too_expensive = price_pct is not None and price_pct > PRICE_PCT_AVOID
-    if trend_broken or too_expensive:
-        reasons: list[str] = []
-        if trend_broken:
-            reasons.append(f"趋势 {trend:.0f} 跌穿 (< {TREND_MAX_FOR_AVOID:.0f})")
-        if too_expensive:
-            reasons.append(f"估值 {price_pct:.0%} 过贵 (> {PRICE_PCT_AVOID:.0%})")
-        return "avoid", "规避: " + "、".join(reasons)
+    if too_expensive:
+        return "avoid", f"规避: 估值 {price_pct:.0%} 过贵 (> {PRICE_PCT_AVOID:.0%})"
+
+    # 超跌候选: 低估值 + 深度回撤已发生(优先于 trend_broken avoid)
+    # 这类标的趋势还弱,但价值已现;不算"可加仓",而是"等趋势确立"的关注名单
+    is_oversold = (
+        price_pct is not None and price_pct < PRICE_PCT_OVERSOLD
+        and max_drawdown is not None and max_drawdown < MAX_DRAWDOWN_OVERSOLD
+    )
+    if is_oversold:
+        return "oversold_candidate", (
+            f"超跌候选: 估值 {price_pct:.0%} 在低位 (< {PRICE_PCT_OVERSOLD:.0%}),"
+            f"已回撤 {max_drawdown:.0%},等趋势(MA120/250)转好可考虑分批"
+        )
+
+    # 趋势破: avoid
+    trend_broken = trend is not None and trend < TREND_MAX_FOR_AVOID
+    if trend_broken:
+        return "avoid", f"规避: 趋势 {trend:.0f} 跌穿 (< {TREND_MAX_FOR_AVOID:.0f})"
 
     # 加仓窗口
     in_window = (
@@ -408,6 +429,7 @@ def evaluate_fund(
     tag, headline = _classify_signal(
         result.trend_score, result.valuation_score, result.price_pct,
         result.macro_score, result.total_score,
+        max_drawdown=result.max_drawdown_120d,
     )
     result.signal_tag = tag
     risk_tags: list[str] = []

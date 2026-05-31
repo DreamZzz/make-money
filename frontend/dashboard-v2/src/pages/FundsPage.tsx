@@ -149,6 +149,19 @@ function RecommendationsSection({ rec }: { rec: FundsSnapshot["recommendations"]
       </section>
       <section className="panel" style={{ marginTop: 14 }}>
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+          <h2>超跌候选 (oversold · {rec.oversold_candidates.length})</h2>
+          <small style={{ color: "var(--muted)" }}>估值 &lt; 30% 分位 + 已深度回撤,等趋势(MA120/250)确立</small>
+        </div>
+        {rec.oversold_candidates.length === 0 ? (
+          <div className="empty-panel" style={{ marginTop: 10 }}>无超跌候选</div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12, marginTop: 10 }}>
+            {rec.oversold_candidates.map((r) => <RecCard key={r.fund_code} r={r} kind="oversold" />)}
+          </div>
+        )}
+      </section>
+      <section className="panel" style={{ marginTop: 14 }}>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
           <h2>高价值关注名单 (watch · {rec.watch_high_value.length})</h2>
           <button type="button" onClick={() => setShowWatch(v => !v)}
                   style={{
@@ -174,8 +187,8 @@ function RecommendationsSection({ rec }: { rec: FundsSnapshot["recommendations"]
   );
 }
 
-function RecCard({ r, kind }: { r: FundRecommendation; kind: "in_window" | "watch" }) {
-  const cls = kind === "in_window" ? "action--add" : "action--hold";
+function RecCard({ r, kind }: { r: FundRecommendation; kind: "in_window" | "watch" | "oversold" }) {
+  const cls = kind === "in_window" ? "action--add" : kind === "oversold" ? "action--reduce" : "action--hold";
   return (
     <div style={{
       border: "1px solid var(--line)", borderRadius: 6, padding: 12,
