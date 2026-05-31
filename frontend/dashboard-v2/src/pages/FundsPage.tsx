@@ -195,7 +195,14 @@ function RecCard({ r, kind }: { r: FundRecommendation; kind: "in_window" | "watc
       background: "var(--surface)",
     }}>
       <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
-        <strong style={{ fontFamily: "var(--font-display)", fontSize: 16 }}>#{r.rank} {r.fund_code}</strong>
+        <strong style={{ fontFamily: "var(--font-display)", fontSize: 16 }}>
+          #{r.rank} {r.fund_code}
+          {r.is_user_watching ? <span style={{
+            fontSize: 10, marginLeft: 6, padding: "1px 5px", borderRadius: 3,
+            border: "1px dashed var(--accent, #60a5fa)", color: "var(--accent, #60a5fa)",
+            fontFamily: "var(--font-mono)", verticalAlign: "middle",
+          }}>已观察</span> : null}
+        </strong>
         <span className={`action ${cls}`} style={{ fontSize: 11 }}>{r.signal_tag}</span>
       </div>
       <small style={{ color: "var(--muted)" }}>{r.fund_name || "—"}</small>

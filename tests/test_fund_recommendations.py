@@ -262,3 +262,27 @@ def test_v2_active_well_supplied_and_no_score_advantage_still_excludes(monkeypat
     snap = build_recommendations(conn, top_in_window=10)
     codes = [r.fund_code for r in snap.in_window]
     assert "CAND300" not in codes
+
+
+def test_v2_watching_marks_is_user_watching_and_thesis(monkeypatch):
+    """intent=watching 的候选应被标 is_user_watching + thesis 末尾加"已在你的观察名单"。"""
+    from src.index_funds.config import FundWatchItem
+    items = [FundWatchItem(
+        fund_code="WATCHED", name="观察", fund_type="ETF",
+        tracking_index="000300", tracking_index_name="x",
+        market="CN", currency="CNY", target_weight=0.0,
+        category="equity_index", intent="watching",
+    )]
+    monkeypatch.setattr("src.funds.recommendations.get_watchlist", lambda: items)
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    _seed_screening(conn, [
+        ("WATCHED", "观察 ETF", "broad", "ix1", "in_window", 90),
+        ("OTHER", "其它", "qdii", "ix2", "in_window", 80),
+    ])
+    snap = build_recommendations(conn, top_in_window=10, max_per_category=10)
+    watched = next(r for r in snap.in_window if r.fund_code == "WATCHED")
+    other = next(r for r in snap.in_window if r.fund_code == "OTHER")
+    assert watched.is_user_watching is True
+    assert "已在你的观察名单" in watched.thesis
+    assert other.is_user_watching is False

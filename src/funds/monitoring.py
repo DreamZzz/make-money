@@ -29,6 +29,9 @@ DRAWDOWN_10D_PCT = -0.08      # 10 日回撤 < -8%
 MA60_WINDOW = 60
 MA120_WINDOW = 120
 TARGET_DRIFT_PCT = 0.20       # |current - target| / target > 20%
+# G2: 同跟踪指数有综合分高 +N 的替代品 → 提示
+ALTERNATIVE_BEAT_DELTA = 5.0
+ALTERNATIVE_TOP_N = 2         # 每个持仓最多提示 N 个更强替代
 
 
 @dataclass
@@ -225,6 +228,47 @@ def evaluate_holding_alerts(
             suggested_action="add_window_open",
             headline=f"扫描器判定 {fund_code} 进入加仓窗口期 (in_window)",
         ))
+
+    # 7. alternative_available - G2: 同跟踪指数有综合分显著更高的候选
+    # 查持仓自身在 scanner 表里的最新 total_score,再查同 tracking 其它 ETF 的 total_score
+    tracking = conn.execute(
+        "SELECT tracking_index FROM fund_info WHERE fund_code = ? LIMIT 1",
+        [fund_code],
+    ).fetchone()
+    tracking_idx = tracking[0] if tracking else None
+    if tracking_idx and category in {"equity_index", "broad", "qdii"}:
+        held_score_row = conn.execute(
+            "SELECT total_score FROM fund_screening_results "
+            "WHERE eval_date = (SELECT MAX(eval_date) FROM fund_screening_results) "
+            "AND fund_code = ? LIMIT 1",
+            [fund_code],
+        ).fetchone()
+        held_score = float(held_score_row[0]) if held_score_row and held_score_row[0] is not None else None
+        if held_score is not None:
+            alt_rows = conn.execute(
+                "SELECT fund_code, fund_name, total_score FROM fund_screening_results "
+                "WHERE eval_date = (SELECT MAX(eval_date) FROM fund_screening_results) "
+                "AND tracking_index = ? AND fund_code != ? AND total_score IS NOT NULL "
+                "AND total_score > ? + ? "
+                "ORDER BY total_score DESC LIMIT ?",
+                [tracking_idx, fund_code, held_score, ALTERNATIVE_BEAT_DELTA, ALTERNATIVE_TOP_N],
+            ).fetchall()
+            if alt_rows:
+                # Top N 候选合并成一条告警(PK = eval_date+fund_code+alert_type)
+                parts = [f"{c} {n or ''} 综合分 {s:.0f} (+{float(s)-held_score:.0f})"
+                         for c, n, s in alt_rows]
+                best_delta = float(alt_rows[0][2]) - held_score
+                alerts.append(HoldingAlert(
+                    eval_date=eval_date, fund_code=fund_code,
+                    alert_type="alternative_available", alert_level="info",
+                    metric_name="score_delta_vs_alternative",
+                    metric_value=best_delta, threshold=ALTERNATIVE_BEAT_DELTA,
+                    suggested_action="consider_switch",
+                    headline=(
+                        f"同跟踪 {tracking_idx} 有更强替代 (本基金 {held_score:.0f}): "
+                        + "; ".join(parts)
+                    ),
+                ))
 
     return alerts
 

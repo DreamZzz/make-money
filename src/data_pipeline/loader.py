@@ -131,6 +131,20 @@ def init_db(conn: duckdb.DuckDBPyConnection) -> None:
         "ALTER TABLE fund_info ADD COLUMN IF NOT EXISTS manager VARCHAR",
         "ALTER TABLE fund_info ADD COLUMN IF NOT EXISTS data_source VARCHAR DEFAULT 'manual'",
         "ALTER TABLE fund_info ADD COLUMN IF NOT EXISTS last_scanned_at TIMESTAMP",
+        # E1/E2 fund_evaluations 扩展字段(旧 DB 升级用)
+        "ALTER TABLE fund_evaluations ADD COLUMN IF NOT EXISTS category VARCHAR DEFAULT 'equity_index'",
+        "ALTER TABLE fund_evaluations ADD COLUMN IF NOT EXISTS intent VARCHAR DEFAULT 'active'",
+        "ALTER TABLE fund_evaluations ADD COLUMN IF NOT EXISTS broker_market_value DOUBLE",
+        "ALTER TABLE fund_evaluations ADD COLUMN IF NOT EXISTS broker_latest_nav DOUBLE",
+        "ALTER TABLE fund_evaluations ADD COLUMN IF NOT EXISTS broker_cost_price DOUBLE",
+        "ALTER TABLE fund_evaluations ADD COLUMN IF NOT EXISTS broker_holding_pnl DOUBLE",
+        "ALTER TABLE fund_evaluations ADD COLUMN IF NOT EXISTS broker_holding_return_pct DOUBLE",
+        "ALTER TABLE fund_evaluations ADD COLUMN IF NOT EXISTS broker_day_return_pct DOUBLE",
+        "ALTER TABLE fund_evaluations ADD COLUMN IF NOT EXISTS broker_yesterday_pnl DOUBLE",
+        "ALTER TABLE fund_evaluations ADD COLUMN IF NOT EXISTS holding_days INTEGER",
+        "ALTER TABLE fund_evaluations ADD COLUMN IF NOT EXISTS snapshot_source VARCHAR",
+        "ALTER TABLE fund_evaluations ADD COLUMN IF NOT EXISTS snapshot_captured_at VARCHAR",
+        "ALTER TABLE fund_evaluations ADD COLUMN IF NOT EXISTS market_value_vs_computed_pct DOUBLE",
     ]:
         try:
             conn.execute(col_ddl)

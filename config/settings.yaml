@@ -39,6 +39,43 @@ index_funds:
       category: "balanced"
       intent: "active"
 
+    # G3 观察名单 — 系统在 2026-05-31 scanner 中发现的强候选,加入观察(不持仓)
+    - fund_code: "159922"
+      name: "中证500ETF嘉实"
+      fund_type: "ETF"
+      tracking_index: "000905"
+      tracking_index_name: "中证500"
+      market: "CN"
+      currency: "CNY"
+      target_weight: 0.0
+      enabled: true
+      category: "equity_index"
+      intent: "watching"
+
+    - fund_code: "513380"
+      name: "恒生科技ETF广发"
+      fund_type: "ETF"
+      tracking_index: "HSTECH"
+      tracking_index_name: "恒生科技"
+      market: "CN"
+      currency: "CNY"
+      target_weight: 0.0
+      enabled: true
+      category: "qdii"
+      intent: "watching"
+
+    - fund_code: "520920"
+      name: "恒生科技ETF天弘"
+      fund_type: "ETF"
+      tracking_index: "HSTECH"
+      tracking_index_name: "恒生科技"
+      market: "CN"
+      currency: "CNY"
+      target_weight: 0.0
+      enabled: true
+      category: "qdii"
+      intent: "watching"
+
 portfolio:
   max_daily_turnover_pct: 0.30
   # 规则策略 BUY 全局门槛（trend/mean_reversion 等，confidence 尺度约 0.84）

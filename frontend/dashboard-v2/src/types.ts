@@ -400,6 +400,7 @@ export type FundRecommendation = {
   return_6m: number | null;
   thesis: string;
   rank: number;
+  is_user_watching: boolean;
   excluded_reasons: string[];
 };
 

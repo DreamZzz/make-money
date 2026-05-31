@@ -141,3 +141,59 @@ def test_persist_loads_back(monkeypatch):
     monitor_holdings(conn, eval_date=date(2026, 5, 29), persist=True)
     rows = load_latest_alerts(conn, fund_code="X")
     assert len(rows) > 0
+
+
+def test_g2_alternative_available_when_same_tracking_beats_held(monkeypatch):
+    """同 tracking 有 +5 以上综合分的候选 → alternative_available info。"""
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    _patch_watchlist(monkeypatch, [_make_item("HELD")])
+    _seed_nav(conn, "HELD", [1.0] * 100)
+    _seed_snapshot(conn, "HELD", shares=1000, cost=1000, note="")
+    conn.execute(
+        "INSERT INTO fund_info (fund_code, name, fund_type, tracking_index, market, currency, enabled) "
+        "VALUES ('HELD', '我持有的', 'ETF', '000300', 'CN', 'CNY', TRUE)"
+    )
+    conn.execute(
+        "INSERT INTO fund_info (fund_code, name, fund_type, tracking_index, market, currency, enabled) "
+        "VALUES ('BETTER', '更强 ETF', 'ETF', '000300', 'CN', 'CNY', TRUE)"
+    )
+    conn.execute(
+        "INSERT INTO fund_screening_results (eval_date, fund_code, fund_name, tracking_index, total_score, signal_tag) "
+        "VALUES (DATE '2026-05-29', 'HELD', '我持有的', '000300', 50, 'avoid')"
+    )
+    conn.execute(
+        "INSERT INTO fund_screening_results (eval_date, fund_code, fund_name, tracking_index, total_score, signal_tag) "
+        "VALUES (DATE '2026-05-29', 'BETTER', '更强 ETF', '000300', 75, 'in_window')"
+    )
+    alerts = monitor_holdings(conn, eval_date=date(2026, 5, 29))
+    alts = [a for a in alerts if a.alert_type == "alternative_available"]
+    assert len(alts) == 1
+    assert alts[0].alert_level == "info"
+    assert alts[0].suggested_action == "consider_switch"
+    assert "BETTER" in alts[0].headline
+    assert "75" in alts[0].headline
+
+
+def test_g2_alternative_skipped_when_delta_small(monkeypatch):
+    """候选只比持仓高 +3,< DELTA 5 → 不告警。"""
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    _patch_watchlist(monkeypatch, [_make_item("HELD")])
+    _seed_nav(conn, "HELD", [1.0] * 100)
+    _seed_snapshot(conn, "HELD", shares=1000, cost=1000, note="")
+    conn.execute(
+        "INSERT INTO fund_info (fund_code, name, fund_type, tracking_index, market, currency, enabled) "
+        "VALUES ('HELD', 'H', 'ETF', '000300', 'CN', 'CNY', TRUE)"
+    )
+    conn.execute(
+        "INSERT INTO fund_screening_results (eval_date, fund_code, tracking_index, total_score, signal_tag) "
+        "VALUES (DATE '2026-05-29', 'HELD', '000300', 70, 'avoid')"
+    )
+    conn.execute(
+        "INSERT INTO fund_screening_results (eval_date, fund_code, tracking_index, total_score, signal_tag) "
+        "VALUES (DATE '2026-05-29', 'WEAKBETTER', '000300', 73, 'in_window')"
+    )
+    alerts = monitor_holdings(conn, eval_date=date(2026, 5, 29))
+    alts = [a for a in alerts if a.alert_type == "alternative_available"]
+    assert alts == []

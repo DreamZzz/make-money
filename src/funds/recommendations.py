@@ -41,6 +41,7 @@ class FundRecommendation:
     return_6m: float | None
     thesis: str
     rank: int = 0
+    is_user_watching: bool = False    # G3: 在 watchlist 里 intent=watching
     excluded_reasons: list[str] = field(default_factory=list)
 
 
@@ -203,6 +204,7 @@ def _filter_and_rank(
     equity_exposure: float | None,
     account_total: float | None,
     m4_weights: dict[str, float],
+    watching_codes: set[str] | None = None,
 ) -> list[FundRecommendation]:
     out: list[FundRecommendation] = []
     cat_count: Counter[str] = Counter()
@@ -238,6 +240,9 @@ def _filter_and_rank(
             continue
         base_thesis = str(row.get("thesis") or "")
         thesis = (base_thesis + "; " + overlap_thesis) if overlap_thesis else base_thesis
+        is_watching = bool(watching_codes and code in watching_codes)
+        if is_watching:
+            thesis = (thesis + "; 已在你的观察名单") if thesis else "已在你的观察名单"
         out.append(FundRecommendation(
             fund_code=code,
             fund_name=row.get("fund_name"),
@@ -252,6 +257,7 @@ def _filter_and_rank(
             return_6m=row.get("return_6m"),
             thesis=thesis,
             rank=len(out) + 1,
+            is_user_watching=is_watching,
         ))
         cat_count[category] += 1
         if len(out) >= limit:
@@ -261,6 +267,10 @@ def _filter_and_rank(
 
 def _exited_codes(conn: duckdb.DuckDBPyConnection) -> set[str]:
     return {item.fund_code for item in get_watchlist() if item.intent == "exited"}
+
+
+def _watching_codes(conn: duckdb.DuckDBPyConnection) -> set[str]:
+    return {item.fund_code for item in get_watchlist() if item.intent == "watching"}
 
 
 def build_recommendations(
@@ -286,6 +296,7 @@ def build_recommendations(
             if not ti:
                 continue
             holdings_by_tracking.setdefault(ti, []).append({"fund_code": fc, **h})
+    watching = _watching_codes(conn)
 
     # M4 权重 + 宏观,用于 overlap 欠配判断
     from src.index_funds.signals import load_m4_weights
@@ -311,6 +322,7 @@ def build_recommendations(
         exclude_intent_exited=exited,
         equity_exposure=equity_exposure, account_total=account_total,
         m4_weights=m4_weights,
+        watching_codes=watching,
     )
     watch = _filter_and_rank(
         watch_raw,
@@ -320,6 +332,7 @@ def build_recommendations(
         exclude_intent_exited=exited,
         equity_exposure=equity_exposure, account_total=account_total,
         m4_weights=m4_weights,
+        watching_codes=watching,
     )
     oversold = _filter_and_rank(
         oversold_raw,
@@ -329,6 +342,7 @@ def build_recommendations(
         exclude_intent_exited=exited,
         equity_exposure=equity_exposure, account_total=account_total,
         m4_weights=m4_weights,
+        watching_codes=watching,
     )
 
     total_candidates = len(in_window_raw) + len(watch_raw) + len(oversold_raw)
