@@ -145,39 +145,83 @@ def fetch_etf_universe(min_scale_yi: float = DEFAULT_MIN_SCALE_YI) -> list[EtfRo
     return rows
 
 
+def _sina_symbol(fund_code: str) -> str:
+    """fund_code → sina symbol(加交易所前缀)。
+
+    沪市 ETF: 510xxx / 511xxx / 512xxx / 513xxx / 515xxx / 518xxx / 56xxxx / 588xxx → sh
+    深市 ETF: 159xxx / 16xxxx → sz
+    """
+    code = str(fund_code).strip()
+    if not code:
+        return code
+    first = code[0]
+    if first in {"5", "6", "7", "8", "9"}:
+        return f"sh{code}"
+    return f"sz{code}"
+
+
+def _fetch_via_sina(fund_code: str, start_date: date, end_date: date) -> pd.DataFrame:
+    import akshare as ak
+    symbol = _sina_symbol(fund_code)
+    df = ak.fund_etf_hist_sina(symbol=symbol)
+    if df is None or df.empty:
+        return pd.DataFrame()
+    df = df.rename(columns={"date": "trade_date", "close": "nav"})
+    df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+    df = df[(df["trade_date"] >= start_date) & (df["trade_date"] <= end_date)]
+    df["fund_code"] = fund_code
+    df["nav"] = pd.to_numeric(df["nav"], errors="coerce")
+    return df[["fund_code", "trade_date", "nav"]].dropna()
+
+
+def _fetch_via_eastmoney(fund_code: str, start_date: date, end_date: date) -> pd.DataFrame:
+    import akshare as ak
+    s = start_date.strftime("%Y%m%d")
+    e = end_date.strftime("%Y%m%d")
+    df = ak.fund_etf_hist_em(symbol=fund_code, period="daily", start_date=s, end_date=e)
+    if df is None or df.empty:
+        return pd.DataFrame()
+    df = df.rename(columns={"日期": "trade_date", "收盘": "nav"})
+    df["fund_code"] = fund_code
+    df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+    df["nav"] = pd.to_numeric(df["nav"], errors="coerce")
+    return df[["fund_code", "trade_date", "nav"]].dropna()
+
+
 def fetch_etf_history(
     fund_code: str,
     *,
     start_date: date,
     end_date: date,
     max_retries: int = NAV_MAX_RETRIES,
+    source_order: tuple[str, ...] = ("sina", "eastmoney"),
 ) -> pd.DataFrame:
-    """单只 ETF 历史日线 - 带重试 + 指数退避(对抗 eastmoney 反爬)。"""
+    """单只 ETF 历史日线 - 多源 fallback + 带重试。
+
+    sina 是 primary(2025-05 实测 eastmoney 反爬熔断时 sina 仍正常),
+    eastmoney 是 fallback。任一源拿到数据即返回。
+    """
     import time
     _disable_proxy()
-    import akshare as ak
 
-    s = start_date.strftime("%Y%m%d")
-    e = end_date.strftime("%Y%m%d")
     last_exc: Exception | None = None
-    for attempt in range(max_retries):
-        try:
-            df = ak.fund_etf_hist_em(symbol=fund_code, period="daily",
-                                     start_date=s, end_date=e)
-            if df is None or df.empty:
-                return pd.DataFrame()
-            df = df.rename(columns={"日期": "trade_date", "收盘": "nav"})
-            df["fund_code"] = fund_code
-            df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
-            df["nav"] = pd.to_numeric(df["nav"], errors="coerce")
-            return df[["fund_code", "trade_date", "nav"]].dropna()
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            if attempt < max_retries - 1:
-                wait = NAV_RETRY_BACKOFF_SEC * (2 ** attempt)
-                logger.debug(f"{fund_code} hist attempt {attempt+1}/{max_retries} failed, retry in {wait}s")
-                time.sleep(wait)
-    logger.warning(f"{fund_code} hist failed after {max_retries} retries: {last_exc}")
+    for src in source_order:
+        fn = _fetch_via_sina if src == "sina" else _fetch_via_eastmoney
+        for attempt in range(max_retries):
+            try:
+                df = fn(fund_code, start_date, end_date)
+                if not df.empty:
+                    return df
+                break  # 空结果不重试,直接换下一个源
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt < max_retries - 1:
+                    wait = NAV_RETRY_BACKOFF_SEC * (2 ** attempt)
+                    logger.debug(f"{fund_code} {src} attempt {attempt+1}/{max_retries} failed, retry in {wait}s")
+                    time.sleep(wait)
+                else:
+                    logger.debug(f"{fund_code} {src} exhausted retries, falling back")
+    logger.warning(f"{fund_code} hist failed in all sources ({source_order}): {last_exc}")
     return pd.DataFrame()
 
 

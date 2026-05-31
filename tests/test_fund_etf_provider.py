@@ -92,3 +92,57 @@ def test_persist_nav_batch_upserts():
         "SELECT nav FROM fund_nav WHERE fund_code='510300' ORDER BY trade_date"
     ).fetchall()
     assert rows == [(9.99,), (9.88,)]
+
+
+def test_sina_symbol_prefix_routing():
+    """sh/sz 前缀路由。"""
+    from src.data_pipeline.fund_etf_provider import _sina_symbol
+    assert _sina_symbol("510300") == "sh510300"  # 沪市
+    assert _sina_symbol("588000") == "sh588000"  # 科创板 ETF
+    assert _sina_symbol("159919") == "sz159919"  # 深市
+    assert _sina_symbol("163406") == "sz163406"  # 深市 LOF
+
+
+def test_fetch_etf_history_falls_back_when_primary_returns_empty(monkeypatch):
+    """primary 返回空,fallback 应被调用。"""
+    from datetime import date
+
+    import pandas as pd
+
+    from src.data_pipeline import fund_etf_provider
+
+    calls = []
+    def empty_sina(code, s, e):
+        calls.append("sina")
+        return pd.DataFrame()
+    def good_em(code, s, e):
+        calls.append("em")
+        return pd.DataFrame([{"fund_code": code, "trade_date": date(2026, 5, 29), "nav": 1.0}])
+    monkeypatch.setattr(fund_etf_provider, "_fetch_via_sina", empty_sina)
+    monkeypatch.setattr(fund_etf_provider, "_fetch_via_eastmoney", good_em)
+
+    df = fund_etf_provider.fetch_etf_history("510300", start_date=date(2026, 5, 1), end_date=date(2026, 5, 30))
+    assert not df.empty
+    assert calls == ["sina", "em"]
+
+
+def test_fetch_etf_history_returns_primary_when_available(monkeypatch):
+    from datetime import date
+
+    import pandas as pd
+
+    from src.data_pipeline import fund_etf_provider
+
+    calls = []
+    def good_sina(code, s, e):
+        calls.append("sina")
+        return pd.DataFrame([{"fund_code": code, "trade_date": date(2026, 5, 29), "nav": 1.0}])
+    def boom_em(code, s, e):
+        calls.append("em")
+        raise RuntimeError("should not reach")
+    monkeypatch.setattr(fund_etf_provider, "_fetch_via_sina", good_sina)
+    monkeypatch.setattr(fund_etf_provider, "_fetch_via_eastmoney", boom_em)
+
+    df = fund_etf_provider.fetch_etf_history("510300", start_date=date(2026, 5, 1), end_date=date(2026, 5, 30))
+    assert not df.empty
+    assert calls == ["sina"]  # 没碰 eastmoney
