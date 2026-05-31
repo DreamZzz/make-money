@@ -147,3 +147,118 @@ def test_empty_candidates_returns_friendly_advice(monkeypatch):
     assert snap.in_window == []
     assert snap.watch_high_value == []
     assert "无候选" in snap.overall_advice or "未填充" in snap.overall_advice
+
+
+# ============ F4-v2 同跟踪指数智能比较测试 ============
+
+
+def _seed_active_holding(conn, fund_code, *, tracking, sub, shares=1000, nav=1.0,
+                         total_score=None, return_3m=None):
+    conn.execute(
+        "INSERT INTO fund_info (fund_code, name, fund_type, tracking_index, etf_subcategory, market, currency, enabled) "
+        "VALUES (?, ?, 'ETF', ?, ?, 'CN', 'CNY', TRUE)",
+        [fund_code, fund_code, tracking, sub],
+    )
+    conn.execute(
+        "INSERT INTO index_fund_snapshots (snapshot_id, snapshot_date, fund_code, shares, cost_amount) "
+        "VALUES (?, DATE '2026-05-29', ?, ?, 10000)",
+        [f"S-{fund_code}", fund_code, shares],
+    )
+    conn.execute(
+        "INSERT INTO fund_nav (fund_code, trade_date, nav) VALUES (?, DATE '2026-05-29', ?)",
+        [fund_code, nav],
+    )
+    if total_score is not None:
+        conn.execute(
+            "INSERT INTO fund_screening_results (eval_date, fund_code, total_score, return_3m) "
+            "VALUES (DATE '2026-05-29', ?, ?, ?)",
+            [fund_code, total_score, return_3m],
+        )
+
+
+def _seed_macro_account(conn, *, exposure=0.87, account_total=1_000_000):
+    conn.execute("INSERT INTO market_exposure (trade_date, benchmark, target_exposure) "
+                 "VALUES (DATE '2026-05-29', '000300', ?)", [exposure])
+    conn.execute(
+        "INSERT INTO account_daily (account_id, trade_date, cash, position_value, total_value, "
+        "net_contribution, nav, daily_return, drawdown) "
+        "VALUES ('default', DATE '2026-05-29', 0, 0, ?, ?, 1.0, 0, 0)",
+        [account_total, account_total],
+    )
+
+
+def _seed_m4(conn, fund_code, weight):
+    conn.execute("INSERT INTO index_allocation (trade_date, fund_code, weight) "
+                 "VALUES (DATE '2026-05-29', ?, ?)", [fund_code, weight])
+
+
+def test_v2_exited_holding_allows_overlap_tracking(monkeypatch):
+    """持仓 exited → 同 tracking 的候选允许推荐,thesis 标"持仓已退出可重入"。"""
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    _patch_watchlist(monkeypatch, exited_codes=["GONE"])
+    _seed_active_holding(conn, "GONE", tracking="000905", sub="broad")
+    _seed_screening(conn, [
+        ("NEW905", "新中证500", "broad", "000905", "in_window", 90),
+    ])
+    snap = build_recommendations(conn, top_in_window=10)
+    codes = [r.fund_code for r in snap.in_window]
+    assert "NEW905" in codes
+    rec = next(r for r in snap.in_window if r.fund_code == "NEW905")
+    assert "持仓已退出" in rec.thesis or "可重新进入" in rec.thesis
+
+
+def test_v2_active_underweight_allows_overlap_with_补仓_thesis(monkeypatch):
+    """active 持仓在该 tracking 欠配 → 候选保留,thesis 含'欠配补仓'。"""
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    _patch_watchlist(monkeypatch)
+    _seed_macro_account(conn, exposure=0.87, account_total=1_000_000)
+    # 持仓 1000 股 × 1.0 nav = ¥1000;account 100 万 × 87% × M4 0.30 = ¥261,000 → 严重欠配
+    _seed_active_holding(conn, "HOLD905", tracking="000905", sub="broad",
+                         shares=1000, nav=1.0)
+    _seed_m4(conn, "CAND905", 0.30)  # 候选的 M4 权重
+    _seed_screening(conn, [
+        ("CAND905", "候选中证500", "broad", "000905", "in_window", 80),
+    ])
+    snap = build_recommendations(conn, top_in_window=10)
+    codes = [r.fund_code for r in snap.in_window]
+    assert "CAND905" in codes
+    rec = next(r for r in snap.in_window if r.fund_code == "CAND905")
+    assert "欠配" in rec.thesis or "补仓" in rec.thesis
+
+
+def test_v2_candidate_beats_holding_score_allows_overlap(monkeypatch):
+    """候选 total_score 比持仓 + 5 分以上 → 允许,thesis 含'超额表现'。"""
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    _patch_watchlist(monkeypatch)
+    # 持仓有 scanner 分 60;候选 80;差 20 > 5
+    _seed_active_holding(conn, "OLD300", tracking="000300", sub="broad",
+                         shares=10, nav=1.0, total_score=60.0)
+    _seed_screening(conn, [
+        ("NEW300", "更强 300", "broad", "000300", "in_window", 80),
+    ])
+    snap = build_recommendations(conn, top_in_window=10)
+    codes = [r.fund_code for r in snap.in_window]
+    assert "NEW300" in codes
+    rec = next(r for r in snap.in_window if r.fund_code == "NEW300")
+    assert "超额" in rec.thesis or "综合分" in rec.thesis
+
+
+def test_v2_active_well_supplied_and_no_score_advantage_still_excludes(monkeypatch):
+    """active 持仓充足(无欠配)+ 候选分不显著高 → 仍排除。"""
+    conn = duckdb.connect(":memory:")
+    init_db(conn)
+    _patch_watchlist(monkeypatch)
+    _seed_macro_account(conn, exposure=0.87, account_total=10_000)
+    # 持 5000 股 × nav 1.0 = ¥5000;account 1万 × 87% × M4 0.30 = ¥2610 → 已超配,不欠
+    _seed_active_holding(conn, "HOLD300", tracking="000300", sub="broad",
+                         shares=5000, nav=1.0, total_score=78.0)
+    _seed_m4(conn, "CAND300", 0.30)
+    _seed_screening(conn, [
+        ("CAND300", "候选 300", "broad", "000300", "in_window", 80),  # 仅高 2,< DELTA 5
+    ])
+    snap = build_recommendations(conn, top_in_window=10)
+    codes = [r.fund_code for r in snap.in_window]
+    assert "CAND300" not in codes
