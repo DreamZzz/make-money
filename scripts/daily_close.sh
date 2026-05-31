@@ -167,6 +167,10 @@ echo "16/18 虚拟账户竞赛前向执行..."
 echo "17/18 执行链健康检查..."
 "$PYTHON" -m src.portfolio.chain_health --days 5 || true
 
+# 17b. 候选池 ETF nav 增量更新（G4: etf_scan 数据源每日同步,近 5 日窗口覆盖周末/节假日盲区）
+echo "17b/18 候选池 ETF nav 增量更新..."
+"$PYTHON" -m src.data_pipeline.fund_etf_provider fetch --nav-only --lookback-days 5 || true
+
 # 18. 基金闭环（G1：scanner 六维评分 + 持仓评估 + 持仓告警 + 推荐;非阻塞）
 echo "18/18 基金闭环（scanner + monitor + recommendations）..."
 "$PYTHON" -m src.funds.daily || true
