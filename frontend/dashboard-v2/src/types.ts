@@ -249,6 +249,7 @@ export type PortfolioFundRow = {
   target_value: number | null;
   delta_amount: number | null;
   risk_tags: string[];
+  net_action?: FundNetAction;
 };
 
 export type PortfolioFundsPanel = {
@@ -359,6 +360,22 @@ export type TournamentSnapshot = {
   error?: string;
 };
 
+export type FundNetAction = {
+  net_action:
+    | "EXIT_NOW"
+    | "HOLD_WAIT_TREND"
+    | "ADD_TO_TARGET"
+    | "REDUCE_TO_TARGET"
+    | "CONSIDER_SWITCH"
+    | "ADD_WINDOW_OPEN"
+    | "HOLD_AS_PLANNED"
+    | "NO_DATA"
+    | string;
+  headline: string;
+  reasoning: string;
+  primary_alert_types: string[];
+};
+
 export type FundEvaluation = {
   eval_date: string | null;
   fund_code: string;
@@ -367,6 +384,7 @@ export type FundEvaluation = {
   tracking_index_name: string | null;
   category: string;
   intent: string;
+  net_action?: FundNetAction;
   snapshot_date: string | null;
   snapshot_stale_days: number | null;
   shares: number | null;

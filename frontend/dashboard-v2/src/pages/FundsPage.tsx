@@ -1,8 +1,19 @@
 import { useState } from "react";
 
 import { SnapshotForm } from "../components/SnapshotForm";
-import type { FundEvaluation, FundHoldingAlert, FundRecommendation, FundsSnapshot } from "../types";
+import type { FundEvaluation, FundHoldingAlert, FundNetAction, FundRecommendation, FundsSnapshot } from "../types";
 import { formatCurrency, formatPercent } from "../utils";
+
+const NET_ACTION_META: Record<string, { label: string; color: string; bg: string }> = {
+  EXIT_NOW:          { label: "EXIT NOW",          color: "#ff6b6b", bg: "rgba(255,107,107,0.12)" },
+  HOLD_WAIT_TREND:   { label: "HOLD · 等趋势",     color: "#fbbf24", bg: "rgba(251,191,36,0.10)" },
+  ADD_TO_TARGET:     { label: "ADD · 补到目标",    color: "#4ade80", bg: "rgba(74,222,128,0.10)" },
+  REDUCE_TO_TARGET:  { label: "REDUCE · 回撤到目标", color: "#fb7185", bg: "rgba(251,113,133,0.10)" },
+  CONSIDER_SWITCH:   { label: "SWITCH · 考虑替代品", color: "#60a5fa", bg: "rgba(96,165,250,0.10)" },
+  ADD_WINDOW_OPEN:   { label: "ADD · 窗口期开启",   color: "#4ade80", bg: "rgba(74,222,128,0.10)" },
+  HOLD_AS_PLANNED:   { label: "HOLD · 按计划",     color: "#94a3b8", bg: "rgba(148,163,184,0.06)" },
+  NO_DATA:           { label: "NO DATA",            color: "#94a3b8", bg: "rgba(148,163,184,0.06)" },
+};
 
 type Props = { data: FundsSnapshot };
 
@@ -259,6 +270,7 @@ function FundCard({ f, alerts = [], onUpdateSnapshot }: { f: FundEvaluation; ale
         <CategoryBadge category={f.category} />
         <IntentBadge intent={f.intent} />
       </div>
+      {f.net_action ? <NetActionBanner na={f.net_action} /> : null}
       <div style={{ marginTop: 10, fontSize: 13, fontFamily: "var(--font-mono)", lineHeight: 1.7 }}>
         <KV label="跟踪">{f.tracking_index_name || f.tracking_index}</KV>
         <KV label="持仓">
@@ -356,6 +368,27 @@ function FundCard({ f, alerts = [], onUpdateSnapshot }: { f: FundEvaluation; ale
         </button>
       ) : null}
     </section>
+  );
+}
+
+function NetActionBanner({ na }: { na: FundNetAction }) {
+  const meta = NET_ACTION_META[na.net_action] || NET_ACTION_META.HOLD_AS_PLANNED;
+  return (
+    <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 4,
+                  background: meta.bg, borderLeft: `3px solid ${meta.color}` }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+        <strong style={{ fontFamily: "var(--font-display)", fontSize: 11, letterSpacing: "0.06em",
+                         color: meta.color }}>
+          今日合成 · {meta.label}
+        </strong>
+        {na.primary_alert_types.length > 0 ? (
+          <small style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 10 }}>
+            ({na.primary_alert_types.length} 个告警参与)
+          </small>
+        ) : null}
+      </div>
+      <div style={{ fontSize: 12, lineHeight: 1.5 }}>{na.headline}</div>
+    </div>
   );
 }
 

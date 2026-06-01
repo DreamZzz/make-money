@@ -107,9 +107,9 @@ function FundsPanel({ fp, onNavigate }: { fp: PortfolioFundsPanel; onNavigate?: 
         <table className="data-table" style={{ marginTop: 10 }}>
           <thead>
             <tr>
-              <th>代码</th><th>名称</th><th>类别</th><th>状态</th>
-              <th>持仓市值</th><th>累计收益</th><th>持有</th>
-              <th>Action</th><th>应执行</th><th>Risk</th>
+              <th>代码</th><th>名称</th><th>类别</th>
+              <th>持仓市值</th><th>累计收益</th>
+              <th>今日合成</th><th>应执行</th><th>Risk</th>
             </tr>
           </thead>
           <tbody>
@@ -133,23 +133,46 @@ function FundsPanel({ fp, onNavigate }: { fp: PortfolioFundsPanel; onNavigate?: 
   );
 }
 
+const PORTFOLIO_NET_COLOR: Record<string, string> = {
+  EXIT_NOW: "#ff6b6b",
+  HOLD_WAIT_TREND: "#fbbf24",
+  ADD_TO_TARGET: "#4ade80",
+  REDUCE_TO_TARGET: "#fb7185",
+  CONSIDER_SWITCH: "#60a5fa",
+  ADD_WINDOW_OPEN: "#4ade80",
+  HOLD_AS_PLANNED: "#94a3b8",
+};
+
 function FundRow({ f }: { f: PortfolioFundRow }) {
   const exited = f.intent === "exited";
+  const na = f.net_action;
+  const naColor = na ? (PORTFOLIO_NET_COLOR[na.net_action] || "#94a3b8") : "#94a3b8";
   return (
     <tr style={exited ? { opacity: 0.55 } : {}}>
       <td><strong>{f.fund_code}</strong></td>
-      <td><small>{f.fund_name || "—"}</small></td>
+      <td>
+        <small>{f.fund_name || "—"}</small>
+        <br />
+        <small style={{ color: "var(--muted)", fontSize: 10 }}>{f.intent}</small>
+      </td>
       <td><small style={{ color: "var(--muted)" }}>{f.category}</small></td>
-      <td><small>{f.intent}</small></td>
       <td>{f.current_value !== null ? formatCurrency(f.current_value) : "—"}</td>
       <td>{f.return_pct !== null
         ? <span style={{ color: f.return_pct >= 0 ? "var(--positive, #4ade80)" : "var(--negative, #ff6b6b)" }}>
             {formatPercent(f.return_pct)}
           </span>
         : "—"}</td>
-      <td>{f.holding_days !== null ? `${f.holding_days}d` : "—"}</td>
-      <td><span className={`action ${f.action === "ADD" || f.action === "BUY" ? "action--add"
-                  : f.action === "REDUCE" ? "action--reduce" : "action--hold"}`}>{f.action}</span></td>
+      <td style={{ maxWidth: 280 }}>
+        {na ? (
+          <>
+            <strong style={{ color: naColor, fontSize: 11, fontFamily: "var(--font-mono)" }}>
+              {na.net_action}
+            </strong>
+            <br />
+            <small style={{ color: "var(--muted)", fontSize: 11, lineHeight: 1.4 }}>{na.headline}</small>
+          </>
+        ) : "—"}
+      </td>
       <td>{f.delta_amount !== null && Math.abs(f.delta_amount) > 1
         ? <span style={{ color: f.delta_amount > 0 ? "var(--positive, #4ade80)" : "var(--negative, #ff6b6b)" }}>
             {f.delta_amount > 0 ? "+" : ""}{formatCurrency(f.delta_amount)}

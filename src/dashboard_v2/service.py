@@ -243,11 +243,12 @@ class DashboardV2Service:
             }
 
     def build_funds_snapshot(self) -> dict[str, Any]:
-        """D2 + F3 + F4: 基金评估面板 + 严格告警 + 候选推荐 三大区。"""
+        """D2 + F3 + F4 + F4-v3: 基金评估 + 严格告警 + 净行动合成 + 候选推荐。"""
         from dataclasses import asdict
 
         from src.funds.evaluation import evaluate_funds
         from src.funds.monitoring import monitor_holdings
+        from src.funds.net_action import derive_net_action
         from src.funds.recommendations import build_recommendations
 
         with self._managed_connection(read_only=True) as conn:
@@ -259,6 +260,10 @@ class DashboardV2Service:
             equity_exposure = rows[0]["equity_exposure"] if rows else None
             advice = _build_funds_overall_advice(rows, account_total, equity_exposure)
             holding_alerts = [asdict(a) for a in monitor_holdings(conn)]
+            # F4-v3: 每支基金合成 net_action,直接挂到 funds 行
+            for r in rows:
+                fund_alerts = [a for a in holding_alerts if a.get("fund_code") == r["fund_code"]]
+                r["net_action"] = asdict(derive_net_action(fund_alerts))
             recommendations = asdict(build_recommendations(conn))
             return {
                 "eval_date": rows[0]["eval_date"].isoformat() if rows and rows[0].get("eval_date") else None,
@@ -2028,20 +2033,23 @@ def _load_scheduler_watchdog_state(path: Path | None = None) -> dict[str, Any]:
 
 
 def _build_portfolio_funds_panel(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
-    """P3: Portfolio 页基金区 — 持仓基金简表 + alternative_available 单独列。"""
+    """P3 + F4-v3: Portfolio 页基金区 — 持仓基金简表(含 net_action) + alternative 单独列。"""
     from dataclasses import asdict
 
     from src.funds.evaluation import evaluate_funds
     from src.funds.monitoring import monitor_holdings
+    from src.funds.net_action import derive_net_action
     try:
         evals = evaluate_funds(conn)
         alerts = monitor_holdings(conn)
     except Exception:  # noqa: BLE001
         return {"available": False, "funds": [], "alerts": [], "alternatives": []}
-    # 简化:只取关键字段做表
+    alerts_dict = [asdict(a) for a in alerts]
     funds = []
     for e in evals:
         d = asdict(e)
+        fund_alerts = [a for a in alerts_dict if a.get("fund_code") == d["fund_code"]]
+        net = asdict(derive_net_action(fund_alerts))
         funds.append({
             "fund_code": d.get("fund_code"),
             "fund_name": d.get("fund_name"),
@@ -2054,8 +2062,8 @@ def _build_portfolio_funds_panel(conn: duckdb.DuckDBPyConnection) -> dict[str, A
             "target_value": d.get("target_value"),
             "delta_amount": d.get("delta_amount"),
             "risk_tags": d.get("risk_tags") or [],
+            "net_action": net,
         })
-    alerts_dict = [asdict(a) for a in alerts]
     alternatives = [a for a in alerts_dict if a.get("alert_type") == "alternative_available"]
     non_alt = [a for a in alerts_dict if a.get("alert_type") != "alternative_available"]
     return {
