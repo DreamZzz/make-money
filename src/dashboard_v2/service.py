@@ -75,6 +75,7 @@ class DashboardV2Service:
                 "operation_summary": operation_summary,
                 "blockers": blockers,
                 "next_action": next_action,
+                "funds_summary": _build_funds_summary(conn),
                 "evidence": evidence,
             }
 
@@ -160,6 +161,7 @@ class DashboardV2Service:
                     "insights": _build_exposure_insights(exposure, holdings),
                 },
                 "signal_outcomes": outcomes,
+                "funds_panel": _build_portfolio_funds_panel(conn),
                 "evidence": {
                     "position_date": holdings[0]["trade_date"] if holdings else None,
                     "benchmark": "000300",
@@ -2022,6 +2024,93 @@ def _load_scheduler_watchdog_state(path: Path | None = None) -> dict[str, Any]:
         "version": data.get("version") or 1,
         "updated_at": data.get("updated_at"),
         "jobs": jobs,
+    }
+
+
+def _build_portfolio_funds_panel(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+    """P3: Portfolio 页基金区 — 持仓基金简表 + alternative_available 单独列。"""
+    from dataclasses import asdict
+
+    from src.funds.evaluation import evaluate_funds
+    from src.funds.monitoring import monitor_holdings
+    try:
+        evals = evaluate_funds(conn)
+        alerts = monitor_holdings(conn)
+    except Exception:  # noqa: BLE001
+        return {"available": False, "funds": [], "alerts": [], "alternatives": []}
+    # 简化:只取关键字段做表
+    funds = []
+    for e in evals:
+        d = asdict(e)
+        funds.append({
+            "fund_code": d.get("fund_code"),
+            "fund_name": d.get("fund_name"),
+            "category": d.get("category"),
+            "intent": d.get("intent"),
+            "current_value": d.get("current_value"),
+            "return_pct": d.get("return_pct"),
+            "holding_days": d.get("holding_days"),
+            "action": d.get("action"),
+            "target_value": d.get("target_value"),
+            "delta_amount": d.get("delta_amount"),
+            "risk_tags": d.get("risk_tags") or [],
+        })
+    alerts_dict = [asdict(a) for a in alerts]
+    alternatives = [a for a in alerts_dict if a.get("alert_type") == "alternative_available"]
+    non_alt = [a for a in alerts_dict if a.get("alert_type") != "alternative_available"]
+    return {
+        "available": True,
+        "funds": funds,
+        "alerts": non_alt,
+        "alternatives": alternatives,
+    }
+
+
+def _build_funds_summary(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+    """H2: TodayPage 用的轻量 funds 摘要 — 计数+headline,无大数据。"""
+    if not _table_exists(conn, "fund_screening_results"):
+        return {"available": False, "headline": "扫描器尚未跑过"}
+    counts_rows = conn.execute(
+        """
+        SELECT signal_tag, COUNT(*) AS n FROM fund_screening_results
+        WHERE eval_date = (SELECT MAX(eval_date) FROM fund_screening_results)
+        GROUP BY signal_tag
+        """
+    ).fetchall()
+    counts = {tag: int(n) for tag, n in counts_rows}
+    alert_dist: dict[str, int] = {}
+    if _table_exists(conn, "fund_holding_alerts"):
+        alert_rows = conn.execute(
+            "SELECT alert_level, COUNT(*) FROM fund_holding_alerts "
+            "WHERE eval_date = (SELECT MAX(eval_date) FROM fund_holding_alerts) "
+            "GROUP BY alert_level"
+        ).fetchall()
+        alert_dist = {lv: int(n) for lv, n in alert_rows}
+    in_window = counts.get("in_window", 0)
+    oversold = counts.get("oversold_candidate", 0)
+    watch = counts.get("watch_high_value", 0)
+    critical = alert_dist.get("critical", 0)
+    warning = alert_dist.get("warning", 0)
+    parts: list[str] = []
+    if in_window:
+        parts.append(f"{in_window} 支可加仓")
+    if oversold:
+        parts.append(f"{oversold} 支超跌候选")
+    if critical:
+        parts.append(f"{critical} 严重告警")
+    elif warning:
+        parts.append(f"{warning} 警告")
+    headline = " / ".join(parts) if parts else "今日 Core 无窗口期/告警"
+    return {
+        "available": True,
+        "in_window": in_window,
+        "oversold": oversold,
+        "watch": watch,
+        "critical_alerts": critical,
+        "warning_alerts": warning,
+        "info_alerts": alert_dist.get("info", 0),
+        "headline": headline,
+        "eval_date": str(conn.execute("SELECT MAX(eval_date) FROM fund_screening_results").fetchone()[0] or ""),
     }
 
 

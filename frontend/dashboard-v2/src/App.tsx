@@ -74,10 +74,10 @@ export function App() {
       return today ? <TodayPage data={today} onNavigate={navigate} /> : <LoadingPanel message="正在加载今日行动" />;
     }
     if (next === "/rebalance") {
-      return rebalance ? <RebalancePage data={rebalance} /> : <LoadingPanel message="正在加载调仓计划" />;
+      return rebalance ? <RebalancePage data={rebalance} onNavigate={navigate} /> : <LoadingPanel message="正在加载调仓计划" />;
     }
     if (next === "/portfolio") {
-      return portfolio ? <PortfolioPage data={portfolio} /> : <LoadingPanel message="正在加载组合体检" />;
+      return portfolio ? <PortfolioPage data={portfolio} onNavigate={navigate} /> : <LoadingPanel message="正在加载组合体检" />;
     }
     if (next === "/market") {
       return market ? <MarketPage data={market} /> : <LoadingPanel message="正在加载市场温度计" />;

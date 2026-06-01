@@ -3,7 +3,7 @@ import { ArrowRight, ChevronRight } from "lucide-react";
 import type { RouteKey } from "../components/AppShell";
 import { EvidenceDrawer } from "../components/EvidenceDrawer";
 import { RiskAlertStack } from "../components/RiskAlertStack";
-import type { TodayMarket, TodaySnapshot } from "../types";
+import type { TodayFundsSummary, TodayMarket, TodaySnapshot } from "../types";
 import { formatCurrency, formatNumber, formatPercent } from "../utils";
 
 type Props = {
@@ -40,6 +40,7 @@ export function TodayPage({ data, onNavigate }: Props) {
 
         {market?.state ? <MarketStrip market={market} /> : null}
         <DecisionCard market={market} onNavigate={onNavigate} />
+        {data.funds_summary?.available ? <FundsSummaryCard fs={data.funds_summary} onNavigate={onNavigate} /> : null}
 
         <div className="gate-row">
           <span className={`status-dot status-dot--${blocking ? "bad" : data.health.status === "degraded" ? "warn" : "ok"}`} />
@@ -90,6 +91,46 @@ export function TodayPage({ data, onNavigate }: Props) {
         </section>
       </section>
       <EvidenceDrawer evidence={data.evidence} />
+    </div>
+  );
+}
+
+function FundsSummaryCard({ fs, onNavigate }: { fs: TodayFundsSummary; onNavigate: (r: RouteKey) => void }) {
+  const hasCritical = (fs.critical_alerts || 0) > 0;
+  const hasInWindow = (fs.in_window || 0) > 0;
+  const cls = hasCritical ? "action--reduce" : hasInWindow ? "action--add" : "action--hold";
+  return (
+    <section className="panel" style={{ marginTop: 14 }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <h2 style={{ margin: 0 }}>Core 基金 (今日)</h2>
+        <button className="secondary-link" onClick={() => onNavigate("/funds")} type="button">
+          打开 Core 基金 <ArrowRight size={14} />
+        </button>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 8, flexWrap: "wrap" }}>
+        <span className={`action ${cls}`} style={{ fontFamily: "var(--font-display)", padding: "4px 10px", borderRadius: 4, border: "1px solid var(--line-strong)" }}>
+          {hasCritical ? "需关注" : hasInWindow ? "有可加仓" : "稳定"}
+        </span>
+        <strong style={{ fontFamily: "var(--font-mono)", fontSize: 14 }}>{fs.headline}</strong>
+        {fs.eval_date ? <small style={{ color: "var(--muted)" }}>as of {fs.eval_date}</small> : null}
+      </div>
+      <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 10, fontFamily: "var(--font-mono)", fontSize: 12 }}>
+        <KV label="in_window">{fs.in_window ?? 0}</KV>
+        <KV label="oversold">{fs.oversold ?? 0}</KV>
+        <KV label="watch">{fs.watch ?? 0}</KV>
+        <KV label="severe">{fs.critical_alerts ?? 0}</KV>
+        <KV label="warning">{fs.warning_alerts ?? 0}</KV>
+        <KV label="info">{fs.info_alerts ?? 0}</KV>
+      </div>
+    </section>
+  );
+}
+
+function KV({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div style={{ color: "var(--muted)", fontSize: 11 }}>{label}</div>
+      <div style={{ fontSize: 18 }}>{children}</div>
     </div>
   );
 }

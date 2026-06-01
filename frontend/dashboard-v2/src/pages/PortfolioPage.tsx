@@ -1,14 +1,16 @@
+import type { RouteKey } from "../components/AppShell";
 import { DataTable } from "../components/DataTable";
 import { CapitalBreakdown } from "../components/CapitalBreakdown";
 import { RegimePolicyPanel } from "../components/RegimePolicyPanel";
-import type { PortfolioSnapshot, RiskAlert } from "../types";
+import type { PortfolioFundRow, PortfolioFundsPanel, PortfolioSnapshot, RiskAlert } from "../types";
 import { fieldLabel, formatCurrency, formatPercent, formatValueForField, text } from "../utils";
 
 type Props = {
   data: PortfolioSnapshot;
+  onNavigate?: (route: RouteKey) => void;
 };
 
-export function PortfolioPage({ data }: Props) {
+export function PortfolioPage({ data, onNavigate }: Props) {
   return (
     <section className="page-main">
       <div className="page-title-row">
@@ -50,6 +52,7 @@ export function PortfolioPage({ data }: Props) {
         <h2>暴露解释</h2>
         <ExposureInsightCards insights={data.exposure.insights || []} />
       </section>
+      {data.funds_panel?.available ? <FundsPanel fp={data.funds_panel} onNavigate={onNavigate} /> : null}
       <section className="panel">
         <h2>当前持仓</h2>
         <DataTable
@@ -78,6 +81,82 @@ export function PortfolioPage({ data }: Props) {
         <SignalOutcomePanel outcomes={data.signal_outcomes} />
       </section>
     </section>
+  );
+}
+
+function FundsPanel({ fp, onNavigate }: { fp: PortfolioFundsPanel; onNavigate?: (r: RouteKey) => void }) {
+  const sevByLevel = (lv: string) => fp.alerts.filter((a: any) => a.alert_level === lv).length;
+  return (
+    <section className="panel" style={{ marginTop: 10 }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <h2 style={{ margin: 0 }}>基金持仓 (Core)</h2>
+        {onNavigate ? (
+          <button className="secondary-link" onClick={() => onNavigate("/funds")} type="button">
+            打开 Core 基金 →
+          </button>
+        ) : null}
+      </div>
+      <div style={{ display: "flex", gap: 18, marginTop: 6, color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 12 }}>
+        <span>持仓 <strong style={{ color: "var(--ink)" }}>{fp.funds.length}</strong> 支</span>
+        <span>严重 <strong style={{ color: "var(--negative, #ff6b6b)" }}>{sevByLevel("critical")}</strong></span>
+        <span>警告 <strong style={{ color: "#fbbf24" }}>{sevByLevel("warning")}</strong></span>
+        <span>提示 <strong>{sevByLevel("info")}</strong></span>
+        <span>更优替代 <strong style={{ color: "var(--accent, #60a5fa)" }}>{fp.alternatives.length}</strong></span>
+      </div>
+      {fp.funds.length > 0 ? (
+        <table className="data-table" style={{ marginTop: 10 }}>
+          <thead>
+            <tr>
+              <th>代码</th><th>名称</th><th>类别</th><th>状态</th>
+              <th>持仓市值</th><th>累计收益</th><th>持有</th>
+              <th>Action</th><th>应执行</th><th>Risk</th>
+            </tr>
+          </thead>
+          <tbody>
+            {fp.funds.map((f) => <FundRow key={f.fund_code} f={f} />)}
+          </tbody>
+        </table>
+      ) : null}
+      {fp.alternatives.length > 0 ? (
+        <div style={{ marginTop: 12, padding: 10, borderRadius: 6, background: "var(--surface-elevated, rgba(96,165,250,0.06))", borderLeft: "3px solid var(--accent, #60a5fa)" }}>
+          <strong style={{ fontSize: 13 }}>同跟踪指数有更强 ETF (Top 替代):</strong>
+          <ul style={{ margin: "6px 0 0 18px", padding: 0, color: "var(--muted)", lineHeight: 1.7, fontSize: 12 }}>
+            {fp.alternatives.map((a: any, i) => (
+              <li key={i}>
+                <strong style={{ fontFamily: "var(--font-mono)" }}>{a.fund_code}</strong>: {a.headline}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function FundRow({ f }: { f: PortfolioFundRow }) {
+  const exited = f.intent === "exited";
+  return (
+    <tr style={exited ? { opacity: 0.55 } : {}}>
+      <td><strong>{f.fund_code}</strong></td>
+      <td><small>{f.fund_name || "—"}</small></td>
+      <td><small style={{ color: "var(--muted)" }}>{f.category}</small></td>
+      <td><small>{f.intent}</small></td>
+      <td>{f.current_value !== null ? formatCurrency(f.current_value) : "—"}</td>
+      <td>{f.return_pct !== null
+        ? <span style={{ color: f.return_pct >= 0 ? "var(--positive, #4ade80)" : "var(--negative, #ff6b6b)" }}>
+            {formatPercent(f.return_pct)}
+          </span>
+        : "—"}</td>
+      <td>{f.holding_days !== null ? `${f.holding_days}d` : "—"}</td>
+      <td><span className={`action ${f.action === "ADD" || f.action === "BUY" ? "action--add"
+                  : f.action === "REDUCE" ? "action--reduce" : "action--hold"}`}>{f.action}</span></td>
+      <td>{f.delta_amount !== null && Math.abs(f.delta_amount) > 1
+        ? <span style={{ color: f.delta_amount > 0 ? "var(--positive, #4ade80)" : "var(--negative, #ff6b6b)" }}>
+            {f.delta_amount > 0 ? "+" : ""}{formatCurrency(f.delta_amount)}
+          </span>
+        : "—"}</td>
+      <td><small style={{ color: "var(--muted)" }}>{f.risk_tags.filter(t => t !== "normal").join(",") || "—"}</small></td>
+    </tr>
   );
 }
 

@@ -1,3 +1,6 @@
+import { ArrowRight } from "lucide-react";
+
+import type { RouteKey } from "../components/AppShell";
 import { EvidenceDrawer } from "../components/EvidenceDrawer";
 import { CapitalBreakdown } from "../components/CapitalBreakdown";
 import { OperationSummary } from "../components/OperationSummary";
@@ -10,9 +13,13 @@ import { formatCurrency, formatInstrumentLabel, formatPercent, formatValueForFie
 
 type Props = {
   data: RebalanceSnapshot;
+  onNavigate?: (route: RouteKey) => void;
 };
 
-export function RebalancePage({ data }: Props) {
+export function RebalancePage({ data, onNavigate }: Props) {
+  const hasCoreItems = data.groups.executable.some((i) => i.sleeve === "core")
+    || data.groups.confirm.some((i) => i.sleeve === "core")
+    || (data.groups.budget ?? []).some((i) => i.sleeve === "core");
   return (
     <div className="page-grid page-grid--with-evidence page-grid--rebalance">
       <section className="page-main">
@@ -27,6 +34,15 @@ export function RebalancePage({ data }: Props) {
             <small>max(预算预留, 订单需现金) - 现金</small>
           </div>
         </div>
+        {hasCoreItems && onNavigate ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8, padding: "8px 12px",
+                        borderRadius: 6, border: "1px solid var(--line)", background: "var(--surface)" }}>
+            <small style={{ color: "var(--muted)" }}>看到 Core sleeve 调仓项? 查看每支基金详细评估和告警:</small>
+            <button className="secondary-link" onClick={() => onNavigate("/funds")} type="button">
+              打开 Core 基金 <ArrowRight size={14} />
+            </button>
+          </div>
+        ) : null}
         {data.budget_reason ? <BudgetReasonCard reason={data.budget_reason} /> : null}
         <OperationSummary summary={data.summary} />
         <RegimePolicyPanel policy={data.regime_policy} compact />

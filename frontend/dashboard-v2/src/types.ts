@@ -189,6 +189,18 @@ export type TodayMarket = {
   satellite_shadow_signals: number;
 };
 
+export type TodayFundsSummary = {
+  available: boolean;
+  headline: string;
+  eval_date?: string;
+  in_window?: number;
+  oversold?: number;
+  watch?: number;
+  critical_alerts?: number;
+  warning_alerts?: number;
+  info_alerts?: number;
+};
+
 export type TodaySnapshot = {
   trade_date: string | null;
   health: HealthState;
@@ -199,6 +211,7 @@ export type TodaySnapshot = {
   operation_summary: OperationSummaryData;
   blockers: RiskAlert[];
   next_action: { label: string; href?: string; enabled?: boolean };
+  funds_summary?: TodayFundsSummary;
   evidence: Record<string, unknown>;
 };
 
@@ -224,6 +237,27 @@ export type RebalanceSnapshot = {
   evidence: Record<string, unknown>;
 };
 
+export type PortfolioFundRow = {
+  fund_code: string;
+  fund_name: string | null;
+  category: string;
+  intent: string;
+  current_value: number | null;
+  return_pct: number | null;
+  holding_days: number | null;
+  action: string;
+  target_value: number | null;
+  delta_amount: number | null;
+  risk_tags: string[];
+};
+
+export type PortfolioFundsPanel = {
+  available: boolean;
+  funds: PortfolioFundRow[];
+  alerts: Record<string, unknown>[];
+  alternatives: Record<string, unknown>[];
+};
+
 export type PortfolioSnapshot = {
   account: Record<string, unknown>;
   capital?: CapitalBreakdown;
@@ -236,6 +270,7 @@ export type PortfolioSnapshot = {
     summary: Record<string, unknown>;
     insights?: Record<string, unknown>[];
   };
+  funds_panel?: PortfolioFundsPanel;
   signal_outcomes: {
     summary: Record<string, unknown>[];
     monthly?: Record<string, unknown>[];

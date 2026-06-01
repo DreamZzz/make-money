@@ -161,6 +161,7 @@ def _fallback_today(exc: Exception) -> dict[str, Any]:
             "message": health["messages"][0],
         }],
         "next_action": {"label": "查看数据健康", "href": "/health", "enabled": True},
+        "funds_summary": {"available": False, "headline": health["messages"][0]},
         "evidence": {"error": health["messages"][0]},
     }
 
@@ -205,6 +206,7 @@ def _fallback_portfolio(exc: Exception) -> dict[str, Any]:
             "suggested_actions": ["等待后台任务结束后刷新；若长期不恢复，请检查市场与数据健康页的定时任务状态。"],
         }],
         "exposure": {"industry": [], "size": [], "summary": {}, "insights": []},
+        "funds_panel": {"available": False, "funds": [], "alerts": [], "alternatives": []},
         "signal_outcomes": {
             "summary": [],
             "monthly": [],
