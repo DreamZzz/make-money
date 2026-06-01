@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { SnapshotForm } from "../components/SnapshotForm";
-import type { FundEvaluation, FundHoldingAlert, FundNetAction, FundRecommendation, FundsSnapshot } from "../types";
+import type { FundEvaluation, FundHoldingAlert, FundNetAction, FundRecommendation, FundsSnapshot, MonteCarloResult, PortfolioRisk, RebalancePlan } from "../types";
 import { formatCurrency, formatPercent } from "../utils";
 
 const NET_ACTION_META: Record<string, { label: string; color: string; bg: string }> = {
@@ -51,6 +51,9 @@ export function FundsPage({ data }: Props) {
       <SnapshotForm open={formOpen} onClose={() => setFormOpen(false)}
                     onSubmitted={afterSubmit} prefillFundCode={prefillCode} />
       <OverallCard data={data} />
+      {data.rebalance_plan ? <RebalancePlanSection plan={data.rebalance_plan} /> : null}
+      {data.risk_attribution && data.risk_attribution.sleeves.length > 0 ? <RiskAttributionSection risk={data.risk_attribution} /> : null}
+      {data.monte_carlo && data.monte_carlo.n_paths > 0 ? <MonteCarloSection mc={data.monte_carlo} /> : null}
       <HoldingAlertsSection alerts={data.holding_alerts} />
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: 14, marginTop: 14 }}>
         {data.funds.map((f) => <FundCard key={f.fund_code} f={f}
@@ -119,6 +122,218 @@ function OverallCard({ data }: { data: FundsSnapshot }) {
         </ul>
       ) : null}
     </section>
+  );
+}
+
+function RebalancePlanSection({ plan }: { plan: RebalancePlan }) {
+  const actionable = plan.actions.filter(a => a.action !== "HOLD");
+  const held = plan.actions.filter(a => a.action === "HOLD");
+  const noOp = plan.total_actions === 0;
+  return (
+    <section className="panel" style={{ marginTop: 14 }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <h2 style={{ margin: 0 }}>本轮再平衡执行单</h2>
+        <small style={{ color: "var(--muted)" }}>
+          {plan.trigger_type} · {plan.plan_date || "—"}
+        </small>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 6, flexWrap: "wrap" }}>
+        <span className={`action ${noOp ? "action--hold" : "action--add"}`}
+              style={{ fontFamily: "var(--font-display)", padding: "4px 10px", borderRadius: 4,
+                       border: "1px solid var(--line-strong)" }}>
+          {noOp ? "无需操作" : `${plan.total_actions} 笔操作`}
+        </span>
+        <strong style={{ fontFamily: "var(--font-mono)", fontSize: 13 }}>{plan.headline}</strong>
+      </div>
+      {actionable.length > 0 ? (
+        <table className="data-table" style={{ marginTop: 10 }}>
+          <thead>
+            <tr>
+              <th>#</th><th>基金</th><th>动作</th><th>金额</th><th>份额</th>
+              <th>当前 / 目标</th><th>drift</th><th>理由</th>
+            </tr>
+          </thead>
+          <tbody>
+            {actionable.map((a) => <PlanRow key={a.fund_code} a={a} />)}
+          </tbody>
+        </table>
+      ) : null}
+      {held.length > 0 ? (
+        <details style={{ marginTop: 8 }}>
+          <summary style={{ cursor: "pointer", color: "var(--muted)", fontSize: 12 }}>
+            HOLD 行(共 {held.length},含 net_action 否决/drift 不足/min_amount 拦截 / 现金不足等)
+          </summary>
+          <table className="data-table" style={{ marginTop: 8 }}>
+            <thead>
+              <tr><th>基金</th><th>当前</th><th>drift</th><th>原因</th></tr>
+            </thead>
+            <tbody>
+              {held.map((a) => (
+                <tr key={a.fund_code} style={{ opacity: 0.6 }}>
+                  <td><strong>{a.fund_code}</strong> <small>{a.fund_name}</small></td>
+                  <td>{a.current_value !== null ? formatCurrency(a.current_value) : "—"}</td>
+                  <td>{a.drift_pct !== null ? formatPercent(a.drift_pct) : "—"}</td>
+                  <td><small style={{ color: "var(--muted)" }}>{a.reason}</small></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </details>
+      ) : null}
+    </section>
+  );
+}
+
+function PlanRow({ a }: { a: FundsSnapshot["rebalance_plan"] extends infer T ? T extends { actions: (infer A)[] } ? A : never : never }) {
+  const cls = a.action === "BUY" ? "action--add" : a.action === "SELL" ? "action--reduce" : "action--hold";
+  return (
+    <tr>
+      <td>{a.rank}</td>
+      <td><strong>{a.fund_code}</strong><br /><small style={{ color: "var(--muted)" }}>{a.fund_name}</small></td>
+      <td><span className={`action ${cls}`}>{a.action}</span></td>
+      <td><strong>{formatCurrency(a.amount)}</strong></td>
+      <td>{a.estimated_units !== null ? `${a.estimated_units.toFixed(0)} 份` : "—"}</td>
+      <td>
+        {a.current_value !== null ? formatCurrency(a.current_value) : "—"}
+        {" / "}
+        {a.target_value !== null ? formatCurrency(a.target_value) : "—"}
+      </td>
+      <td>{a.drift_pct !== null ? formatPercent(a.drift_pct) : "—"}</td>
+      <td style={{ maxWidth: 320 }}><small style={{ color: "var(--muted)", lineHeight: 1.4 }}>{a.reason}</small></td>
+    </tr>
+  );
+}
+
+function RiskAttributionSection({ risk }: { risk: PortfolioRisk }) {
+  const concentrated = risk.risk_tags.includes("risk_concentration");
+  return (
+    <section className="panel" style={{ marginTop: 14 }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+        <h2 style={{ margin: 0 }}>组合风险归因</h2>
+        <small style={{ color: "var(--muted)" }}>252 日年化估计 · {risk.eval_date || "—"}</small>
+      </div>
+      <div style={{ marginTop: 6 }}>
+        <span className={`action ${concentrated ? "action--reduce" : "action--hold"}`}
+              style={{ fontFamily: "var(--font-display)", padding: "4px 10px", borderRadius: 4,
+                       border: "1px solid var(--line-strong)" }}>
+          {concentrated ? "风险集中" : "风险分散"}
+        </span>
+        <strong style={{ marginLeft: 10, fontFamily: "var(--font-mono)", fontSize: 13 }}>{risk.headline}</strong>
+      </div>
+      <table className="data-table" style={{ marginTop: 10 }}>
+        <thead>
+          <tr>
+            <th>基金</th><th>市值权重</th><th>自身年化波动</th><th>风险贡献</th>
+            <th>风险/权重</th>
+          </tr>
+        </thead>
+        <tbody>
+          {risk.sleeves.map((s) => <RiskRow key={s.fund_code} s={s} />)}
+        </tbody>
+      </table>
+      {risk.sleeve_codes.length >= 2 ? (
+        <details style={{ marginTop: 10 }}>
+          <summary style={{ cursor: "pointer", color: "var(--muted)", fontSize: 12 }}>
+            相关系数矩阵({risk.sleeve_codes.length} × {risk.sleeve_codes.length})
+          </summary>
+          <table className="data-table" style={{ marginTop: 6, fontFamily: "var(--font-mono)", fontSize: 11 }}>
+            <thead>
+              <tr><th></th>{risk.sleeve_codes.map((c) => <th key={c}>{c}</th>)}</tr>
+            </thead>
+            <tbody>
+              {risk.correlation_matrix.map((row, i) => (
+                <tr key={i}>
+                  <td><strong>{risk.sleeve_codes[i]}</strong></td>
+                  {row.map((v, j) => (
+                    <td key={j} style={{ color: v >= 0.7 ? "var(--negative, #ff6b6b)"
+                                  : v >= 0.3 ? "#fbbf24" : "var(--muted)" }}>
+                      {v.toFixed(2)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </details>
+      ) : null}
+    </section>
+  );
+}
+
+function RiskRow({ s }: { s: { fund_code: string; fund_name: string | null; market_weight: number;
+                              annual_volatility: number | null; risk_contribution_pct: number | null;
+                              risk_to_weight_ratio: number | null } }) {
+  const ratio = s.risk_to_weight_ratio || 0;
+  const ratioCls = ratio > 1.3 ? "action--reduce" : ratio < 0.7 ? "action--add" : "action--hold";
+  return (
+    <tr>
+      <td><strong>{s.fund_code}</strong> <small style={{ color: "var(--muted)" }}>{s.fund_name}</small></td>
+      <td>{formatPercent(s.market_weight)}</td>
+      <td>{s.annual_volatility !== null ? formatPercent(s.annual_volatility) : "—"}</td>
+      <td><strong>{s.risk_contribution_pct !== null ? formatPercent(s.risk_contribution_pct) : "—"}</strong></td>
+      <td><span className={`action ${ratioCls}`}>{ratio ? ratio.toFixed(2) : "—"}</span></td>
+    </tr>
+  );
+}
+
+function MonteCarloSection({ mc }: { mc: MonteCarloResult }) {
+  const tags = mc.risk_tags;
+  const dangerous = tags.includes("high_tail_risk") || tags.includes("deep_drawdown_risk");
+  const r = mc.return_percentiles;
+  const d = mc.drawdown_percentiles;
+  return (
+    <section className="panel" style={{ marginTop: 14 }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+        <h2 style={{ margin: 0 }}>未来 {mc.horizon_days} 日蒙特卡洛区间</h2>
+        <small style={{ color: "var(--muted)" }}>
+          {mc.n_paths.toLocaleString()} 路径 · block_size={mc.block_size} · 历史 {mc.history_days_used} 天
+        </small>
+      </div>
+      <div style={{ marginTop: 6 }}>
+        <span className={`action ${dangerous ? "action--reduce" : "action--hold"}`}
+              style={{ fontFamily: "var(--font-display)", padding: "4px 10px", borderRadius: 4,
+                       border: "1px solid var(--line-strong)" }}>
+          {dangerous ? "尾部风险高" : "区间合理"}
+        </span>
+        <strong style={{ marginLeft: 10, fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.5 }}>{mc.headline}</strong>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
+        <PercentileGrid title="终值收益率" data={r} positive />
+        <PercentileGrid title="路径最大回撤" data={d} positive={false} />
+      </div>
+      <div style={{ display: "flex", gap: 24, marginTop: 10, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--muted)" }}>
+        <span>期望收益 <strong style={{ color: "var(--ink)" }}>{(mc.expected_return * 100).toFixed(1)}%</strong></span>
+        <span>对数波动率 <strong style={{ color: "var(--ink)" }}>{(mc.expected_volatility * 100).toFixed(1)}%</strong></span>
+        <span>亏损概率 <strong style={{ color: mc.prob_loss > 0.3 ? "var(--negative, #ff6b6b)" : "var(--ink)" }}>{(mc.prob_loss * 100).toFixed(0)}%</strong></span>
+        <span>亏 &gt;10% 概率 <strong style={{ color: mc.prob_loss_10pct > 0.2 ? "var(--negative, #ff6b6b)" : "var(--ink)" }}>{(mc.prob_loss_10pct * 100).toFixed(0)}%</strong></span>
+      </div>
+    </section>
+  );
+}
+
+function PercentileGrid({ title, data, positive }: { title: string; data: Record<string, number>; positive: boolean }) {
+  const order = ["p5", "p25", "p50", "p75", "p95"];
+  return (
+    <div style={{ padding: 10, border: "1px solid var(--line)", borderRadius: 6 }}>
+      <small style={{ color: "var(--muted)", fontFamily: "var(--font-mono)" }}>{title}</small>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 6, marginTop: 6 }}>
+        {order.map((k) => {
+          const v = data[k];
+          const color = v === undefined ? "var(--muted)"
+            : positive
+              ? v >= 0 ? "var(--positive, #4ade80)" : "var(--negative, #ff6b6b)"
+              : v <= -0.20 ? "var(--negative, #ff6b6b)" : v <= -0.10 ? "#fbbf24" : "var(--ink)";
+          return (
+            <div key={k} style={{ textAlign: "center" }}>
+              <div style={{ color: "var(--muted)", fontSize: 10 }}>{k.toUpperCase()}</div>
+              <div style={{ fontFamily: "var(--font-mono)", color, fontSize: 14 }}>
+                {v === undefined ? "—" : `${(v * 100 >= 0 ? "+" : "")}${(v * 100).toFixed(1)}%`}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 

@@ -469,6 +469,57 @@ export type FundsRecommendations = {
   overall_advice: string;
 };
 
+export type RebalanceActionRow = {
+  fund_code: string;
+  fund_name: string | null;
+  action: "BUY" | "SELL" | "HOLD" | string;
+  amount: number;
+  estimated_units: number | null;
+  nav: number | null;
+  current_value: number | null;
+  target_value: number | null;
+  drift_pct: number | null;
+  priority: number;
+  reason: string;
+  rank: number;
+  constraint_tags: string[];
+};
+
+export type RebalancePlan = {
+  plan_id: string | null;
+  plan_date: string | null;
+  trigger_type: string;
+  trigger_reason: string;
+  account_total: number | null;
+  equity_exposure: number | null;
+  actions: RebalanceActionRow[];
+  headline: string;
+  total_actions: number;
+  total_buy_amount: number;
+  total_sell_amount: number;
+};
+
+export type SleeveRisk = {
+  fund_code: string;
+  fund_name: string | null;
+  market_weight: number;
+  annual_volatility: number | null;
+  risk_contribution_abs: number | null;
+  risk_contribution_pct: number | null;
+  risk_to_weight_ratio: number | null;
+  days_used: number;
+};
+
+export type PortfolioRisk = {
+  eval_date: string | null;
+  portfolio_annual_volatility: number | null;
+  sleeves: SleeveRisk[];
+  correlation_matrix: number[][];
+  sleeve_codes: string[];
+  headline: string;
+  risk_tags: string[];
+};
+
 export type FundsSnapshot = {
   eval_date: string | null;
   account_total_value: number | null;
@@ -480,7 +531,26 @@ export type FundsSnapshot = {
   funds: FundEvaluation[];
   holding_alerts: FundHoldingAlert[];
   recommendations: FundsRecommendations;
+  rebalance_plan?: RebalancePlan;
+  risk_attribution?: PortfolioRisk;
+  monte_carlo?: MonteCarloResult;
   error?: string;
+};
+
+export type MonteCarloResult = {
+  eval_date: string | null;
+  horizon_days: number;
+  n_paths: number;
+  history_days_used: number;
+  block_size: number;
+  return_percentiles: Record<string, number>;
+  drawdown_percentiles: Record<string, number>;
+  expected_return: number;
+  expected_volatility: number;
+  prob_loss: number;
+  prob_loss_10pct: number;
+  headline: string;
+  risk_tags: string[];
 };
 
 export type MarketSnapshot = {

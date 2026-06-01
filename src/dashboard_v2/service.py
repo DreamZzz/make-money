@@ -243,13 +243,16 @@ class DashboardV2Service:
             }
 
     def build_funds_snapshot(self) -> dict[str, Any]:
-        """D2 + F3 + F4 + F4-v3: 基金评估 + 严格告警 + 净行动合成 + 候选推荐。"""
+        """D2 + F3 + F4 + F4-v3 + G5: 评估 + 告警 + 合成 + 推荐 + 再平衡执行单。"""
         from dataclasses import asdict
 
         from src.funds.evaluation import evaluate_funds
         from src.funds.monitoring import monitor_holdings
+        from src.funds.monte_carlo import simulate_portfolio
         from src.funds.net_action import derive_net_action
+        from src.funds.rebalance import build_rebalance_plan
         from src.funds.recommendations import build_recommendations
+        from src.funds.risk_attribution import attribute_portfolio_risk
 
         with self._managed_connection(read_only=True) as conn:
             evals = evaluate_funds(conn)
@@ -265,6 +268,12 @@ class DashboardV2Service:
                 fund_alerts = [a for a in holding_alerts if a.get("fund_code") == r["fund_code"]]
                 r["net_action"] = asdict(derive_net_action(fund_alerts))
             recommendations = asdict(build_recommendations(conn))
+            rebalance_plan = asdict(build_rebalance_plan(conn))
+            # date 对象 JSON 化
+            rebalance_plan["plan_date"] = rebalance_plan["plan_date"].isoformat() \
+                if rebalance_plan.get("plan_date") else None
+            risk_attribution = asdict(attribute_portfolio_risk(conn))
+            monte_carlo = asdict(simulate_portfolio(conn))
             return {
                 "eval_date": rows[0]["eval_date"].isoformat() if rows and rows[0].get("eval_date") else None,
                 "account_total_value": account_total,
@@ -276,6 +285,9 @@ class DashboardV2Service:
                 "funds": rows,
                 "holding_alerts": holding_alerts,
                 "recommendations": recommendations,
+                "rebalance_plan": rebalance_plan,
+                "risk_attribution": risk_attribution,
+                "monte_carlo": monte_carlo,
             }
 
     def build_tournament_snapshot(self) -> dict[str, Any]:

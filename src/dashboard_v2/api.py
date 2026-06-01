@@ -260,6 +260,26 @@ def _fallback_funds(exc: Exception) -> dict[str, Any]:
             "holding_categories": [], "total_candidates": 0,
             "overall_advice": msg,
         },
+        "rebalance_plan": {
+            "plan_id": None, "plan_date": None,
+            "trigger_type": "monthly", "trigger_reason": msg,
+            "account_total": None, "equity_exposure": None,
+            "actions": [], "headline": msg,
+            "total_actions": 0, "total_buy_amount": 0.0, "total_sell_amount": 0.0,
+        },
+        "risk_attribution": {
+            "eval_date": None, "portfolio_annual_volatility": None,
+            "sleeves": [], "correlation_matrix": [], "sleeve_codes": [],
+            "headline": msg, "risk_tags": [],
+        },
+        "monte_carlo": {
+            "eval_date": None, "horizon_days": 252, "n_paths": 0,
+            "history_days_used": 0, "block_size": 5,
+            "return_percentiles": {}, "drawdown_percentiles": {},
+            "expected_return": 0.0, "expected_volatility": 0.0,
+            "prob_loss": 0.0, "prob_loss_10pct": 0.0,
+            "headline": msg, "risk_tags": [],
+        },
         "error": msg,
     }
 

@@ -1069,3 +1069,38 @@ CREATE TABLE IF NOT EXISTS fund_holding_alerts (
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (eval_date, fund_code, alert_type)
 );
+
+-- ============================================
+-- 25. fund_rebalance_plan: G5 月度/触发式再平衡执行单
+-- ============================================
+CREATE TABLE IF NOT EXISTS fund_rebalance_plan (
+    plan_id           VARCHAR PRIMARY KEY,
+    plan_date         DATE NOT NULL,
+    trigger_type      VARCHAR,      -- monthly / drift_threshold / manual
+    trigger_reason    VARCHAR,
+    account_total     DOUBLE,
+    equity_exposure   DOUBLE,
+    headline          VARCHAR,
+    total_actions     INTEGER,
+    total_buy_amount  DOUBLE,
+    total_sell_amount DOUBLE,
+    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS fund_rebalance_action (
+    plan_id           VARCHAR NOT NULL,
+    fund_code         VARCHAR NOT NULL,
+    fund_name         VARCHAR,
+    action            VARCHAR NOT NULL,  -- BUY / SELL / HOLD
+    amount            DOUBLE,            -- 元,正数
+    estimated_units   DOUBLE,            -- 大约份额
+    nav               DOUBLE,
+    current_value     DOUBLE,
+    target_value      DOUBLE,
+    drift_pct         DOUBLE,
+    priority          INTEGER,
+    reason            VARCHAR,
+    rank              INTEGER,
+    constraint_tags   VARCHAR[],         -- min_amount / no_action_needed 等
+    PRIMARY KEY (plan_id, fund_code)
+);
