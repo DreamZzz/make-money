@@ -1,11 +1,22 @@
 import { useState } from "react";
 
+import { SnapshotForm } from "../components/SnapshotForm";
 import type { FundEvaluation, FundHoldingAlert, FundRecommendation, FundsSnapshot } from "../types";
 import { formatCurrency, formatPercent } from "../utils";
 
 type Props = { data: FundsSnapshot };
 
 export function FundsPage({ data }: Props) {
+  const [formOpen, setFormOpen] = useState(false);
+  const [prefillCode, setPrefillCode] = useState<string | undefined>();
+  function openForm(code?: string) {
+    setPrefillCode(code);
+    setFormOpen(true);
+  }
+  function afterSubmit() {
+    // 刷新页面数据 — 简单粗暴重载 /funds 接口
+    window.location.reload();
+  }
   return (
     <section className="page-main">
       <div className="page-title-row">
@@ -16,12 +27,24 @@ export function FundsPage({ data }: Props) {
             给出加/减/暂停建议。决策辅助,不替代你的判断。
           </p>
         </div>
-        {data.eval_date ? <span className="funding-gap"><small>as of</small><strong>{data.eval_date}</strong></span> : null}
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <button type="button" onClick={() => openForm()}
+                  style={{ padding: "6px 14px", fontSize: 13, fontFamily: "var(--font-mono)",
+                           background: "var(--accent, #60a5fa)", color: "#000",
+                           border: "none", borderRadius: 4, cursor: "pointer", fontWeight: 600 }}>
+            + 录入快照
+          </button>
+          {data.eval_date ? <span className="funding-gap"><small>as of</small><strong>{data.eval_date}</strong></span> : null}
+        </div>
       </div>
+      <SnapshotForm open={formOpen} onClose={() => setFormOpen(false)}
+                    onSubmitted={afterSubmit} prefillFundCode={prefillCode} />
       <OverallCard data={data} />
       <HoldingAlertsSection alerts={data.holding_alerts} />
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: 14, marginTop: 14 }}>
-        {data.funds.map((f) => <FundCard key={f.fund_code} f={f} alerts={data.holding_alerts.filter(a => a.fund_code === f.fund_code)} />)}
+        {data.funds.map((f) => <FundCard key={f.fund_code} f={f}
+          alerts={data.holding_alerts.filter(a => a.fund_code === f.fund_code)}
+          onUpdateSnapshot={() => openForm(f.fund_code)} />)}
       </div>
       <RecommendationsSection rec={data.recommendations} />
       <section className="panel" style={{ marginTop: 14, overflowX: "auto" }}>
@@ -219,7 +242,7 @@ function RecCard({ r, kind }: { r: FundRecommendation; kind: "in_window" | "watc
   );
 }
 
-function FundCard({ f, alerts = [] }: { f: FundEvaluation; alerts?: FundHoldingAlert[] }) {
+function FundCard({ f, alerts = [], onUpdateSnapshot }: { f: FundEvaluation; alerts?: FundHoldingAlert[]; onUpdateSnapshot?: () => void }) {
   const stale = f.snapshot_stale_days !== null && f.snapshot_stale_days > 3;
   const isExited = f.intent === "exited";
   const isBalanced = f.category === "balanced";
@@ -323,6 +346,14 @@ function FundCard({ f, alerts = [] }: { f: FundEvaluation; alerts?: FundHoldingA
         <small style={{ display: "block", marginTop: 8, color: "var(--muted)", fontSize: 11 }}>
           源: {f.snapshot_source}{f.snapshot_captured_at ? ` · ${f.snapshot_captured_at}` : ""}
         </small>
+      ) : null}
+      {onUpdateSnapshot ? (
+        <button type="button" onClick={onUpdateSnapshot}
+                style={{ marginTop: 10, padding: "4px 10px", fontSize: 11, fontFamily: "var(--font-mono)",
+                         background: "transparent", border: "1px dashed var(--line-strong)",
+                         borderRadius: 3, color: "var(--accent, #60a5fa)", cursor: "pointer" }}>
+          + 录入今日快照
+        </button>
       ) : null}
     </section>
   );
