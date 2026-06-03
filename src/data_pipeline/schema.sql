@@ -1104,3 +1104,52 @@ CREATE TABLE IF NOT EXISTS fund_rebalance_action (
     constraint_tags   VARCHAR[],         -- min_amount / no_action_needed 等
     PRIMARY KEY (plan_id, fund_code)
 );
+
+-- ============================================
+-- 26. earnings_calendar: R1 财报披露日历(未来 30 天 + 过去 7 天)
+-- ============================================
+CREATE TABLE IF NOT EXISTS earnings_calendar (
+    symbol           VARCHAR NOT NULL,
+    report_period    DATE NOT NULL,             -- YYYY-03/06/09/12-末日
+    disclosure_date  DATE NOT NULL,
+    disclosure_type  VARCHAR NOT NULL,           -- forecast / express / annual / quarterly
+    status           VARCHAR DEFAULT 'EXPECTED', -- EXPECTED / DISCLOSED
+    universe         VARCHAR,                    -- CSI300 / CSI1000 / HSTECH
+    source           VARCHAR DEFAULT 'akshare',
+    updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (symbol, report_period, disclosure_type)
+);
+
+-- ============================================
+-- 27. earnings_alerts: R1 业绩预告/快报/主财报 事件流 + 派生分析
+-- ============================================
+CREATE TABLE IF NOT EXISTS earnings_alerts (
+    alert_id          VARCHAR NOT NULL,
+    symbol            VARCHAR NOT NULL,
+    report_period     DATE NOT NULL,
+    event_type        VARCHAR NOT NULL,          -- FORECAST/EXPRESS/ANNUAL/QUARTERLY
+    event_date        DATE NOT NULL,
+    forecast_text     VARCHAR,                   -- 预增 / 预减 / 扭亏 / 续亏
+    np_change_min     DOUBLE,                    -- 净利同比下限 %
+    np_change_max     DOUBLE,
+    np_change_mid     DOUBLE,
+    revenue_yoy       DOUBLE,
+    revenue_qoq       DOUBLE,
+    np_yoy            DOUBLE,
+    np_qoq            DOUBLE,
+    surprise_pct      DOUBLE,                    -- 实际 vs 预告中值
+    industry_rank_pct DOUBLE,                    -- 同行业内净利同比分位
+    cf_to_np_ratio    DOUBLE,                    -- 经营现金流 / 净利润 质量比
+    sentiment         VARCHAR NOT NULL,          -- POSITIVE / NEUTRAL / NEGATIVE
+    impact_score      DOUBLE,                    -- -1..+1 综合冲击分
+    headline          VARCHAR,
+    risk_tags         VARCHAR[],
+    post_event_return_1d  DOUBLE,
+    post_event_return_5d  DOUBLE,
+    source            VARCHAR DEFAULT 'akshare',
+    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (alert_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_earnings_alerts_symbol_date
+    ON earnings_alerts (symbol, event_date);

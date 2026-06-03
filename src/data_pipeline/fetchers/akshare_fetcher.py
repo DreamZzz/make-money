@@ -510,3 +510,132 @@ def fetch_cn_industry() -> pd.DataFrame:
     except Exception as e:
         logger.error(f"Fetch CN industry failed: {e}")
         return pd.DataFrame()
+
+
+# ============================================
+# R1: 财报事件 fetcher (业绩预告 + 业绩快报 + 披露日历)
+# ============================================
+
+def fetch_cn_earnings_forecast(date_yyyymmdd: str) -> pd.DataFrame:
+    """ak.stock_yjyg_em(date) → A 股业绩预告(报告期 date,如 20250630)。
+
+    返回规整后的 DataFrame: symbol/report_period/forecast_text/np_change_min/
+    np_change_max/event_date/source/...
+    """
+    import akshare as ak
+    try:
+        raw = ak.stock_yjyg_em(date=date_yyyymmdd)
+    except Exception as e:
+        logger.warning(f"fetch_cn_earnings_forecast({date_yyyymmdd}) failed: {e}")
+        return pd.DataFrame()
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    out = pd.DataFrame()
+    # 列名兼容多种(akshare 时常调整)
+    sym_col = next((c for c in raw.columns if c in {"股票代码", "代码", "symbol"}), None)
+    text_col = next((c for c in raw.columns if c in {"预测类型", "业绩变动类型", "预告类型", "forecast_text"}), None)
+    npmin_col = next((c for c in raw.columns if c in {"预测指标净利润同比增长下限(%)", "净利润同比增长下限(%)", "预测净利润同比增长下限"}), None)
+    npmax_col = next((c for c in raw.columns if c in {"预测指标净利润同比增长上限(%)", "净利润同比增长上限(%)", "预测净利润同比增长上限"}), None)
+    ndate_col = next((c for c in raw.columns if c in {"公告日期", "公告日"}), None)
+    if not sym_col:
+        return pd.DataFrame()
+    out["symbol"] = raw[sym_col].astype(str)
+    out["report_period"] = pd.to_datetime(date_yyyymmdd, format="%Y%m%d").date()
+    if text_col:
+        out["forecast_text"] = raw[text_col].astype(str)
+    out["np_change_min"] = pd.to_numeric(raw[npmin_col], errors="coerce") if npmin_col else None
+    out["np_change_max"] = pd.to_numeric(raw[npmax_col], errors="coerce") if npmax_col else None
+    if ndate_col:
+        out["event_date"] = pd.to_datetime(raw[ndate_col], errors="coerce").dt.date
+    else:
+        out["event_date"] = pd.Timestamp.now().date()
+    out["source"] = "akshare_yjyg"
+    return out.dropna(subset=["symbol", "event_date"])
+
+
+def fetch_cn_earnings_express(date_yyyymmdd: str) -> pd.DataFrame:
+    """ak.stock_yjbb_em(date) → A 股业绩快报。"""
+    import akshare as ak
+    try:
+        raw = ak.stock_yjbb_em(date=date_yyyymmdd)
+    except Exception as e:
+        logger.warning(f"fetch_cn_earnings_express({date_yyyymmdd}) failed: {e}")
+        return pd.DataFrame()
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    out = pd.DataFrame()
+    sym_col = next((c for c in raw.columns if c in {"股票代码", "代码", "symbol"}), None)
+    rev_col = next((c for c in raw.columns if c in {"营业收入-营业收入", "营业总收入", "营业收入"}), None)
+    np_col = next((c for c in raw.columns if c in {"净利润-净利润", "归母净利润", "净利润"}), None)
+    rev_yoy_col = next((c for c in raw.columns if c in {"营业收入-同比增长", "营业总收入同比增长", "营业收入同比增长(%)"}), None)
+    np_yoy_col = next((c for c in raw.columns if c in {"净利润-同比增长", "归母净利润同比增长", "净利润同比增长(%)"}), None)
+    ndate_col = next((c for c in raw.columns if c in {"公告日期", "公告日", "最新公告日期"}), None)
+    if not sym_col:
+        return pd.DataFrame()
+    out["symbol"] = raw[sym_col].astype(str)
+    out["report_period"] = pd.to_datetime(date_yyyymmdd, format="%Y%m%d").date()
+    out["revenue"] = pd.to_numeric(raw[rev_col], errors="coerce") if rev_col else None
+    out["net_profit"] = pd.to_numeric(raw[np_col], errors="coerce") if np_col else None
+    out["revenue_yoy"] = pd.to_numeric(raw[rev_yoy_col], errors="coerce") if rev_yoy_col else None
+    out["np_yoy"] = pd.to_numeric(raw[np_yoy_col], errors="coerce") if np_yoy_col else None
+    if ndate_col:
+        out["event_date"] = pd.to_datetime(raw[ndate_col], errors="coerce").dt.date
+    else:
+        out["event_date"] = pd.Timestamp.now().date()
+    out["source"] = "akshare_yjbb"
+    return out.dropna(subset=["symbol", "event_date"])
+
+
+def fetch_cn_earnings_disclosure_calendar(period: str, market: str = "沪深京") -> pd.DataFrame:
+    """ak.stock_report_disclosure(market, period) → 财报披露日历。
+
+    period 是 "2025三季报"/"2025年报"/"2026一季报" 等中文报告期。
+    """
+    import akshare as ak
+    try:
+        raw = ak.stock_report_disclosure(market=market, period=period)
+    except Exception as e:
+        logger.warning(f"fetch_cn_earnings_disclosure_calendar({period}) failed: {e}")
+        return pd.DataFrame()
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    out = pd.DataFrame()
+    sym_col = next((c for c in raw.columns if c in {"代码", "股票代码", "symbol"}), None)
+    plan_col = next((c for c in raw.columns if c in {"最新披露日期", "预约披露日期", "披露日期", "实际披露日期"}), None)
+    if not sym_col or not plan_col:
+        return pd.DataFrame()
+    out["symbol"] = raw[sym_col].astype(str)
+    out["disclosure_date"] = pd.to_datetime(raw[plan_col], errors="coerce").dt.date
+    out["disclosure_type"] = _disclosure_type_from_period(period)
+    out["report_period"] = _report_period_from_period(period)
+    out["source"] = "akshare_disclosure"
+    return out.dropna(subset=["symbol", "disclosure_date"])
+
+
+def _disclosure_type_from_period(period: str) -> str:
+    if "一季" in period:
+        return "quarterly"
+    if "三季" in period:
+        return "quarterly"
+    if "中" in period or "半年" in period:
+        return "semi_annual"
+    if "年报" in period:
+        return "annual"
+    return "other"
+
+
+def _report_period_from_period(period: str):
+    import re
+    m = re.match(r"(\d{4})", period)
+    if not m:
+        return None
+    year = int(m.group(1))
+    if "一季" in period:
+        return pd.Timestamp(year=year, month=3, day=31).date()
+    if "中" in period or "半年" in period:
+        return pd.Timestamp(year=year, month=6, day=30).date()
+    if "三季" in period:
+        return pd.Timestamp(year=year, month=9, day=30).date()
+    if "年报" in period:
+        return pd.Timestamp(year=year, month=12, day=31).date()
+    return None
