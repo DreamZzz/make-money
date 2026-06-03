@@ -92,6 +92,13 @@ portfolio:
     max_rule_buy_rank: 500
     min_rule_buy_confidence: 0.45
     block_when_missing: true
+    # R3: 财报 sentiment 注入 priority_score 调整 + decision_reason 可审计
+    # 首版只调分不拒(buy_negative_block=false),3-6 月后看效果再切 true
+    earnings_modifier:
+      enabled: true
+      buy_negative_block: false
+      weight: 0.15
+      lookback_days: 30
   regime_policy:
     enabled: false
     benchmark_index: "000300"

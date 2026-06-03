@@ -58,6 +58,21 @@ def arbitrate_pending_signals(
         signals, baseline_predictions, config, baselines,
         regime_policy=regime_policy, current_holdings=current_holdings,
     )
+    # R3: earnings context modifier(可关）
+    earnings_cfg = arbiter_cfg.get("earnings_modifier", {})
+    if bool(earnings_cfg.get("enabled", False)):
+        try:
+            from src.financials.arbiter_modifier import (
+                apply_earnings_modifier,
+                load_recent_earnings_context,
+            )
+            ctx = load_recent_earnings_context(
+                conn, as_of=as_of,
+                lookback_days=int(earnings_cfg.get("lookback_days", 30)),
+            )
+            decisions = apply_earnings_modifier(decisions, ctx, earnings_cfg)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"earnings modifier 异常,跳过: {exc}")
     _persist_decisions(conn, decisions)
     _apply_rejections_to_signals(conn, decisions)
     accepted = int((decisions["decision"] == ACCEPTED).sum())
