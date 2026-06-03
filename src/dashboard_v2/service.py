@@ -290,6 +290,11 @@ class DashboardV2Service:
                 "monte_carlo": monte_carlo,
             }
 
+    def build_reports_snapshot(self) -> dict[str, Any]:
+        """R4: 财报分析面板 — 日历 + 今日披露 + sentiment 分布 + 持仓/观察名单告警。"""
+        with self._managed_connection(read_only=True) as conn:
+            return _build_reports_snapshot_impl(conn)
+
     def build_tournament_snapshot(self) -> dict[str, Any]:
         from src.accounts.leaderboard import build_leaderboard
         from src.accounts.promotion import evaluate_tournament
@@ -2832,3 +2837,91 @@ def _loads_json(value: Any) -> dict[str, Any]:
         return parsed if isinstance(parsed, dict) else {"value": parsed}
     except Exception:
         return {}
+
+
+def _build_reports_snapshot_impl(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+    """R4: 财报分析 snapshot 实际构建。"""
+    # 1. coverage
+    if not _table_exists(conn, "earnings_alerts"):
+        return _empty_reports_snapshot("earnings_alerts 表不存在")
+    from src.financials.calendar import load_upcoming_calendar
+    from src.financials.universe import universe_size_breakdown
+
+    breakdown = universe_size_breakdown(conn) if _table_exists(conn, "index_member_history") else {"total": 0}
+
+    upcoming_rows = []
+    today_disclosed_rows = []
+    sentiment_dist = {"POSITIVE": 0, "NEUTRAL": 0, "NEGATIVE": 0}
+    top_surprises = []
+    watchlist_alerts = []
+
+    # 2. 未来 7 日日历
+    if _table_exists(conn, "earnings_calendar"):
+        upcoming_rows = load_upcoming_calendar(conn, days_ahead=7)
+
+    # 3. 今日披露(event_date = today)
+    today_rows = conn.execute(
+        """
+        SELECT ea.symbol, COALESCE(si.name, ea.symbol) AS name,
+               ea.event_type, ea.sentiment, ea.impact_score,
+               ea.np_yoy, ea.surprise_pct, ea.cf_to_np_ratio, ea.headline
+        FROM earnings_alerts ea
+        LEFT JOIN stock_info si ON si.symbol = ea.symbol
+        WHERE ea.event_date = CURRENT_DATE
+        ORDER BY ABS(ea.impact_score) DESC
+        LIMIT 50
+        """
+    ).fetchdf()
+    today_disclosed_rows = today_rows.to_dict(orient="records") if not today_rows.empty else []
+
+    # 4. sentiment 分布(近 30 天)
+    sent_rows = conn.execute(
+        """
+        SELECT sentiment, COUNT(*) AS n
+        FROM earnings_alerts
+        WHERE event_date >= CURRENT_DATE - INTERVAL '30 days'
+        GROUP BY sentiment
+        """
+    ).fetchall()
+    for s, n in sent_rows:
+        sentiment_dist[str(s)] = int(n)
+
+    # 5. Top 20 surprises(近 30 天)
+    surprise_rows = conn.execute(
+        """
+        SELECT symbol, surprise_pct, sentiment, event_date, impact_score, headline
+        FROM earnings_alerts
+        WHERE event_date >= CURRENT_DATE - INTERVAL '30 days'
+          AND surprise_pct IS NOT NULL
+        ORDER BY ABS(surprise_pct) DESC
+        LIMIT 20
+        """
+    ).fetchdf()
+    top_surprises = surprise_rows.to_dict(orient="records") if not surprise_rows.empty else []
+
+    return {
+        "as_of_date": _latest_trade_date(conn),
+        "coverage": {
+            "universe_size": breakdown.get("total", 0),
+            "csi_size": breakdown.get("csi300_500", 0),
+            "hstech_size": breakdown.get("hstech", 0),
+        },
+        "upcoming_7d": upcoming_rows,
+        "today_disclosed": today_disclosed_rows,
+        "sentiment_distribution": sentiment_dist,
+        "watchlist_alerts": watchlist_alerts,  # 留给 R10 联动持仓告警
+        "top_surprises": top_surprises,
+    }
+
+
+def _empty_reports_snapshot(reason: str) -> dict[str, Any]:
+    return {
+        "as_of_date": None,
+        "coverage": {"universe_size": 0, "csi_size": 0, "hstech_size": 0},
+        "upcoming_7d": [],
+        "today_disclosed": [],
+        "sentiment_distribution": {"POSITIVE": 0, "NEUTRAL": 0, "NEGATIVE": 0},
+        "watchlist_alerts": [],
+        "top_surprises": [],
+        "error": reason,
+    }

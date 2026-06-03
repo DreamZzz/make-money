@@ -553,6 +553,41 @@ export type MonteCarloResult = {
   risk_tags: string[];
 };
 
+export type ReportsSnapshot = {
+  as_of_date: string | null;
+  coverage: { universe_size: number; csi_size: number; hstech_size: number };
+  upcoming_7d: Array<{
+    symbol: string;
+    name: string;
+    industry: string;
+    disclosure_date: string;
+    disclosure_type: string;
+    universe: string;
+  }>;
+  today_disclosed: Array<{
+    symbol: string;
+    name: string;
+    event_type: string;
+    sentiment: "POSITIVE" | "NEUTRAL" | "NEGATIVE" | string;
+    impact_score: number;
+    np_yoy: number | null;
+    surprise_pct: number | null;
+    cf_to_np_ratio: number | null;
+    headline: string;
+  }>;
+  sentiment_distribution: { POSITIVE: number; NEUTRAL: number; NEGATIVE: number };
+  watchlist_alerts: Array<Record<string, unknown>>;
+  top_surprises: Array<{
+    symbol: string;
+    surprise_pct: number;
+    sentiment: string;
+    event_date: string;
+    impact_score: number;
+    headline: string;
+  }>;
+  error?: string;
+};
+
 export type MarketSnapshot = {
   market_state: {
     trade_date?: string;

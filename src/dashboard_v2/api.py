@@ -62,6 +62,10 @@ def create_app(service: Any | None = None) -> FastAPI:
     def get_funds() -> dict[str, Any]:
         return _call_or_degrade(svc.build_funds_snapshot, _fallback_funds)
 
+    @app.get("/api/v2/reports")
+    def get_reports() -> dict[str, Any]:
+        return _call_or_degrade(svc.build_reports_snapshot, _fallback_reports)
+
     @app.post("/api/v2/jobs/{job_key}/start")
     def start_job(job_key: str) -> dict[str, Any]:
         if hasattr(svc, "reject_job_start"):
@@ -239,6 +243,20 @@ def _fallback_research(exc: Exception) -> dict[str, Any]:
 def _fallback_market(exc: Exception) -> dict[str, Any]:
     return {"market_state": None, "exposure": None, "allocation": [], "history": [],
             "error": _data_unavailable_message(exc)}
+
+
+def _fallback_reports(exc: Exception) -> dict[str, Any]:
+    msg = _data_unavailable_message(exc)
+    return {
+        "as_of_date": None,
+        "coverage": {"universe_size": 0, "csi_size": 0, "hstech_size": 0},
+        "upcoming_7d": [],
+        "today_disclosed": [],
+        "sentiment_distribution": {"POSITIVE": 0, "NEUTRAL": 0, "NEGATIVE": 0},
+        "watchlist_alerts": [],
+        "top_surprises": [],
+        "error": msg,
+    }
 
 
 def _fallback_funds(exc: Exception) -> dict[str, Any]:
