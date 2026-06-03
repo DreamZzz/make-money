@@ -85,6 +85,17 @@ def default_jobs() -> list[JobSpec]:
             log_path=OUTPUT_DIR / "cron.log",
             timeout_seconds=2400,
         ),
+        # R5: 财报早盘轻拉(业绩预告/快报 + 日历刷新);非阻塞
+        JobSpec(
+            job_key="earnings_morning_fetch",
+            label="财报早盘轻拉",
+            scheduled_time=time(7, 30),
+            window_minutes=90,
+            weekdays=(0, 1, 2, 3, 4),
+            command=(PYTHON, "-m", "src.financials.daily", "morning"),
+            log_path=OUTPUT_DIR / "earnings_morning.log",
+            timeout_seconds=600,
+        ),
     ]
 
 

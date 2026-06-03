@@ -120,6 +120,9 @@ echo "5/14 更新指数基金数据..."
 "$PYTHON" -m src.index_funds.pipeline update
 
 # 6. 生成指数基金信号
+echo "6b/18 财报闭环（R5: post_event_return + value_quality 信号; 非阻塞）..."
+"$PYTHON" -m src.financials.daily close || true
+
 echo "6/14 生成指数基金信号..."
 "$PYTHON" -m src.index_funds.signals generate
 

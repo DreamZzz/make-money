@@ -2879,7 +2879,7 @@ def _build_reports_snapshot_impl(conn: duckdb.DuckDBPyConnection) -> dict[str, A
         """
         SELECT sentiment, COUNT(*) AS n
         FROM earnings_alerts
-        WHERE event_date >= CURRENT_DATE - INTERVAL '30 days'
+        WHERE event_date >= CURRENT_DATE - INTERVAL '90 days'
         GROUP BY sentiment
         """
     ).fetchall()
@@ -2891,7 +2891,7 @@ def _build_reports_snapshot_impl(conn: duckdb.DuckDBPyConnection) -> dict[str, A
         """
         SELECT symbol, surprise_pct, sentiment, event_date, impact_score, headline
         FROM earnings_alerts
-        WHERE event_date >= CURRENT_DATE - INTERVAL '30 days'
+        WHERE event_date >= CURRENT_DATE - INTERVAL '90 days'
           AND surprise_pct IS NOT NULL
         ORDER BY ABS(surprise_pct) DESC
         LIMIT 20
