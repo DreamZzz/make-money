@@ -98,7 +98,7 @@ portfolio:
       enabled: true
       buy_negative_block: false
       weight: 0.15
-      lookback_days: 30
+      lookback_days: 60   # 一个季报披露周期约 60 天,跨季可调更长
   regime_policy:
     enabled: false
     benchmark_index: "000300"
